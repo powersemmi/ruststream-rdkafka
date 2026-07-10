@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/ruststream-rdkafka"]
+
+[workspace.package]
+version = "0.5.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/powersemmi/ruststream-rdkafka"
+authors = ["RustStream contributors"]
+
+[workspace.dependencies]
+ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
+
+ruststream = { version = ">=0.5.0, <0.6.0", default-features = false }
+
+# The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
+rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
+bytes = "1"
+futures = "0.3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unreachable_pub = "deny"
+missing_docs = "deny"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+perf = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_const_for_fn = "allow"
+multiple_crate_versions = "allow"
+redundant_pub_crate = "allow"

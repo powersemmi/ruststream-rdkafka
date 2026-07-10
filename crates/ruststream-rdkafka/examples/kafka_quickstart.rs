@@ -1,0 +1,51 @@
+//! A minimal Kafka service: one `#[subscriber]` handler on one topic.
+//!
+//! `KafkaBroker::new` is synchronous and does no I/O, so the whole service fits the
+//! `#[ruststream::app]` macro. The runtime connects the broker once at startup
+//! (`Broker::connect`) before opening subscriptions, and the generated binary understands
+//! `run` and `asyncapi gen`.
+//!
+//! The bare-string subscriber form consumes the topic named `orders` through the broker's
+//! default consumer group (Kafka cannot subscribe without a group). Start a broker first:
+//!
+//! ```text
+//! just brokers-up
+//! cargo run --example kafka_quickstart -- run
+//! ```
+//!
+//! Publish an order from another terminal:
+//!
+//! ```text
+//! docker exec -i ruststream-kafka /opt/kafka/bin/kafka-console-producer.sh \
+//!     --bootstrap-server localhost:9092 --topic orders <<< '{"id":1}'
+//! ```
+
+// --8<-- [start:handler]
+use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
+use ruststream::subscriber;
+use ruststream_rdkafka::KafkaBroker;
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct Order {
+    id: u64,
+}
+
+#[subscriber("orders")]
+async fn handle(order: &Order) -> HandlerResult {
+    println!("got order {}", order.id);
+    HandlerResult::Ack
+}
+// --8<-- [end:handler]
+
+// --8<-- [start:app]
+#[ruststream::app]
+fn app() -> impl App {
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+        KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+        |b| {
+            b.include(handle);
+        },
+    )
+}
+// --8<-- [end:app]

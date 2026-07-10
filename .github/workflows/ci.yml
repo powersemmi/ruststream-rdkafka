@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "0.5.*"]
+  pull_request:
+    branches: [main, "0.5.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, msrv]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The MSRV leg follows `rust-version` in Cargo.toml, so an MSRV bump is a one-line change.
+      - name: Resolve toolchain
+        id: toolchain
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: |
+          if [ "$TOOLCHAIN" = "msrv" ]; then
+            TOOLCHAIN="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)"
+            test -n "$TOOLCHAIN"
+          fi
+          echo "toolchain=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.toolchain }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        if: matrix.toolchain == 'stable'
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: cargo check (no default features)
+        run: cargo check --workspace --no-default-features
+
+      - name: cargo check (all features)
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: cargo test (in-process only, no live broker)
+        run: cargo test --workspace --all-features
+
+  broker-integration:
+    name: "Broker integration (Kafka)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # `--wait` blocks until the healthcheck reports the node ready.
+      - name: Start Kafka
+        run: docker compose -f docker-compose.test.yml up -d --wait
+
+      - name: Run Kafka integration tests
+        env:
+          KAFKA_TEST_URL: 127.0.0.1:9092
+        run: cargo test -p ruststream-rdkafka --test integration_rdkafka -- --test-threads=1
+
+      # run_suite in-process plus lifecycle and the commit-mode semantics against the live node.
+      - name: Run Kafka conformance suite
+        env:
+          KAFKA_TEST_URL: 127.0.0.1:9092
+        run: cargo test -p ruststream-rdkafka --features testing --test conformance_rdkafka -- --test-threads=1
+
+      - name: Stop Kafka
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # Dependency-graph gate: RustSec advisories, license allow-list, duplicate
+      # versions, and registry sources, per the checked-in deny.toml. Not path-
+      # gated: advisories arrive over time, not only with manifest changes.
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: codespell
+        run: uvx codespell
+
+      - name: zizmor
+        run: uvx zizmor .github/workflows

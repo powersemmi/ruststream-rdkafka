@@ -1,0 +1,39 @@
+# Test broker for the integration and conformance suites.
+#
+#   docker compose -f docker-compose.test.yml up -d --wait
+#   KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features -- --test-threads=1
+#
+# Single-node KRaft (combined broker + controller), plaintext, published on localhost only.
+# Topic auto-creation stays on so tests can use throwaway topics without an admin step, and the
+# initial rebalance delay is zeroed so consumer groups form fast enough for test deadlines.
+name: ruststream-rdkafka-tests
+
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: ruststream-kafka
+    ports:
+      - "127.0.0.1:9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 5s

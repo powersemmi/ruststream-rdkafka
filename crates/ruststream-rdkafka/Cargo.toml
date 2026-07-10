@@ -1,0 +1,63 @@
+[package]
+name = "ruststream-rdkafka"
+description = "Apache Kafka broker implementation for the RustStream messaging framework, backed by rdkafka / librdkafka."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["kafka", "messaging", "broker", "streaming", "faststream"]
+categories = ["asynchronous", "network-programming"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
+testing = ["ruststream/conformance", "ruststream/testing"]
+# TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
+# that build hermetically everywhere are surfaced here (SASL PLAIN/SCRAM/OAUTHBEARER need no
+# feature at all - librdkafka implements them built-in); anything else (gssapi, cmake-build,
+# dynamic-linking, ...) can be enabled by depending on `rdkafka` directly, since cargo features
+# are additive across the dependency graph.
+ssl = ["rdkafka/ssl"]
+ssl-vendored = ["rdkafka/ssl-vendored"]
+zstd = ["rdkafka/zstd"]
+
+[dependencies]
+ruststream = { workspace = true }
+rdkafka = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { workspace = true }
+
+# The vendored librdkafka build makes docs.rs shy away from the TLS/SASL backends; the API
+# surface is identical either way, so document with just the `testing` module enabled.
+[package.metadata.docs.rs]
+features = ["testing"]
+
+# The kafka_* examples are the docs-site snippet sources; keep them runnable and snippet-checked.
+[[example]]
+name = "kafka_quickstart"
+
+[[example]]
+name = "kafka_topics"
+
+[[example]]
+name = "kafka_keys"
+
+[[example]]
+name = "kafka_producer"
+
+[[example]]
+name = "kafka_testing"
+required-features = ["testing"]

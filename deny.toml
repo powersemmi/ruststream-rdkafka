@@ -1,0 +1,36 @@
+# cargo-deny configuration: the dependency-graph half of the security gate.
+# Checks RustSec advisories, license compatibility, duplicate versions, and
+# registry sources. Run locally with `just deny`.
+
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+
+ignore = []
+
+[licenses]
+# Apache-2.0/MIT-compatible permissive licenses only.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # Parts of the rdkafka build tree (and the tokio stack) are BSD-licensed;
+    # OSI-approved and permissive.
+    "BSD-3-Clause",
+    "ISC",
+    # unicode-ident is (MIT OR Apache-2.0) AND Unicode-3.0; the Unicode license
+    # only covers the embedded character tables and is permissive.
+    "Unicode-3.0",
+]
+
+[bans]
+# clippy::cargo's multiple_crate_versions is allowed in the workspace lints
+# because the rdkafka client tree pulls unavoidable duplicates; warn (not deny)
+# so the report stays visible without blocking on a transitive client's
+# dependency choices.
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

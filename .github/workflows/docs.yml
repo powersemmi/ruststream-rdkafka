@@ -1,0 +1,47 @@
+name: Docs
+
+on:
+  push:
+    branches: [main, "0.5.*"]
+    paths: &docs-paths
+      - "docs/**"
+      - "mkdocs.yml"
+      - "overrides/**"
+      - "crates/ruststream-rdkafka/examples/**"
+      - "scripts/lint_doc_fences.py"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main, "0.5.*"]
+    paths: *docs-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install docs toolchain
+        run: pip install -r docs/requirements.txt
+
+      # Every rust fence in docs/ must be a --8<-- snippet include (or carry an explicit
+      # inline-rust exemption), so the compiler keeps the examples honest.
+      - name: Lint doc fences
+        run: python3 scripts/lint_doc_fences.py
+
+      - name: mkdocs build
+        run: mkdocs build --strict
