@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 
 use rdkafka::consumer::{BaseConsumer, ConsumerContext, Rebalance};
 use rdkafka::{ClientContext, TopicPartitionList};
+use tokio::sync::Notify;
+use tokio::sync::futures::Notified;
 
 #[derive(Debug)]
 struct PartitionState {
@@ -36,10 +38,14 @@ impl PartitionState {
     }
 }
 
-/// Shared offset bookkeeping for one subscription in `Commit::Tracked` mode.
+/// Shared offset bookkeeping for one subscription in `Commit::Tracked` or
+/// `Commit::Transactional` mode.
 #[derive(Debug, Default)]
 pub(crate) struct CommitTracker {
     partitions: Mutex<HashMap<(String, i32), PartitionState>>,
+    /// Woken whenever a stored position advances; the EOS committer waits on it for its
+    /// settle condition.
+    advanced: Notify,
 }
 
 impl CommitTracker {
@@ -104,7 +110,48 @@ impl CommitTracker {
         }
         store(position)?;
         state.stored = Some(position);
+        self.advanced.notify_waiters();
         Ok(())
+    }
+
+    /// The stored (settled) position of a partition, when this tracker owns it and progress
+    /// has been made. The next offset to consume - what a Kafka commit wants - is this + 1.
+    pub(crate) fn stored_position(&self, topic: &str, partition: i32) -> Option<i64> {
+        let partitions = self
+            .partitions
+            .lock()
+            .expect("commit tracker mutex poisoned");
+        partitions
+            .get(&(topic.to_owned(), partition))
+            .and_then(|state| state.stored)
+    }
+
+    /// Whether this tracker has delivered state for the partition (it belongs to this
+    /// subscription in the current assignment).
+    pub(crate) fn covers(&self, topic: &str, partition: i32) -> bool {
+        let partitions = self
+            .partitions
+            .lock()
+            .expect("commit tracker mutex poisoned");
+        partitions.contains_key(&(topic.to_owned(), partition))
+    }
+
+    /// Every partition with settled progress, as `((topic, partition), stored position)`.
+    pub(crate) fn stored_positions(&self) -> Vec<((String, i32), i64)> {
+        let partitions = self
+            .partitions
+            .lock()
+            .expect("commit tracker mutex poisoned");
+        partitions
+            .iter()
+            .filter_map(|(key, state)| state.stored.map(|stored| (key.clone(), stored)))
+            .collect()
+    }
+
+    /// A waiter for the next stored-position advance. Create it BEFORE checking the awaited
+    /// condition, so an advance landing between the check and the await is not missed.
+    pub(crate) fn advance_waiter(&self) -> Notified<'_> {
+        self.advanced.notified()
     }
 
     /// Drops the state of revoked partitions so a later re-assignment starts fresh.

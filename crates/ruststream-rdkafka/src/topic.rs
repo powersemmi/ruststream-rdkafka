@@ -76,7 +76,7 @@ pub enum LaneKey {
 }
 
 /// How processed deliveries are committed back to the consumer group.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Commit {
     /// librdkafka auto-commit, the librdkafka default: positions are stored as messages are
@@ -92,6 +92,14 @@ pub enum Commit {
     /// markers, compacted-away records) cannot block the position. Auto-commit still flushes
     /// the stored position in the background and once more when the consumer closes.
     Tracked,
+    /// Exactly-once: the consumer never commits its own offsets - the
+    /// [`EosPipeline`](crate::EosPipeline) whose transactional id matches this name commits
+    /// them through the producer transaction (`send_offsets_to_transaction`), so source
+    /// positions move atomically with the records the handlers publish. `enable.auto.commit`
+    /// and `enable.auto.offset.store` are switched off; `ack` advances the shared watermark
+    /// exactly like [`Tracked`](Self::Tracked), and the pipeline picks the watermark up at its
+    /// next window commit.
+    Transactional(String),
 }
 
 /// A subscription to one Kafka topic through one consumer group.
@@ -328,8 +336,8 @@ impl KafkaTopic {
         self.start
     }
 
-    pub(crate) fn commit_mode(&self) -> Commit {
-        self.commit
+    pub(crate) fn commit_mode(&self) -> &Commit {
+        &self.commit
     }
 
     pub(crate) fn assignment_strategy(&self) -> Option<Assignment> {

@@ -1,0 +1,581 @@
+//! Exactly-once pipelines: group-committed producer transactions that carry the consumed
+//! offsets (`send_offsets_to_transaction`, the KIP-447 consume-transform-produce shape).
+//!
+//! An [`EosPipeline`] shares one transactional producer across every handler of one or more
+//! `Commit::Transactional` subscriptions. Handlers publish into the pipeline's open window;
+//! on the commit interval the pipeline waits for the window's participants to settle, adds
+//! their source positions to the transaction, and commits - records and offsets become
+//! visible atomically, so a crash or an abort rewinds both and the output topic never sees a
+//! duplicate. Concurrent publishes may join an open transaction (only the control calls are
+//! exclusive), which is what lets a `workers(n, by_key)` pool share one transactional id.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
+
+use futures::future::select_all;
+use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
+use rdkafka::{Offset, TopicPartitionList};
+use ruststream::{OutgoingMessage, Publisher as _, TransactionalPublisher as _};
+use tracing::{debug, error};
+
+use crate::error::KafkaError;
+use crate::publisher::KafkaPublisher;
+use crate::tracker::{CommitTracker, TrackingContext};
+
+/// The Kafka Streams default for exactly-once commit intervals.
+const DEFAULT_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// One `Commit::Transactional` subscription registered under a pipeline id: the watermark
+/// tracker deciding which positions are settled, and the consumer whose group metadata
+/// fences the offset commit (and which seeks back on an abort).
+///
+/// Held weakly: the registry must not keep a dropped subscriber's consumer alive (it would
+/// silently stay in its group and stall rebalances). A dead entry is pruned on lookup.
+#[derive(Clone)]
+pub(crate) struct EosSource {
+    tracker: Weak<CommitTracker>,
+    consumer: Weak<StreamConsumer<TrackingContext>>,
+}
+
+impl EosSource {
+    pub(crate) fn new(
+        tracker: &Arc<CommitTracker>,
+        consumer: &Arc<StreamConsumer<TrackingContext>>,
+    ) -> Self {
+        Self {
+            tracker: Arc::downgrade(tracker),
+            consumer: Arc::downgrade(consumer),
+        }
+    }
+
+    pub(crate) fn alive(&self) -> bool {
+        self.tracker.strong_count() > 0 && self.consumer.strong_count() > 0
+    }
+
+    fn upgrade(&self) -> Option<LiveSource> {
+        Some(LiveSource {
+            tracker: self.tracker.upgrade()?,
+            consumer: self.consumer.upgrade()?,
+        })
+    }
+}
+
+/// An upgraded [`EosSource`] pinned for the duration of one window commit.
+struct LiveSource {
+    tracker: Arc<CommitTracker>,
+    consumer: Arc<StreamConsumer<TrackingContext>>,
+}
+
+/// The source coordinates of one delivery, as [`EosPipeline::publish`] needs them: read them
+/// in a handler with the [`keys::Source`](crate::context::keys::Source) context field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceOffset<'a> {
+    topic: &'a str,
+    partition: i32,
+    offset: i64,
+}
+
+impl<'a> SourceOffset<'a> {
+    /// Builds the coordinates by hand; in a handler prefer the
+    /// [`keys::Source`](crate::context::keys::Source) context field.
+    #[must_use]
+    pub fn new(topic: &'a str, partition: i32, offset: i64) -> Self {
+        Self {
+            topic,
+            partition,
+            offset,
+        }
+    }
+
+    fn key(self) -> (String, i32) {
+        (self.topic.to_owned(), self.partition)
+    }
+}
+
+/// Where the pipeline's current window stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// No transaction open; the next publish opens one.
+    Idle,
+    /// A publish is opening the transaction; others wait for the outcome.
+    Opening,
+    /// The transaction is open and admitting publishes.
+    Open,
+    /// The commit interval elapsed: only participants already enrolled may still publish,
+    /// new deliveries wait for the next window.
+    Committing,
+}
+
+/// The open window's state.
+#[derive(Debug)]
+struct Window {
+    phase: Phase,
+    /// Highest enrolled source offset per (topic, partition).
+    enrolled: HashMap<(String, i32), i64>,
+    /// A publish into this window failed: the transaction is poisoned and must abort.
+    failed: bool,
+    /// Distinguishes windows across commits, so a stale window task cannot touch its
+    /// successor.
+    epoch: u64,
+}
+
+struct PipelineInner {
+    publisher: KafkaPublisher,
+    /// The pipeline id: the publisher's transactional id, which `Commit::Transactional`
+    /// subscriptions name to register their offsets here.
+    id: Option<String>,
+    interval: Duration,
+    window: Mutex<Window>,
+    /// Woken on every phase transition; publishers waiting for admission re-check then.
+    phase_changed: tokio::sync::Notify,
+    /// Offsets committed by this pipeline per (topic, partition) ("next to consume"), the
+    /// seek target when a window aborts.
+    committed: Mutex<HashMap<(String, i32), i64>>,
+    /// The first offset ever enrolled per (topic, partition): the abort seek target before
+    /// anything committed.
+    session_low: Mutex<HashMap<(String, i32), i64>>,
+}
+
+/// An exactly-once pipeline over one transactional producer.
+///
+/// Wiring, all three naming the same id:
+///
+/// 1. The publisher: `broker.publisher().transactional_id("pipeline-1")`.
+/// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
+///    stops committing offsets on its own and registers with the pipeline instead.
+/// 3. The pipeline: `EosPipeline::new(publisher)`, held in the application state; handlers
+///    call [`publish`](Self::publish) with the delivery's [`SourceOffset`].
+///
+/// Every [`commit_interval`](Self::commit_interval) the pipeline closes the window: it waits
+/// until every delivery that published into it has settled (the shared watermark reached the
+/// enrolled offsets), adds the settled source positions and their group metadata to the
+/// transaction, and commits. On any failure - a failed publish, a settle stall (a handler
+/// hanging or `retry()`-ing past the publisher's transaction timeout), a rebalance revoking
+/// an enrolled partition, a commit error - the window aborts and the consumers seek back, so
+/// the whole window redelivers and republishes into a fresh transaction; committed output
+/// still never duplicates.
+///
+/// Works best over the default `LaneKey::Partition` worker lanes: a partition processes in
+/// order on one lane, so the settle condition follows the lane head and windows close
+/// promptly. Clones share the pipeline.
+#[derive(Clone)]
+pub struct EosPipeline {
+    inner: Arc<PipelineInner>,
+}
+
+impl std::fmt::Debug for EosPipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EosPipeline")
+            .field("id", &self.inner.id)
+            .field("interval", &self.inner.interval)
+            .finish_non_exhaustive()
+    }
+}
+
+impl EosPipeline {
+    /// Builds the pipeline over `publisher`, which must carry a
+    /// [`transactional_id`](KafkaPublisher::transactional_id) - it doubles as the pipeline id
+    /// that `Commit::Transactional` subscriptions register under. A publisher without one
+    /// fails the first publish with a clear error.
+    #[must_use]
+    pub fn new(publisher: KafkaPublisher) -> Self {
+        let id = publisher.transactional_id_str().map(str::to_owned);
+        Self {
+            inner: Arc::new(PipelineInner {
+                publisher,
+                id,
+                interval: DEFAULT_COMMIT_INTERVAL,
+                window: Mutex::new(Window {
+                    phase: Phase::Idle,
+                    enrolled: HashMap::new(),
+                    failed: false,
+                    epoch: 0,
+                }),
+                phase_changed: tokio::sync::Notify::new(),
+                committed: Mutex::new(HashMap::new()),
+                session_low: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// How long a window stays open before committing; defaults to 100ms (the Kafka Streams
+    /// exactly-once default). Longer intervals amortize the commit over more records at the
+    /// cost of end-to-end latency (records become visible only at the commit). Configure
+    /// before handing the pipeline out.
+    #[must_use]
+    pub fn commit_interval(self, interval: Duration) -> Self {
+        Self {
+            inner: Arc::new(PipelineInner {
+                publisher: self.inner.publisher.clone(),
+                id: self.inner.id.clone(),
+                interval,
+                window: Mutex::new(Window {
+                    phase: Phase::Idle,
+                    enrolled: HashMap::new(),
+                    failed: false,
+                    epoch: 0,
+                }),
+                phase_changed: tokio::sync::Notify::new(),
+                committed: Mutex::new(HashMap::new()),
+                session_low: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// Publishes `msg` into the pipeline's open window on behalf of the delivery at `source`.
+    ///
+    /// The record joins the window's transaction and becomes visible at its commit, atomically
+    /// with the source position. Publish, then return `Ack`: the settled watermark is what
+    /// releases the window's commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] when the publisher carries no transactional id,
+    /// [`KafkaError::NotConnected`] before `Broker::connect`, and [`KafkaError::Publish`] when
+    /// opening the transaction or producing the record fails - the window aborts and
+    /// redelivers, so failing the handler (`retry()`) is the right response.
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel safe: dropping the future may leave the record in the window's transaction.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal window mutex is poisoned, which requires a prior panic
+    /// inside the pipeline (an invariant violation, not an operational failure).
+    pub async fn publish(
+        &self,
+        source: SourceOffset<'_>,
+        msg: OutgoingMessage<'_>,
+    ) -> Result<(), KafkaError> {
+        self.admit(source).await?;
+        let sent = self.inner.publisher.publish(msg).await;
+        if sent.is_err() {
+            let mut window = self.inner.window.lock().expect("window mutex poisoned");
+            // A failed produce poisons the transaction; the window task aborts it.
+            window.failed = true;
+        }
+        sent
+    }
+
+    /// Joins the open window (opening one when idle), waiting out a commit in progress
+    /// unless the delivery is already part of it.
+    async fn admit(&self, source: SourceOffset<'_>) -> Result<(), KafkaError> {
+        loop {
+            // The waiter is created before the phase check so a transition landing in
+            // between is not missed.
+            let phase_changed = self.inner.phase_changed.notified();
+            let action = {
+                let mut window = self.inner.window.lock().expect("window mutex poisoned");
+                match window.phase {
+                    Phase::Open => {
+                        Self::enroll(&mut window, &self.inner.session_low, source);
+                        Admission::Admitted
+                    }
+                    Phase::Idle => {
+                        window.phase = Phase::Opening;
+                        Admission::Opener
+                    }
+                    Phase::Opening => Admission::Wait,
+                    Phase::Committing => {
+                        // A delivery at or below the window's enrolled offsets is part of
+                        // the committing window: its records must land in it (the commit is
+                        // waiting for its settle). Anything else waits for the next window.
+                        let participant = window
+                            .enrolled
+                            .get(&source.key())
+                            .is_some_and(|max| source.offset <= *max);
+                        if participant {
+                            Admission::Admitted
+                        } else {
+                            Admission::Wait
+                        }
+                    }
+                }
+            };
+            match action {
+                Admission::Admitted => return Ok(()),
+                Admission::Wait => {
+                    phase_changed.await;
+                }
+                Admission::Opener => return self.open_window(source).await,
+            }
+        }
+    }
+
+    /// Opens the transaction as the winning publisher and spawns the window's commit task.
+    async fn open_window(&self, source: SourceOffset<'_>) -> Result<(), KafkaError> {
+        let begun = self.inner.publisher.begin_transaction().await;
+        let mut window = self.inner.window.lock().expect("window mutex poisoned");
+        match begun {
+            Ok(()) => {
+                window.phase = Phase::Open;
+                window.failed = false;
+                Self::enroll(&mut window, &self.inner.session_low, source);
+                let epoch = window.epoch;
+                drop(window);
+                tokio::spawn(run_window(Arc::clone(&self.inner), epoch));
+            }
+            Err(err) => {
+                window.phase = Phase::Idle;
+                drop(window);
+                self.inner.phase_changed.notify_waiters();
+                return Err(err);
+            }
+        }
+        self.inner.phase_changed.notify_waiters();
+        Ok(())
+    }
+
+    fn enroll(
+        window: &mut Window,
+        session_low: &Mutex<HashMap<(String, i32), i64>>,
+        source: SourceOffset<'_>,
+    ) {
+        let key = source.key();
+        session_low
+            .lock()
+            .expect("session low mutex poisoned")
+            .entry(key.clone())
+            .or_insert(source.offset);
+        let max = window.enrolled.entry(key).or_insert(source.offset);
+        if source.offset > *max {
+            *max = source.offset;
+        }
+    }
+}
+
+enum Admission {
+    Admitted,
+    Wait,
+    Opener,
+}
+
+/// The per-window task: sleeps out the commit interval, closes admission, waits for the
+/// participants to settle, and commits (or aborts and seeks back).
+async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
+    tokio::time::sleep(inner.interval).await;
+    let enrolled = {
+        let mut window = inner.window.lock().expect("window mutex poisoned");
+        if window.epoch != epoch || window.phase != Phase::Open {
+            return;
+        }
+        window.phase = Phase::Committing;
+        window.enrolled.clone()
+    };
+    let outcome = commit_window(&inner, &enrolled).await;
+    {
+        let mut window = inner.window.lock().expect("window mutex poisoned");
+        window.phase = Phase::Idle;
+        window.enrolled.clear();
+        window.failed = false;
+        window.epoch += 1;
+    }
+    inner.phase_changed.notify_waiters();
+    if let Err(err) = outcome {
+        error!(
+            target: "ruststream_rdkafka",
+            pipeline = inner.id.as_deref().unwrap_or("<no id>"),
+            error = %err,
+            "EOS window aborted; its sources seek back and the window redelivers",
+        );
+    }
+}
+
+/// Commits the window: settle-wait, offsets into the transaction, commit. Any failure runs
+/// the abort path (abort the transaction, seek the sources back) and reports the cause.
+async fn commit_window(
+    inner: &Arc<PipelineInner>,
+    enrolled: &HashMap<(String, i32), i64>,
+) -> Result<(), KafkaError> {
+    let id = inner.id.clone().ok_or_else(|| {
+        KafkaError::InvalidOptions(
+            "an EosPipeline publisher needs `KafkaPublisher::transactional_id`".to_owned(),
+        )
+    })?;
+    let conn = inner.publisher.shared_conn();
+    let state = conn.get().ok_or(KafkaError::NotConnected)?;
+    let sources: Vec<LiveSource> = state
+        .eos_sources(&id)
+        .iter()
+        .filter_map(EosSource::upgrade)
+        .collect();
+
+    let failed = {
+        let window = inner.window.lock().expect("window mutex poisoned");
+        window.failed
+    };
+    let ready = if failed {
+        Err(KafkaError::Publish(
+            "a publish into this window failed; the transaction is poisoned"
+                .to_owned()
+                .into(),
+        ))
+    } else {
+        wait_settled(inner, &sources, enrolled).await
+    };
+    let result = match ready {
+        Ok(()) => try_commit(inner, &sources).await,
+        Err(err) => Err(err),
+    };
+    if let Err(err) = result {
+        abort_window(inner, &sources, enrolled).await;
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Waits until every enrolled (topic, partition) has settled up to its enrolled offset, with
+/// the publisher's transaction-timeout as the stall deadline.
+async fn wait_settled(
+    inner: &Arc<PipelineInner>,
+    sources: &[LiveSource],
+    enrolled: &HashMap<(String, i32), i64>,
+) -> Result<(), KafkaError> {
+    let deadline = tokio::time::Instant::now() + inner.publisher.transaction_deadline();
+    loop {
+        // Waiters first, condition second: an advance between the two is caught by the
+        // already-registered waiters.
+        let waiters: Vec<_> = sources
+            .iter()
+            .map(|source| Box::pin(source.tracker.advance_waiter()))
+            .collect();
+        let pending = enrolled.iter().find(|((topic, partition), max)| {
+            !sources.iter().any(|source| {
+                source
+                    .tracker
+                    .stored_position(topic, *partition)
+                    .is_some_and(|stored| stored >= **max)
+            })
+        });
+        let Some(((topic, partition), max)) = pending else {
+            return Ok(());
+        };
+        if waiters.is_empty() {
+            return Err(KafkaError::InvalidOptions(format!(
+                "EOS pipeline has no registered sources for its id; is the subscription in \
+                 `Commit::Transactional` mode with the matching pipeline id? (waiting on \
+                 {topic}[{partition}] up to offset {max})",
+            )));
+        }
+        debug!(
+            target: "ruststream_rdkafka",
+            topic = %topic,
+            partition = partition,
+            up_to = max,
+            "EOS window waiting for participants to settle",
+        );
+        if tokio::time::timeout_at(deadline, select_all(waiters))
+            .await
+            .is_err()
+        {
+            return Err(KafkaError::Publish(
+                format!(
+                    "EOS window stalled: {topic}[{partition}] did not settle up to offset \
+                     {max} within the transaction deadline (a hung or retrying handler, or a \
+                     revoked partition)",
+                )
+                .into(),
+            ));
+        }
+    }
+}
+
+/// Adds every source's settled positions (with its group metadata) to the transaction and
+/// commits it.
+async fn try_commit(inner: &Arc<PipelineInner>, sources: &[LiveSource]) -> Result<(), KafkaError> {
+    let mut sent: Vec<((String, i32), i64)> = Vec::new();
+    for source in sources {
+        let positions = source.tracker.stored_positions();
+        if positions.is_empty() {
+            continue;
+        }
+        let mut offsets = TopicPartitionList::new();
+        for ((topic, partition), stored) in &positions {
+            offsets
+                .add_partition_offset(topic, *partition, Offset::Offset(stored + 1))
+                .map_err(KafkaError::publish)?;
+        }
+        let metadata = group_metadata(source)?;
+        inner.publisher.send_offsets(offsets, metadata).await?;
+        sent.extend(positions.into_iter().map(|(key, stored)| (key, stored + 1)));
+    }
+    inner.publisher.commit().await?;
+    {
+        let mut committed = inner.committed.lock().expect("committed mutex poisoned");
+        for (key, next) in sent {
+            committed.insert(key, next);
+        }
+    }
+    Ok(())
+}
+
+fn group_metadata(source: &LiveSource) -> Result<ConsumerGroupMetadata, KafkaError> {
+    source.consumer.group_metadata().ok_or_else(|| {
+        KafkaError::Publish(
+            "the source consumer has no group metadata (not a group member yet or already \
+             closed); cannot commit its offsets transactionally"
+                .to_owned()
+                .into(),
+        )
+    })
+}
+
+/// The abort path: abort the transaction and seek every enrolled partition back to the last
+/// offset this pipeline committed (or the first offset it ever saw), so the whole window
+/// redelivers promptly instead of waiting for a rebalance.
+async fn abort_window(
+    inner: &Arc<PipelineInner>,
+    sources: &[LiveSource],
+    enrolled: &HashMap<(String, i32), i64>,
+) {
+    if let Err(err) = inner.publisher.abort().await {
+        error!(
+            target: "ruststream_rdkafka",
+            error = %err,
+            "EOS window abort failed; the transaction resolves by its broker-side timeout",
+        );
+    }
+    let committed = inner
+        .committed
+        .lock()
+        .expect("committed mutex poisoned")
+        .clone();
+    let session_low = inner
+        .session_low
+        .lock()
+        .expect("session low mutex poisoned")
+        .clone();
+    for key @ (topic, partition) in enrolled.keys() {
+        let Some(target) = committed
+            .get(key)
+            .copied()
+            .or_else(|| session_low.get(key).copied())
+        else {
+            continue;
+        };
+        let Some(source) = sources
+            .iter()
+            .find(|source| source.tracker.covers(topic, *partition))
+        else {
+            continue;
+        };
+        if let Err(err) = source.consumer.seek(
+            topic,
+            *partition,
+            Offset::Offset(target),
+            Duration::from_secs(5),
+        ) {
+            // A revoked partition cannot seek; its new owner resumes from the committed
+            // offset on its own.
+            debug!(
+                target: "ruststream_rdkafka",
+                topic = %topic,
+                partition = partition,
+                error = %err,
+                "seek-back after an aborted EOS window failed",
+            );
+        }
+    }
+}

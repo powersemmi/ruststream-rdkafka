@@ -137,6 +137,30 @@ async fn passes_batches_capability() {
 // The harness takes higher-ranked closures that method paths cannot satisfy.
 #[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_transactions_capability() {
+    let Some(url) = kafka_url() else { return };
+    warm_up_group_coordinator(&url).await;
+    // The suite asserts nothing is visible before commit, so a previous run's committed
+    // messages must not survive.
+    recreate_topic(&url, "conformance.transactions").await;
+    let group = format!("conformance-tx-group-{}", std::process::id());
+    let tx_id = format!("conformance-tx-{}", std::process::id());
+    capabilities::transactions(
+        || KafkaBroker::new([url.clone()]),
+        |name| {
+            KafkaTopic::new(name)
+                .group(group.clone())
+                .start(StartOffset::Earliest)
+                .commit(Commit::Tracked)
+        },
+        |broker| broker.publisher().transactional_id(tx_id.clone()),
+    )
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passes_lifecycle() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;

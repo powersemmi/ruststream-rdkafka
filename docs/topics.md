@@ -45,6 +45,11 @@ mode picks how `ack` and `nack` map onto that model:
   offset gaps the consumer never receives (transaction markers, compacted-away records) cannot
   block the position. Auto-commit still flushes the stored position in the background and once
   more when the consumer closes.
+- `Commit::Transactional("pipeline-id")`: exactly-once. The consumer never commits its own
+  offsets - the `EosPipeline` with the matching transactional id commits them inside the
+  producer transaction, atomically with the records the handlers publish. `ack` advances the
+  shared watermark exactly like `Tracked`; see
+  [Exactly-once pipelines](publishing.md#exactly-once-pipelines).
 
 Negative settlement under `Tracked`:
 

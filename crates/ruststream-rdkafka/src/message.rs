@@ -1,5 +1,6 @@
 //! The delivery type yielded by [`KafkaSubscriber`](crate::KafkaSubscriber).
 
+use std::convert::Infallible;
 use std::fmt;
 use std::sync::Arc;
 
@@ -32,6 +33,9 @@ pub(crate) enum Settlement {
         consumer: Arc<StreamConsumer<TrackingContext>>,
         tracker: Arc<CommitTracker>,
     },
+    /// `Commit::Transactional`: an ack advances the shared watermark only - the EOS pipeline
+    /// commits positions through the producer transaction, so nothing is stored here.
+    Transactional { tracker: Arc<CommitTracker> },
 }
 
 /// One Kafka delivery: an owned snapshot of the record plus its settlement handle.
@@ -77,6 +81,7 @@ impl fmt::Debug for Settlement {
         match self {
             Self::Advisory => f.write_str("Advisory"),
             Self::Tracked { .. } => f.debug_struct("Tracked").finish_non_exhaustive(),
+            Self::Transactional { .. } => f.debug_struct("Transactional").finish_non_exhaustive(),
         }
     }
 }
@@ -147,6 +152,13 @@ impl KafkaMessage {
                     consumer.store_offset(&self.topic, self.partition, position)
                 })
                 .map_err(|err| AckError::Broker(Box::new(err))),
+            Settlement::Transactional { tracker } => {
+                let infallible: Result<(), Infallible> =
+                    tracker
+                        .settle_with(&self.topic, self.partition, self.offset, |_position| Ok(()));
+                infallible.expect("no-op store cannot fail");
+                Ok(())
+            }
         }
     }
 
