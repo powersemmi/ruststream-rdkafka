@@ -4,6 +4,7 @@ use ruststream::SubscriptionSource;
 
 use crate::broker::KafkaBroker;
 use crate::error::KafkaError;
+use crate::retry::Retry;
 use crate::subscriber::KafkaSubscriber;
 
 /// Where a consumer group starts reading when it has no valid committed offset.
@@ -126,6 +127,9 @@ pub struct KafkaTopic {
     commit: Commit,
     assignment: Option<Assignment>,
     lane_key: LaneKey,
+    retry: Option<Retry>,
+    max_deliveries: Option<u32>,
+    dead_letter: Option<String>,
     config: Vec<(String, String)>,
 }
 
@@ -140,6 +144,9 @@ impl KafkaTopic {
             commit: Commit::default(),
             assignment: None,
             lane_key: LaneKey::default(),
+            retry: None,
+            max_deliveries: None,
+            dead_letter: None,
             config: Vec::new(),
         }
     }
@@ -243,6 +250,46 @@ impl KafkaTopic {
         self
     }
 
+    /// What `nack(true)` does on this subscription (see [`Retry`]); unset keeps Kafka's native
+    /// behavior - the offset stays unsettled and redelivers on the next fetch of the partition.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::{KafkaTopic, Retry};
+    ///
+    /// let topic = KafkaTopic::new("orders")
+    ///     .group("orders-svc")
+    ///     .retry(Retry::Topic("orders.retry".into()))
+    ///     .max_deliveries(5)
+    ///     .dead_letter("orders.dlq");
+    /// # let _ = topic;
+    /// ```
+    #[must_use]
+    pub fn retry(mut self, retry: Retry) -> Self {
+        self.retry = Some(retry);
+        self
+    }
+
+    /// The poison cap: how many times a message may be delivered before `nack(true)` takes the
+    /// drop path instead of retrying (the original delivery counts as one). Enforced by the
+    /// [`retry`](Self::retry) policy - through [`RETRY_COUNT_HEADER`](crate::RETRY_COUNT_HEADER)
+    /// for [`Retry::Topic`], and through an in-session counter for [`Retry::SeekBack`].
+    #[must_use]
+    pub fn max_deliveries(mut self, max_deliveries: u32) -> Self {
+        self.max_deliveries = Some(max_deliveries);
+        self
+    }
+
+    /// The dead-letter topic for the drop path: `nack(false)` and an exhausted retry republish
+    /// the message there (stamped with the `kafka-dlq-source-*` headers), then settle. Without
+    /// it the drop path just settles.
+    #[must_use]
+    pub fn dead_letter(mut self, topic: impl Into<String>) -> Self {
+        self.dead_letter = Some(topic.into());
+        self
+    }
+
     /// Raw librdkafka consumer property passthrough for anything not surfaced as a typed
     /// option, applied last (it wins over the typed options and the broker-wide config).
     #[must_use]
@@ -291,6 +338,18 @@ impl KafkaTopic {
 
     pub(crate) fn lane_key_choice(&self) -> LaneKey {
         self.lane_key
+    }
+
+    pub(crate) fn retry_policy(&self) -> Option<&Retry> {
+        self.retry.as_ref()
+    }
+
+    pub(crate) fn max_deliveries_cap(&self) -> Option<u32> {
+        self.max_deliveries
+    }
+
+    pub(crate) fn dead_letter_topic(&self) -> Option<&str> {
+        self.dead_letter.as_deref()
     }
 
     pub(crate) fn config_entries(&self) -> &[(String, String)] {

@@ -108,6 +108,47 @@ deliveries sharing a record key stay ordered while different keys of one partiti
 concurrently. Keyless deliveries then carry no lane key and rotate across lanes, losing even
 their partition order.
 
+## Retries and dead-lettering
+
+Without a policy, `nack(true)` keeps Kafka's native meaning: the offset stays unsettled and
+redelivers on the next fetch of the partition. `KafkaTopic::retry` gives it an immediate one:
+
+- `Retry::Topic("orders.retry")` republishes the message to the retry topic with an attempt
+  counter riding in the `kafka-retry-count` header, then settles the original
+  (republish-first: a crash between the steps duplicates, never loses).
+- `Retry::SeekBack` seeks the partition back and re-consumes the message in place; everything
+  after it on that partition replays too, and the attempt count survives only within the
+  session.
+- `Retry::Drop` treats `nack(true)` like the drop path.
+
+`max_deliveries(n)` is the poison cap (the original delivery counts as one): once the next
+retry would exceed it, the drop path runs instead. `dead_letter("orders.dlq")` routes the drop
+path - `nack(false)` included - to a dead-letter topic, stamped with `kafka-dlq-source-topic` /
+`-partition` / `-offset` headers, then settles; without it the drop path just settles. Retry
+and dead-letter topics are your infrastructure: the crate only publishes to them. The
+in-process test broker does not run these policies (`nack(true)` re-enqueues in place there).
+
+The usual pipeline puts the retry topic on the same subscription with `and_topic`, so retried
+copies come back to the same handler:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:retry_topic"
+```
+
+`Retry::SeekBack` trades throughput for strict partition order - nothing overtakes a failed
+message while it retries:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:seek_back"
+```
+
+A dead-letter consumer is an ordinary subscription; the `kafka-dlq-source-*` headers carry the
+origin of the failed delivery:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:dead_letter"
+```
+
 ## Batches
 
 Batching is native: the subscriber implements the core `BatchSubscriber` capability directly,

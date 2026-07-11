@@ -419,6 +419,184 @@ async fn bare_name_subscribe_uses_the_default_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_topic_republishes_with_attempt_count_and_settles() {
+    use ruststream_rdkafka::{RETRY_COUNT_HEADER, Retry};
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("retry-main");
+    let retry_topic = unique("retry-hop");
+    create_topic(&url, &topic, 1).await;
+    create_topic(&url, &retry_topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let group = unique("group");
+    let mut main = broker
+        .subscribe(tracked(&topic, &group).retry(Retry::Topic(retry_topic.clone())))
+        .await
+        .expect("subscribe main");
+    let mut hop = broker
+        .subscribe(tracked(&retry_topic, &unique("hop-group")))
+        .await
+        .expect("subscribe retry topic");
+
+    publish(&broker, &topic, b"boom").await;
+
+    let mut main_stream = Box::pin(main.stream());
+    let msg = next_message(&mut main_stream).await;
+    assert_eq!(msg.payload(), b"boom");
+    msg.nack(true).await.expect("nack requeue");
+
+    // The copy lands on the retry topic with the attempt counter.
+    let mut hop_stream = Box::pin(hop.stream());
+    let copy = next_message(&mut hop_stream).await;
+    assert_eq!(copy.payload(), b"boom");
+    assert_eq!(copy.headers().get_str(RETRY_COUNT_HEADER), Some("1"));
+    copy.ack().await.expect("ack copy");
+
+    // The original offset settled: the same group sees only new messages after a restart.
+    drop(main_stream);
+    drop(main);
+    publish(&broker, &topic, b"next").await;
+    let mut reopened = broker
+        .subscribe(tracked(&topic, &group))
+        .await
+        .expect("re-subscribe");
+    let mut stream = Box::pin(reopened.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"next",
+        "a retried message must not redeliver from the main topic",
+    );
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(reopened);
+    drop(hop_stream);
+    drop(hop);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exhausted_retries_dead_letter_with_source_headers() {
+    use ruststream_rdkafka::{
+        DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_TOPIC_HEADER, RETRY_COUNT_HEADER, Retry,
+    };
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("dlq-main");
+    let retry_topic = unique("dlq-hop");
+    let dlq = unique("dlq");
+    create_topic(&url, &topic, 1).await;
+    create_topic(&url, &retry_topic, 1).await;
+    create_topic(&url, &dlq, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let def = tracked(&topic, &unique("group"))
+        .retry(Retry::Topic(retry_topic.clone()))
+        .max_deliveries(2)
+        .dead_letter(dlq.clone());
+    let mut main = broker.subscribe(def).await.expect("subscribe");
+    let mut dead = broker
+        .subscribe(tracked(&dlq, &unique("dlq-reader")))
+        .await
+        .expect("subscribe dlq");
+
+    // Simulate the second delivery of a message: one retry hop already behind it.
+    let mut headers = Headers::new();
+    headers.insert(RETRY_COUNT_HEADER, "1");
+    broker
+        .publisher()
+        .publish(OutgoingMessage::new(&topic, b"poison").with_headers(headers))
+        .await
+        .expect("publish");
+
+    let mut main_stream = Box::pin(main.stream());
+    let msg = next_message(&mut main_stream).await;
+    assert_eq!(msg.payload(), b"poison");
+    // Delivery number two out of max_deliveries = 2: the next retry would be delivery three,
+    // so the drop path runs and the message dead-letters.
+    msg.nack(true).await.expect("nack requeue");
+
+    let mut dead_stream = Box::pin(dead.stream());
+    let dead_msg = next_message(&mut dead_stream).await;
+    assert_eq!(dead_msg.payload(), b"poison");
+    assert_eq!(
+        dead_msg.headers().get_str(DLQ_SOURCE_TOPIC_HEADER),
+        Some(topic.as_str()),
+    );
+    assert_eq!(
+        dead_msg.headers().get_str(DLQ_SOURCE_OFFSET_HEADER),
+        Some("0")
+    );
+    dead_msg.ack().await.expect("ack dlq");
+
+    drop(main_stream);
+    drop(main);
+    drop(dead_stream);
+    drop(dead);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seek_back_redelivers_in_place_and_caps_deliveries() {
+    use ruststream_rdkafka::Retry;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("seek");
+    let dlq = unique("seek-dlq");
+    create_topic(&url, &topic, 1).await;
+    create_topic(&url, &dlq, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let def = tracked(&topic, &unique("group"))
+        .retry(Retry::SeekBack)
+        .max_deliveries(2)
+        .dead_letter(dlq.clone());
+    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut dead = broker
+        .subscribe(tracked(&dlq, &unique("dlq-reader")))
+        .await
+        .expect("subscribe dlq");
+
+    publish(&broker, &topic, b"flaky").await;
+
+    let mut stream = Box::pin(subscriber.stream());
+    // Delivery one: seek back for an immediate in-place redelivery.
+    let first = next_message(&mut stream).await;
+    assert_eq!(first.payload(), b"flaky");
+    assert_eq!(first.offset(), 0);
+    first.nack(true).await.expect("nack seeks back");
+
+    // Delivery two (same offset): the cap of two is reached, so the drop path dead-letters.
+    let second = next_message(&mut stream).await;
+    assert_eq!(second.payload(), b"flaky");
+    assert_eq!(
+        second.offset(),
+        0,
+        "seek-back must redeliver the same offset"
+    );
+    second.nack(true).await.expect("nack over cap");
+
+    let mut dead_stream = Box::pin(dead.stream());
+    let dead_msg = next_message(&mut dead_stream).await;
+    assert_eq!(dead_msg.payload(), b"flaky");
+    dead_msg.ack().await.expect("ack dlq");
+
+    // The offset settled through the drop path: publishing more resumes past it.
+    publish(&broker, &topic, b"after").await;
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"after");
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(subscriber);
+    drop(dead_stream);
+    drop(dead);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batches_preserve_order_and_settle_per_message() {
     use ruststream::{BatchSubscriber as _, Buffered, SubscriptionSource as _};
 

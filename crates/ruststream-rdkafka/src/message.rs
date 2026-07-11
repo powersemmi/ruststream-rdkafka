@@ -7,6 +7,10 @@ use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use ruststream::{AckError, Headers, IncomingMessage, Partitioned};
 
+use crate::retry::{
+    DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
+    RETRY_COUNT_HEADER, Retry, RetryContext,
+};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
@@ -65,6 +69,7 @@ pub struct KafkaMessage {
     /// The keyed-lane key: the source partition (the default), or the record key under
     /// `LaneKey::RecordKey`.
     lane: Option<Bytes>,
+    retry: Option<Arc<RetryContext>>,
 }
 
 impl fmt::Debug for Settlement {
@@ -89,6 +94,7 @@ impl KafkaMessage {
         timestamp_millis: Option<i64>,
         settlement: Settlement,
         lane: Option<Bytes>,
+        retry: Option<Arc<RetryContext>>,
     ) -> Self {
         Self {
             payload,
@@ -99,6 +105,7 @@ impl KafkaMessage {
             timestamp_millis,
             settlement,
             lane,
+            retry,
         }
     }
 
@@ -142,6 +149,64 @@ impl KafkaMessage {
                 .map_err(|err| AckError::Broker(Box::new(err))),
         }
     }
+
+    /// The number of retry republishes already behind this delivery, from
+    /// [`RETRY_COUNT_HEADER`]; the original publish carries none.
+    fn retry_attempts(&self) -> u32 {
+        self.headers
+            .get_str(RETRY_COUNT_HEADER)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// The retry path for `nack(true)` when a policy is configured.
+    async fn retry_requeue(self, retry: Arc<RetryContext>) -> Result<(), AckError> {
+        match retry.policy() {
+            Some(Retry::Topic(topic)) => {
+                let next_delivery = self.retry_attempts() + 2;
+                if retry.over_cap(next_delivery) {
+                    return self.drop_path(&retry).await;
+                }
+                let mut headers = self.headers.clone();
+                headers.insert(RETRY_COUNT_HEADER, (self.retry_attempts() + 1).to_string());
+                retry
+                    .republish(topic, &self.payload, &headers)
+                    .await
+                    .map_err(|err| AckError::Broker(Box::new(err)))?;
+                self.settle()
+            }
+            Some(Retry::SeekBack) => {
+                let next_delivery =
+                    retry.next_seek_delivery(&self.topic, self.partition, self.offset);
+                if retry.over_cap(next_delivery) {
+                    retry.forget_seeks(&self.topic, self.partition, self.offset);
+                    return self.drop_path(&retry).await;
+                }
+                retry.record_seek(&self.topic, self.partition, self.offset);
+                retry
+                    .seek_back(&self.topic, self.partition, self.offset)
+                    .map_err(|err| AckError::Broker(Box::new(err)))
+                // Deliberately NOT settled: the seeked redelivery replays this offset, and
+                // under Tracked the replay resets the partition's watermark state.
+            }
+            Some(Retry::Drop) | None => self.drop_path(&retry).await,
+        }
+    }
+
+    /// The drop path: dead-letter when configured, then settle.
+    async fn drop_path(self, retry: &RetryContext) -> Result<(), AckError> {
+        if let Some(dlq) = retry.dead_letter() {
+            let mut headers = self.headers.clone();
+            headers.insert(DLQ_SOURCE_TOPIC_HEADER, self.topic.clone());
+            headers.insert(DLQ_SOURCE_PARTITION_HEADER, self.partition.to_string());
+            headers.insert(DLQ_SOURCE_OFFSET_HEADER, self.offset.to_string());
+            retry
+                .republish(dlq, &self.payload, &headers)
+                .await
+                .map_err(|err| AckError::Broker(Box::new(err)))?;
+        }
+        self.settle()
+    }
 }
 
 impl IncomingMessage for KafkaMessage {
@@ -169,27 +234,33 @@ impl IncomingMessage for KafkaMessage {
         self.settle()
     }
 
-    /// Settles negatively: drops the offset (`requeue = false`) or leaves it unsettled for
-    /// Kafka's native re-consumption (`requeue = true`). Only meaningful under
-    /// `Commit::Tracked`; under `Commit::Auto` both forms are advisory no-ops (see the
-    /// type-level settlement mapping).
+    /// Settles negatively. With a [`Retry`] policy configured on the subscription,
+    /// `requeue = true` runs it (republish to the retry topic, seek back, or drop) and
+    /// `requeue = false` runs the drop path (dead-letter when configured, then settle).
+    /// Without a policy, `requeue = false` settles the offset and `requeue = true` leaves it
+    /// unsettled for Kafka's native re-consumption - which under `Commit::Auto` makes both
+    /// forms advisory no-ops (see the type-level settlement mapping).
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Broker`] under the same conditions as [`ack`](Self::ack).
+    /// Returns [`AckError::Broker`] when a retry/dead-letter republish or seek fails, and
+    /// under the same conditions as [`ack`](Self::ack).
     ///
     /// # Cancel safety
     ///
-    /// Cancel safe: the watermark update is synchronous, so the future either completed or did
-    /// nothing.
+    /// Without a policy: cancel safe (the watermark update is synchronous). With a policy: not
+    /// cancel safe - dropping the future may leave the retry or dead-letter copy published
+    /// with the original unsettled (a duplicate, never a loss).
     async fn nack(self, requeue: bool) -> Result<(), AckError> {
-        if requeue {
+        match (self.retry.clone(), requeue) {
+            (Some(retry), true) => self.retry_requeue(retry).await,
+            (Some(retry), false) => self.drop_path(&retry).await,
             // Leaving the offset unsettled is the whole mechanism: under Tracked the committed
             // position stays below it, so Kafka redelivers from there on the next fetch of
             // this partition.
-            return Ok(());
+            (None, true) => Ok(()),
+            (None, false) => self.settle(),
         }
-        self.settle()
     }
 
     /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the
