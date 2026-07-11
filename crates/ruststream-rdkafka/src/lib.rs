@@ -49,6 +49,8 @@ mod subscriber;
 mod topic;
 mod tracker;
 
+#[cfg(feature = "avro")]
+pub mod avro;
 pub mod context;
 #[cfg(feature = "schema-registry")]
 pub mod schema_registry;

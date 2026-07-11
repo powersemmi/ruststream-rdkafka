@@ -132,6 +132,8 @@ struct RegistryInner {
     auth: Auth,
     by_id: Mutex<HashMap<u32, Arc<RegisteredSchema>>>,
     by_subject: Mutex<HashMap<String, u32>>,
+    #[cfg(feature = "avro")]
+    parsed_avro: Mutex<HashMap<u32, Arc<apache_avro::Schema>>>,
 }
 
 /// The async Confluent Schema Registry client, shared by clones.
@@ -198,6 +200,8 @@ impl SchemaRegistry {
                 auth: Auth::None,
                 by_id: Mutex::new(HashMap::new()),
                 by_subject: Mutex::new(HashMap::new()),
+                #[cfg(feature = "avro")]
+                parsed_avro: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -227,6 +231,8 @@ impl SchemaRegistry {
                 auth,
                 by_id: Mutex::new(HashMap::new()),
                 by_subject: Mutex::new(HashMap::new()),
+                #[cfg(feature = "avro")]
+                parsed_avro: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -445,6 +451,58 @@ impl SchemaRegistry {
         self.register(subject, SchemaType::Json, definition).await
     }
 
+    /// Registers the Avro schema derived from `T` under `subject` - the typed shorthand for
+    /// [`register`](Self::register) with `T::get_schema()`.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register).
+    #[cfg(feature = "avro")]
+    pub async fn register_avro<T: apache_avro::AvroSchema>(
+        &self,
+        subject: &str,
+    ) -> Result<u32, KafkaError> {
+        let schema = T::get_schema();
+        self.register(subject, SchemaType::Avro, schema.canonical_form())
+            .await
+    }
+
+    /// The parsed Avro schema for a cached registered schema, parsed once and shared.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the definition is not valid Avro.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal cache mutex is poisoned, which requires a prior panic inside
+    /// the client (an invariant violation, not an operational failure).
+    #[cfg(feature = "avro")]
+    pub(crate) fn parsed_avro(
+        &self,
+        schema: &RegisteredSchema,
+    ) -> Result<Arc<apache_avro::Schema>, KafkaError> {
+        if let Some(parsed) = self
+            .inner
+            .parsed_avro
+            .lock()
+            .expect("parsed schema cache mutex poisoned")
+            .get(&schema.id)
+        {
+            return Ok(Arc::clone(parsed));
+        }
+        let parsed = Arc::new(
+            apache_avro::Schema::parse_str(&schema.definition)
+                .map_err(KafkaError::schema_registry)?,
+        );
+        self.inner
+            .parsed_avro
+            .lock()
+            .expect("parsed schema cache mutex poisoned")
+            .insert(schema.id, Arc::clone(&parsed));
+        Ok(parsed)
+    }
+
     /// Transcodes a Confluent-framed payload to plain JSON, so deliveries reach handlers in
     /// the default codec's format: the JSON flavor loses its envelope, Avro and Protobuf
     /// datums (with their features enabled) convert through their registry schema. Non-framed
@@ -492,6 +550,9 @@ fn incoming_datum_to_json(
     let _ = registry;
     match schema.schema_type {
         SchemaType::Json => Ok(datum.to_vec()),
+        #[cfg(feature = "avro")]
+        SchemaType::Avro => crate::avro::avro_to_json(registry, schema, datum),
+        #[allow(unreachable_patterns)] // the disabled-format arms
         other => Err(KafkaError::InvalidOptions(format!(
             "schema id {} is {other:?}, but the matching cargo feature is not enabled on \
              ruststream-rdkafka; enable it to consume this topic",
@@ -511,6 +572,9 @@ fn outgoing_json_to_datum(
     let _ = registry;
     match schema.schema_type {
         SchemaType::Json => Ok(payload.to_vec()),
+        #[cfg(feature = "avro")]
+        SchemaType::Avro => crate::avro::json_to_avro(registry, schema, payload),
+        #[allow(unreachable_patterns)] // the disabled-format arms
         other => Err(KafkaError::InvalidOptions(format!(
             "the subject's schema (id {}) is {other:?}, but the matching cargo feature is \
              not enabled on ruststream-rdkafka; enable it to publish to this topic",
