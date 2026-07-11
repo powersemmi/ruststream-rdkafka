@@ -19,22 +19,36 @@ struct Order {
 }
 
 // --8<-- [start:consumer]
-// Eight lanes, keyed: two orders for the same tenant never process concurrently (per-tenant
-// ordering), while different tenants run in parallel. `by_key` reads the record key Kafka
-// partitioned the message by.
-#[subscriber(KafkaTopic::new("orders").group("orders-workers"), workers(8, by_key))]
+// Eight lanes by record key (the opt-in): two orders for the same tenant never process
+// concurrently (per-tenant ordering), while different tenants run in parallel - even inside
+// one partition.
+#[subscriber(
+    KafkaTopic::new("orders").group("orders-workers").lane_key(LaneKey::RecordKey),
+    workers(8, by_key)
+)]
 async fn on_order(order: &Order) -> HandlerResult {
     println!("order {} for tenant {}", order.id, order.tenant);
     HandlerResult::Ack
 }
 // --8<-- [end:consumer]
 
-use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
+// --8<-- [start:partition_lanes]
+// The default lanes by the source partition, Kafka's own ordering unit: everything one
+// partition delivers (keyless audit events included) processes in order on one lane.
+#[subscriber(KafkaTopic::new("audit").group("audit-workers"), workers(8, by_key))]
+async fn on_audit(order: &Order) -> HandlerResult {
+    println!("audit entry {} for tenant {}", order.id, order.tenant);
+    HandlerResult::Ack
+}
+// --8<-- [end:partition_lanes]
+
+use ruststream_rdkafka::{KafkaBroker, KafkaTopic, LaneKey};
 
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         b.include(on_order);
+        b.include(on_audit);
     })
 }

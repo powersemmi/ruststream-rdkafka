@@ -54,6 +54,26 @@ impl Assignment {
     }
 }
 
+/// What drives keyed worker lanes (`workers(n, by_key)`) for this subscription.
+///
+/// The runtime lanes deliveries by [`IncomingMessage::partition_key`]
+/// (deliveries sharing a lane key process in order on one lane); this choice picks what that
+/// key is for Kafka.
+///
+/// [`IncomingMessage::partition_key`]: ruststream::IncomingMessage::partition_key
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LaneKey {
+    /// The source partition (the default): lanes mirror Kafka's own ordering unit, so
+    /// everything a partition delivers (keyless included) processes in order on one lane.
+    #[default]
+    Partition,
+    /// The native record key: per-key ordering, finer than a partition, so messages of one
+    /// partition may process concurrently when their keys differ. Keyless deliveries carry no
+    /// lane key and rotate across lanes, losing their partition order.
+    RecordKey,
+}
+
 /// How processed deliveries are committed back to the consumer group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -105,6 +125,7 @@ pub struct KafkaTopic {
     start: StartOffset,
     commit: Commit,
     assignment: Option<Assignment>,
+    lane_key: LaneKey,
     config: Vec<(String, String)>,
 }
 
@@ -118,6 +139,7 @@ impl KafkaTopic {
             start: StartOffset::default(),
             commit: Commit::default(),
             assignment: None,
+            lane_key: LaneKey::default(),
             config: Vec::new(),
         }
     }
@@ -200,6 +222,27 @@ impl KafkaTopic {
         self
     }
 
+    /// What drives keyed worker lanes for this subscription (see [`LaneKey`]); the default
+    /// lanes by the source partition, Kafka's native ordering unit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::{KafkaTopic, LaneKey};
+    ///
+    /// // Opt into finer, per-record-key lanes: one tenant never processes concurrently,
+    /// // different tenants in one partition do.
+    /// let topic = KafkaTopic::new("orders")
+    ///     .group("orders-svc")
+    ///     .lane_key(LaneKey::RecordKey);
+    /// # let _ = topic;
+    /// ```
+    #[must_use]
+    pub fn lane_key(mut self, lane_key: LaneKey) -> Self {
+        self.lane_key = lane_key;
+        self
+    }
+
     /// Raw librdkafka consumer property passthrough for anything not surfaced as a typed
     /// option, applied last (it wins over the typed options and the broker-wide config).
     #[must_use]
@@ -244,6 +287,10 @@ impl KafkaTopic {
 
     pub(crate) fn assignment_strategy(&self) -> Option<Assignment> {
         self.assignment
+    }
+
+    pub(crate) fn lane_key_choice(&self) -> LaneKey {
+        self.lane_key
     }
 
     pub(crate) fn config_entries(&self) -> &[(String, String)] {

@@ -240,6 +240,7 @@ impl KafkaBroker {
             def.topic().to_owned(),
             def.commit_mode(),
             tracker,
+            def.lane_key_choice(),
         ))
     }
 }

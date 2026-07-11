@@ -94,6 +94,83 @@ lanes keep per-key ordering end to end:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:consumer"
 ```
 
+`KafkaTopic::lane_key` picks what drives the lanes. The default, `LaneKey::Partition`, lanes
+by the source partition - Kafka's native ordering unit, so everything one partition delivers
+(keyless included) processes in order on one lane, and concurrency comes from consuming
+several partitions:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:partition_lanes"
+```
+
+`LaneKey::RecordKey` opts into finer, per-record-key lanes (the first example above):
+deliveries sharing a record key stay ordered while different keys of one partition process
+concurrently. Keyless deliveries then carry no lane key and rotate across lanes, losing even
+their partition order.
+
+## Batches
+
+Batching is native: the subscriber implements the core `BatchSubscriber` capability directly,
+and a page is one delivery plus everything librdkafka has already fetched - no added waiting,
+no crate-imposed knobs. Page size is bounded by librdkafka's own fetch-queue limits
+(`queued.max.messages.kbytes` and friends, reachable through the raw config passthrough):
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
+```
+
+Need an explicit page window instead? The core `Buffered` adapter wraps any source and closes
+a page at `max_size` deliveries or `max_wait` after the first one (see the second handler in
+the example below). Batch handlers mount with `include_batch`:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"
+```
+
+### How batch settlement maps onto Kafka
+
+A batch handler settles its page either uniformly (one `HandlerResult` for every element) or
+per element (`Vec<HandlerResult>` / `Vec<Settle>`, entry `i` settling element `i`):
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:selective"
+```
+
+Kafka commits one position per partition, not per message, so the outcomes map as follows
+(everything below assumes `Commit::Tracked`; under `Commit::Auto` every settlement is an
+advisory no-op and none of it applies):
+
+- **Uniform `Ack`** - works exactly as expected: the page settles, the position advances.
+- **Per-element with `Ack`s only** - also exact: acks may even land out of order across
+  concurrent pages, the position always advances to just below the lowest unsettled delivery.
+- **Per-element with a `retry()` in the middle** - the runtime does settle each element
+  individually, but the committed position stops in front of the first retried element and
+  stays there until that offset redelivers (the next fetch of the partition: a rebalance or a
+  restart). When it does, the acked tail behind it replays too - at-least-once duplicates, not
+  loss. Selective ack therefore works "up to the first nack" as far as the committed position
+  is concerned; use a retry policy (retry topics) when a poison element must not hold the page
+  hostage.
+- **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the
+  runtime's deferred-republish fallback runs: with `retry_via(publisher)` configured on the
+  scope, the element settles immediately (the position moves past it) and a copy republishes
+  to the topic's tail after the delay - ordering is not preserved, and the copy is
+  at-most-once across the delay window (a crash before the timer fires loses it). Without
+  `retry_via` the delay is dropped with a warning and the element degrades to a plain
+  `retry()` hole as above.
+- **A too-short result vector** - the unmatched remainder of the page is retried (an extra
+  redelivery beats a silently lost message) and the mismatch is logged.
+
+### Concurrency
+
+`workers(n)` on a batch registration keeps up to `n` pages in flight at once; the tracked
+position stays correct under out-of-order acks by construction. `by_key` does not apply to
+batches - a keyed policy behaves like a plain pool of the same size. Per-key ordering is a
+single-message-handler feature (`workers(n, by_key)`, see the keyed lanes example), where it
+composes with Kafka's native record-key partitioning end to end.
+
+The in-process test broker batches natively the same way (a page drains what is enqueued),
+and the `Buffered` wrapper works over both brokers.
+
 ## Consume errors
 
 The subscriber stream forwards consumer errors as stream items, except the ones librdkafka is

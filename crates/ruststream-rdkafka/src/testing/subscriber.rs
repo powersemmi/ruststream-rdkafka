@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::Stream;
 use ruststream::testing::Coordinator;
-use ruststream::{AckError, Headers, IncomingMessage, Partitioned, Subscriber};
+use ruststream::{AckError, BatchSubscriber, Headers, IncomingMessage, Partitioned, Subscriber};
 
 use super::broker::TestBrokerState;
 use super::router::{DeliveryReceiver, DeliverySender, SubscriptionId, TestDelivery};
@@ -88,6 +88,47 @@ impl Subscriber for KafkaTestSubscriber {
                         sender: sender.clone(),
                         coordinator: coordinator.clone(),
                     })
+                })
+            })
+        })
+    }
+}
+
+impl BatchSubscriber for KafkaTestSubscriber {
+    type Batch = Vec<KafkaTestMessage>;
+
+    /// Streams non-empty pages natively: each waits for one delivery, then drains whatever
+    /// else is already enqueued (mirroring the real subscriber's drain-what-is-fetched
+    /// behavior).
+    ///
+    /// # Cancel safety
+    ///
+    /// Same guarantees as [`Subscriber::stream`]: cancel safe between polls.
+    fn batches(
+        &mut self,
+    ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
+        let Self {
+            receiver,
+            sender,
+            coordinator,
+            ..
+        } = self;
+        futures::stream::poll_fn(move |cx| {
+            receiver.poll_recv(cx).map(|delivery| {
+                delivery.map(|first| {
+                    let mut batch = vec![KafkaTestMessage {
+                        delivery: Some(first),
+                        sender: sender.clone(),
+                        coordinator: coordinator.clone(),
+                    }];
+                    while let Ok(delivery) = receiver.try_recv() {
+                        batch.push(KafkaTestMessage {
+                            delivery: Some(delivery),
+                            sender: sender.clone(),
+                            coordinator: coordinator.clone(),
+                        });
+                    }
+                    Ok(batch)
                 })
             })
         })
