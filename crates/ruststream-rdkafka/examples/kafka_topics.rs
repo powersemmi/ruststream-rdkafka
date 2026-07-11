@@ -8,6 +8,7 @@
 
 use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
 use ruststream::subscriber;
+use ruststream_rdkafka::{Assignment, Commit, KafkaBroker, KafkaTopic, StartOffset};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -22,8 +23,6 @@ struct Confirmation {
 }
 
 // --8<-- [start:descriptor]
-use ruststream_rdkafka::{Assignment, Commit, KafkaTopic, StartOffset};
-
 // Everything besides the topic is optional: unset options mean the librdkafka defaults. The
 // group overrides the broker-wide `default_group`; `Commit::Tracked` turns `ack` into a precise
 // per-message acknowledgement backed by the stored position; `config` reaches any consumer
@@ -46,8 +45,6 @@ async fn confirm(order: &Order) -> Confirmation {
 // --8<-- [end:descriptor]
 
 // --8<-- [start:app]
-use ruststream_rdkafka::KafkaBroker;
-
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
