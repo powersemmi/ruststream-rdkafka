@@ -89,6 +89,35 @@ flowing during a rebalance. Unset means the librdkafka default (`range,roundrobi
 Cooperative and eager strategies cannot mix within one group, and librdkafka offers no API for
 custom group assignors.
 
+## Manual partition assignment
+
+`KafkaTopic::partitions` switches the subscription from the group protocol (`subscribe`) to
+manual assignment (`assign`): the consumer takes exactly the named partitions of the topic -
+no group membership, no rebalancing. It is the honest answer to "consume exactly these
+partitions": static pinning, inspection and replay readers, one-consumer-per-partition
+deployments.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_topics.rs:assign"
+```
+
+A group is optional and changes only offset handling. With one named, the consumer commits
+into the group without joining it: `Commit::Tracked` stores positions exactly as on a normal
+subscription, and `StartOffset::Committed` resumes from them. Without one, commits are off and
+the start offset must be explicit (`Earliest` or `Latest`); `Commit::Tracked` and
+`StartOffset::Committed` are clear startup errors, and acks are advisory (librdkafka insists
+on a `group.id` even for `assign()`, so a group-less reader runs under the inert
+`ruststream.standalone` placeholder - it never joins or commits). Manual assignment
+does not combine with `and_topic`/`pattern` (it names exact partitions of one topic) or with
+`Commit::Transactional`, and the in-process test broker rejects it (it does not simulate
+partitions).
+
+Manual assignment composes with keyed worker lanes out of the box: under the default
+`LaneKey::Partition` each assigned partition lanes independently, so
+`partitions([0, 2, 5])` + `workers(n, by_key)` processes every assigned partition in order on
+its lane. Sizing `n` against the partition list is your call - fewer lanes than partitions
+means partitions share lanes (ordering still holds), more means idle lanes.
+
 ## Keyed worker lanes
 
 Kafka partitions by the native record key, and this crate surfaces it through

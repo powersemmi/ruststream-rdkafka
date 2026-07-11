@@ -6,7 +6,7 @@
 //! cargo run --example kafka_topics -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, TypedPublisher};
 use ruststream::subscriber;
 use ruststream_rdkafka::{Assignment, Commit, KafkaBroker, KafkaTopic, StartOffset};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,21 @@ async fn confirm(order: &Order) -> Confirmation {
 }
 // --8<-- [end:descriptor]
 
+// --8<-- [start:assign]
+// Manual assignment: consume exactly these partitions - no group membership, no rebalancing.
+// This reader names no group, so it cannot commit and the start offset must be explicit; add
+// `.group("...")` to commit positions into a group without joining it.
+#[subscriber(
+    KafkaTopic::new("orders")
+        .partitions([0])
+        .start(StartOffset::Earliest)
+)]
+async fn audit_partition_zero(order: &Order) -> HandlerResult {
+    println!("partition 0 saw order {}", order.id);
+    HandlerResult::Ack
+}
+// --8<-- [end:assign]
+
 // --8<-- [start:app]
 #[ruststream::app]
 fn app() -> impl App {
@@ -51,6 +66,7 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         let confirmations = TypedPublisher::new(b.broker().publisher());
         b.include_publishing(confirm, confirmations);
+        b.include(audit_partition_zero);
     })
 }
 // --8<-- [end:app]

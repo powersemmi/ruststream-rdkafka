@@ -135,6 +135,7 @@ pub struct KafkaTopic {
     commit: Commit,
     assignment: Option<Assignment>,
     lane_key: LaneKey,
+    partitions: Vec<i32>,
     retry: Option<Retry>,
     max_deliveries: Option<u32>,
     dead_letter: Option<String>,
@@ -152,6 +153,7 @@ impl KafkaTopic {
             commit: Commit::default(),
             assignment: None,
             lane_key: LaneKey::default(),
+            partitions: Vec::new(),
             retry: None,
             max_deliveries: None,
             dead_letter: None,
@@ -258,6 +260,33 @@ impl KafkaTopic {
         self
     }
 
+    /// Switches the subscription to manual partition assignment: the consumer `assign()`s
+    /// exactly these partitions of the topic - no group membership, no rebalancing.
+    ///
+    /// Deliveries start per [`start`](Self::start); with a group also named the consumer
+    /// commits into it without joining it (so `StartOffset::Committed` resumes from the
+    /// group's positions), and without one commits are off and the start offset must be
+    /// explicit. Does not combine with [`and_topic`](Self::and_topic) /
+    /// [`pattern`](Self::pattern) (manual assignment names exact partitions of one topic) or
+    /// with `Commit::Transactional`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::{KafkaTopic, StartOffset};
+    ///
+    /// // An inspection reader pinned to partition 0, no group side effects.
+    /// let topic = KafkaTopic::new("orders")
+    ///     .partitions([0])
+    ///     .start(StartOffset::Earliest);
+    /// # let _ = topic;
+    /// ```
+    #[must_use]
+    pub fn partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
+        self.partitions = partitions.into_iter().collect();
+        self
+    }
+
     /// What `nack(true)` does on this subscription (see [`Retry`]); unset keeps Kafka's native
     /// behavior - the offset stays unsettled and redelivers on the next fetch of the partition.
     ///
@@ -325,6 +354,13 @@ impl KafkaTopic {
                 self.topics[0],
             )));
         }
+        if !self.partitions.is_empty() && (self.topics.len() > 1 || self.requires_pattern) {
+            return Err(KafkaError::InvalidOptions(
+                "manual partition assignment names exact partitions of one topic; it does \
+                 not combine with `and_topic` or `pattern`"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -360,6 +396,10 @@ impl KafkaTopic {
         self.dead_letter.as_deref()
     }
 
+    pub(crate) fn assigned_partitions(&self) -> &[i32] {
+        &self.partitions
+    }
+
     pub(crate) fn config_entries(&self) -> &[(String, String)] {
         &self.config
     }
@@ -389,6 +429,13 @@ impl SubscriptionSource<crate::testing::KafkaTestBroker> for KafkaTopic {
         self,
         broker: &crate::testing::KafkaTestBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
+        if !self.partitions.is_empty() {
+            return Err(KafkaError::InvalidOptions(
+                "the in-process test broker does not simulate partitions; manual partition \
+                 assignment needs a real cluster"
+                    .to_owned(),
+            ));
+        }
         broker.subscribe_topics(&self.topics).await
     }
 }
