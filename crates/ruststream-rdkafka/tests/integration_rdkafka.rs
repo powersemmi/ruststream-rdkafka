@@ -1568,7 +1568,7 @@ async fn assigned_lane(
     HandlerResult::Ack
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 struct OrderPayload {
     partition: i32,
     seq: u32,
@@ -1722,4 +1722,114 @@ async fn ctx_extractors_inject_delivery_fields() {
         seen, expected,
         "the extractor-injected partition and offset must match the deliveries",
     );
+}
+
+// The EOS publishing-handler sugar: a bare handler returns the reply, and the pipeline's
+// reply publisher pairs it with the consumed offset - no Ctx, no manual publish.
+#[subscriber(
+    KafkaTopic::new(std::env::var("EOS_SUGAR_TOPIC").expect("topic env"))
+        .group(std::env::var("EOS_SUGAR_GROUP").expect("group env"))
+        .start(StartOffset::Earliest)
+        .commit(Commit::Transactional(
+            std::env::var("EOS_SUGAR_PIPELINE").expect("pipeline env"),
+        )),
+    publish("eos-sugar-replies-placeholder")
+)]
+async fn eos_sugar(order: &OrderPayload) -> OrderPayload {
+    order.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eos_publishing_handler_replies_ride_the_window() {
+    const COUNT: usize = 3;
+
+    let Some(url) = kafka_url() else { return };
+    let input = unique("eos-sugar-in");
+    let group = unique("group");
+    let pipeline_id = unique("eos-sugar");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, "eos-sugar-replies-placeholder", 1).await;
+    unsafe {
+        std::env::set_var("EOS_SUGAR_TOPIC", &input);
+        std::env::set_var("EOS_SUGAR_GROUP", &group);
+        std::env::set_var("EOS_SUGAR_PIPELINE", &pipeline_id);
+    }
+
+    let producer = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        producer
+            .publisher()
+            .publish(OutgoingMessage::new(&input, payload.as_bytes()))
+            .await
+            .expect("publish input");
+    }
+    Broker::shutdown(&producer)
+        .await
+        .expect("producer shutdown");
+
+    // Run the app until the replies are visible to a read_committed reader: the window must
+    // have committed records and offsets atomically by then.
+    let broker = KafkaBroker::new([url.clone()]);
+    let pipeline = EosPipeline::new(broker.publisher().transactional_id(&pipeline_id))
+        .commit_interval(Duration::from_millis(50));
+    let replies_wiring = pipeline.replies();
+    let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(broker, |b| {
+        b.include_publishing(eos_sugar, replies_wiring);
+    });
+
+    let reader = connected_broker(&url).await;
+    let mut out_subscriber = reader
+        .subscribe(tracked("eos-sugar-replies-placeholder", &unique("reader")))
+        .await
+        .expect("subscribe replies");
+    let mut out_stream = Box::pin(out_subscriber.stream());
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let consume_replies = async move {
+        for _ in 0..COUNT {
+            let msg = next_message(&mut out_stream).await;
+            let payload = String::from_utf8(msg.payload().to_vec()).expect("utf8");
+            assert!(
+                msg.headers()
+                    .get(ruststream_rdkafka::EOS_SOURCE_HEADER)
+                    .is_none(),
+                "the source header must never reach the wire",
+            );
+            sink.lock().expect("seen mutex poisoned").push(payload);
+            msg.ack().await.expect("ack reply");
+        }
+    };
+    App::run_until(app, consume_replies).await.expect("run");
+    let seen = seen.lock().expect("seen mutex poisoned").clone();
+    for (seq, payload) in seen.iter().enumerate() {
+        assert!(
+            payload.contains(&format!(r#""seq":{seq}"#)),
+            "reply {seq} must carry the source payload, got {payload}",
+        );
+    }
+
+    // The offsets went into the transaction: the group resumes past the window.
+    publish(&reader, &input, br#"{"partition":0,"seq":99}"#).await;
+    let mut resumed = reader
+        .subscribe(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("resubscribe input");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert!(
+        msg.payload().ends_with(br#""seq":99}"#),
+        "transactionally committed offsets must position the group after the window",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    drop(out_subscriber);
+    Broker::shutdown(&reader).await.expect("shutdown");
 }

@@ -129,9 +129,18 @@ Three places name one id:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos"
 ```
 
-The delivery's source coordinates arrive as a `Ctx<Source>` extractor parameter - every
-`KafkaContext` field key (`Partition`, `Offset`, `Topic`, ...) works the same way, so handlers
-take exactly the delivery metadata they need without a ctx parameter.
+A publishing handler needs no manual pairing at all: mount it with the pipeline's reply
+publisher, and every reply joins the window paired with its delivery's consumed offset -
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos_wiring"
+```
+
+`pipeline.replies()` is a plain `TypedPublisher` under the hood (the explicit spelling is
+`TypedPublisher::new(pipeline.clone()).transform(EosReplies)`), so codecs and further
+transforms compose as usual; `replies_with(codec)` names a non-default codec. For manual
+publishes from a plain handler, `EosPipeline::publish` takes the delivery's coordinates
+explicitly - as a `Ctx<Source>` extractor parameter, like every other `KafkaContext` field key.
 
 The subscription's `Commit::Transactional("enrich-svc-1")` switches its consumer's own
 committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;
@@ -156,6 +165,11 @@ Practical notes:
   commit, not at publish.
 - `retry()` from a participant stalls its window until the transaction deadline, then aborts
   it; prefer `drop()`/dead-lettering for poison messages in EOS handlers.
+- The `retry_after`/`retry_via` deferred-republish fallback does not apply to EOS replies: a
+  delayed copy would break the offset-record pairing.
+- The reply publisher pairs only with `Commit::Transactional` subscriptions naming this
+  pipeline's id; a reply from any other subscription fails with a clear error instead of
+  silently downgrading the guarantee.
 - Works best over the default `LaneKey::Partition` lanes, where each partition settles in
   order behind its lane head.
 

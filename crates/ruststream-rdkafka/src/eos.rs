@@ -16,7 +16,14 @@ use std::time::Duration;
 use futures::future::select_all;
 use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
-use ruststream::{OutgoingMessage, Publisher as _, TransactionalPublisher as _};
+use ruststream::codec::Codec;
+#[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
+use ruststream::codec::DefaultCodec;
+use ruststream::runtime::{
+    Outgoing, PublishContext, PublishTransform, PublishTransformIdentity, PublishTransformStack,
+    TypedPublisher,
+};
+use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher as _};
 use tracing::{debug, error};
 
 use crate::error::KafkaError;
@@ -579,5 +586,159 @@ async fn abort_window(
                 "seek-back after an aborted EOS window failed",
             );
         }
+    }
+}
+
+/// Header carrying a transactional delivery's source coordinates through the reply path.
+///
+/// Stamped onto every incoming delivery of a `Commit::Transactional` subscription (the value is
+/// `"{partition}:{offset}:{topic}"`), relayed onto a publishing handler's reply by
+/// [`EosReplies`], and consumed by the pipeline's [`Publisher`] impl to pair the reply with the
+/// consumed offset. It is stripped from every outgoing publish, so it never reaches the wire.
+pub const EOS_SOURCE_HEADER: &str = "kafka-eos-source";
+
+pub(crate) fn encode_source(topic: &str, partition: i32, offset: i64) -> String {
+    format!("{partition}:{offset}:{topic}")
+}
+
+fn decode_source(value: &str) -> Option<SourceOffset> {
+    let mut parts = value.splitn(3, ':');
+    let partition = parts.next()?.parse().ok()?;
+    let offset = parts.next()?.parse().ok()?;
+    let topic = parts.next()?;
+    Some(SourceOffset::new(topic, partition, offset))
+}
+
+/// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
+/// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
+///
+/// [`EosPipeline::replies`] wires it for you; name it directly to keep the explicit
+/// `TypedPublisher` form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+/// Generic over the handler's context type, so bare handlers (no ctx parameter, no `Ctx`
+/// extractors) work.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EosReplies;
+
+impl<C> PublishTransform<C> for EosReplies {
+    fn apply(&self, out: &mut Outgoing<'_>, cx: &PublishContext<'_, C>) {
+        if let Some(source) = cx.headers().get(EOS_SOURCE_HEADER) {
+            let source = source.to_vec();
+            out.headers_mut().insert(EOS_SOURCE_HEADER, source);
+        }
+    }
+}
+
+impl EosPipeline {
+    /// A reply publisher for `#[subscriber(.., publish("replies"))]` handlers: every reply
+    /// joins the pipeline's open window paired with its delivery's consumed offset, making the
+    /// publishing-handler form exactly-once end to end - the handler just returns the value.
+    ///
+    /// Pairs only with subscriptions in `Commit::Transactional` mode naming this pipeline's id
+    /// (they stamp the source coordinates the reply path relays); a reply from any other
+    /// subscription fails with a clear error. The `retry_after` deferred-republish fallback
+    /// does not apply to these replies: a delayed copy would break the offset-record pairing.
+    ///
+    /// Equivalent explicit form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ruststream_rdkafka::{EosPipeline, KafkaBroker};
+    ///
+    /// let broker = KafkaBroker::new(["localhost:9092"]);
+    /// let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-1"));
+    /// let replies = pipeline.replies();
+    /// // b.include_publishing(enrich, replies);
+    /// # let _ = replies;
+    /// ```
+    #[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
+    #[must_use]
+    pub fn replies(
+        &self,
+    ) -> TypedPublisher<
+        Self,
+        DefaultCodec,
+        PublishTransformStack<PublishTransformIdentity, EosReplies>,
+    > {
+        TypedPublisher::new(self.clone()).transform(EosReplies)
+    }
+
+    /// Like [`replies`](Self::replies), with an explicit codec instead of the default one.
+    #[must_use]
+    pub fn replies_with<C: Codec>(
+        &self,
+        codec: C,
+    ) -> TypedPublisher<Self, C, PublishTransformStack<PublishTransformIdentity, EosReplies>> {
+        TypedPublisher::with_codec(self.clone(), codec).transform(EosReplies)
+    }
+}
+
+impl Publisher for EosPipeline {
+    type Error = KafkaError;
+
+    /// Publishes a reply into the pipeline's open window, paired with the source coordinates
+    /// the [`EOS_SOURCE_HEADER`] carries (stripped before the record is produced).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] when the header is missing or malformed - the
+    /// originating subscription is not in `Commit::Transactional` mode for this pipeline, or
+    /// the reply publisher was wired without [`EosReplies`] (use
+    /// [`replies`](EosPipeline::replies)); otherwise as
+    /// [`EosPipeline::publish`](EosPipeline::publish).
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel safe: dropping the future may leave the record in the window's transaction.
+    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+        let Some(source) = msg
+            .headers()
+            .get_str(EOS_SOURCE_HEADER)
+            .and_then(decode_source)
+        else {
+            return Err(KafkaError::InvalidOptions(
+                "an EOS reply carries no source coordinates: the subscription must be in \
+                 `Commit::Transactional` mode for this pipeline, and the reply publisher must \
+                 relay them (wire it with `EosPipeline::replies()` or add the `EosReplies` \
+                 transform)"
+                    .to_owned(),
+            ));
+        };
+        let mut headers = msg.headers().clone();
+        headers.remove(EOS_SOURCE_HEADER);
+        let stripped = OutgoingMessage::new(msg.name(), msg.payload()).with_headers(headers);
+        self.publish(&source, stripped).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ruststream::Headers;
+
+    use super::*;
+
+    #[test]
+    fn source_header_roundtrips_topics_with_colons() {
+        let encoded = encode_source("orders:eu:v1", 3, 42);
+        let decoded = decode_source(&encoded).expect("decodes");
+        assert_eq!(decoded, SourceOffset::new("orders:eu:v1", 3, 42));
+    }
+
+    #[test]
+    fn malformed_source_headers_are_rejected() {
+        for bad in ["", "3", "3:x:orders", "x:42:orders"] {
+            assert!(decode_source(bad).is_none(), "{bad:?} must not decode");
+        }
+    }
+
+    #[tokio::test]
+    async fn reply_without_source_coordinates_fails_clearly() {
+        let pipeline = EosPipeline::new(KafkaPublisher::new(Arc::default()).transactional_id("p1"));
+        let err = Publisher::publish(&pipeline, OutgoingMessage::new("replies", b"x".as_slice()))
+            .await
+            .expect_err("a reply without the source header must fail");
+        assert!(matches!(err, KafkaError::InvalidOptions(_)));
+        assert!(err.to_string().contains("Commit::Transactional"));
+        let _ = Headers::new();
     }
 }

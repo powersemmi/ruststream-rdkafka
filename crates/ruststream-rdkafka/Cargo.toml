@@ -15,7 +15,12 @@ categories = ["asynchronous", "network-programming"]
 workspace = true
 
 [features]
-default = []
+default = ["json"]
+# Codec forwarders, mirroring the core's feature names: `json` (the default) makes the core's
+# DefaultCodec available, which is what `EosPipeline::replies` encodes with.
+json = ["ruststream/json"]
+msgpack = ["ruststream/msgpack"]
+cbor = ["ruststream/cbor"]
 # Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
 testing = ["ruststream/conformance", "ruststream/testing"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use rdkafka::message::{BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders};
 use ruststream::Headers;
 
+use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 
@@ -71,6 +72,7 @@ pub(crate) fn headers_for_publish(headers: &Headers) -> Result<PublishParts, Kaf
     for (name, value) in headers.iter() {
         if name.eq_ignore_ascii_case(PARTITION_KEY_HEADER)
             || name.eq_ignore_ascii_case(PARTITION_HEADER)
+            || name.eq_ignore_ascii_case(EOS_SOURCE_HEADER)
         {
             continue;
         }

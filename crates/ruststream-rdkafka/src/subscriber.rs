@@ -13,6 +13,7 @@ use ruststream::{BatchSubscriber, Subscriber};
 use tracing::{debug, warn};
 
 use crate::convert;
+use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
 use crate::retry::RetryContext;
@@ -113,7 +114,20 @@ impl KafkaSubscriber {
     }
 
     fn map_delivery(&self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
-        let headers = convert::headers_from_message(delivery);
+        let mut headers = convert::headers_from_message(delivery);
+        if matches!(self.commit, Commit::Transactional(_)) {
+            // The source coordinates ride the delivery's headers so the reply path can pair a
+            // publishing handler's reply with its consumed offset (see EosPipeline::replies);
+            // stripped from every outgoing publish, so they never hit the wire.
+            headers.insert(
+                EOS_SOURCE_HEADER,
+                crate::eos::encode_source(
+                    delivery.topic(),
+                    delivery.partition(),
+                    delivery.offset(),
+                ),
+            );
+        }
         let payload = delivery
             .payload()
             .map_or_else(Bytes::new, Bytes::copy_from_slice);

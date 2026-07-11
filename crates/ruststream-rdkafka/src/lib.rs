@@ -55,7 +55,7 @@ pub mod testing;
 
 pub use broker::KafkaBroker;
 pub use distribution::RoundRobin;
-pub use eos::{EosPipeline, SourceOffset};
+pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, SourceOffset};
 pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{KafkaPublisher, TransactionalPartitions};
