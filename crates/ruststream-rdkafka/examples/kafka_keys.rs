@@ -10,6 +10,7 @@
 
 use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
+use ruststream_rdkafka::{KafkaBroker, KafkaTopic, LaneKey};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -41,8 +42,6 @@ async fn on_audit(order: &Order) -> HandlerResult {
     HandlerResult::Ack
 }
 // --8<-- [end:partition_lanes]
-
-use ruststream_rdkafka::{KafkaBroker, KafkaTopic, LaneKey};
 
 #[ruststream::app]
 fn app() -> impl App {

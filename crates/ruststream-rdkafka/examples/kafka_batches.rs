@@ -10,8 +10,10 @@
 
 use std::time::Duration;
 
+use ruststream::Buffered;
 use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
+use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -74,9 +76,6 @@ async fn reconcile_page(payments: &[Payment]) -> Vec<HandlerResult> {
         .collect()
 }
 // --8<-- [end:selective]
-
-use ruststream::Buffered;
-use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic};
 
 // --8<-- [start:app]
 #[ruststream::app]

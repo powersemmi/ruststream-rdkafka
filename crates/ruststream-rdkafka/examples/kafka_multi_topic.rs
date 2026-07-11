@@ -9,6 +9,7 @@
 
 use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
+use ruststream_rdkafka::{KafkaBroker, KafkaTopic, StartOffset};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -34,8 +35,6 @@ async fn on_audit(event: &OrderEvent) -> HandlerResult {
     HandlerResult::Ack
 }
 // --8<-- [end:pattern]
-
-use ruststream_rdkafka::{KafkaBroker, KafkaTopic, StartOffset};
 
 #[ruststream::app]
 fn app() -> impl App {
