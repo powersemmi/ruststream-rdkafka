@@ -5,9 +5,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rdkafka::ClientConfig;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use ruststream::{Broker, DescribeServer, ServerSpec, Subscribe};
 use tokio::sync::OnceCell;
 use tokio::task;
@@ -226,19 +226,36 @@ impl KafkaBroker {
     pub async fn subscribe(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
         self.connected()?;
         def.validate()?;
+        let manual = !def.assigned_partitions().is_empty();
         let group = def
             .group_or(self.default_group.as_deref())
-            .ok_or_else(|| {
-                KafkaError::InvalidOptions(format!(
+            .map(str::to_owned);
+        let group = match group {
+            Some(group) => Some(group),
+            // Manual assignment needs no group membership; everything else does.
+            None if manual => None,
+            None => {
+                return Err(KafkaError::InvalidOptions(format!(
                     "subscription to {:?} has no consumer group: set `KafkaTopic::group` or \
                      `KafkaBroker::default_group`",
                     def.topic(),
-                ))
-            })?
-            .to_owned();
+                )));
+            }
+        };
+        if manual {
+            validate_manual_assignment(&def, group.as_deref())?;
+        }
 
         let mut config = self.base_config();
-        config.set("group.id", group);
+        if let Some(group) = &group {
+            config.set("group.id", group);
+        } else {
+            // librdkafka requires a group.id even for assign(); an assign-only consumer
+            // never joins the group protocol and, with auto-commit off, never commits, so
+            // this placeholder id stays inert broker-side.
+            config.set("group.id", "ruststream.standalone");
+            config.set("enable.auto.commit", "false");
+        }
         match def.start_offset() {
             StartOffset::Committed => {}
             StartOffset::Earliest => {
@@ -276,8 +293,12 @@ impl KafkaBroker {
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
-        let names: Vec<&str> = def.subscribed_topics().iter().map(String::as_str).collect();
-        consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
+        if manual {
+            assign_partitions(&consumer, &def)?;
+        } else {
+            let names: Vec<&str> = def.subscribed_topics().iter().map(String::as_str).collect();
+            consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
+        }
 
         let consumer = Arc::new(consumer);
         if let Commit::Transactional(pipeline) = def.commit_mode() {
@@ -303,6 +324,55 @@ impl KafkaBroker {
             retry,
         ))
     }
+}
+
+/// The option combinations manual assignment cannot honor, failed at subscribe time.
+fn validate_manual_assignment(def: &KafkaTopic, group: Option<&str>) -> Result<(), KafkaError> {
+    if matches!(def.commit_mode(), Commit::Transactional(_)) {
+        return Err(KafkaError::InvalidOptions(
+            "manual partition assignment does not compose with `Commit::Transactional`: an \
+             EOS pipeline commits through the consumer group protocol"
+                .to_owned(),
+        ));
+    }
+    if group.is_none() {
+        if def.commit_mode() == &Commit::Tracked {
+            return Err(KafkaError::InvalidOptions(
+                "`Commit::Tracked` needs a group to commit into; name one with \
+                 `KafkaTopic::group` or drop the commit mode for a group-less reader"
+                    .to_owned(),
+            ));
+        }
+        if def.start_offset() == StartOffset::Committed {
+            return Err(KafkaError::InvalidOptions(
+                "a group-less manual assignment has no committed offsets to start from; set \
+                 `start(StartOffset::Earliest)` or `Latest`, or name a group"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `assign()`s the descriptor's exact partitions with their start offsets: `Stored` resumes
+/// from the group's committed positions (falling back to `auto.offset.reset`);
+/// `Beginning`/`End` are the explicit group-less starts.
+fn assign_partitions(
+    consumer: &StreamConsumer<TrackingContext>,
+    def: &KafkaTopic,
+) -> Result<(), KafkaError> {
+    let offset = match def.start_offset() {
+        StartOffset::Committed => Offset::Stored,
+        StartOffset::Earliest => Offset::Beginning,
+        StartOffset::Latest => Offset::End,
+    };
+    let mut assignment = TopicPartitionList::new();
+    for partition in def.assigned_partitions() {
+        assignment
+            .add_partition_offset(def.topic(), *partition, offset)
+            .map_err(KafkaError::subscribe)?;
+    }
+    consumer.assign(&assignment).map_err(KafkaError::subscribe)
 }
 
 impl Broker for KafkaBroker {

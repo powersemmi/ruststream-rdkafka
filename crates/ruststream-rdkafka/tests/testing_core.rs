@@ -457,3 +457,18 @@ async fn round_robin_leaves_keyed_replies_alone() {
         "a keyed reply keeps its key-implied placement",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_assignment_is_rejected_in_process() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = KafkaTestBroker::new();
+    broker.connect().await.expect("connect");
+
+    let err = KafkaTopic::new("orders")
+        .partitions([0])
+        .subscribe(&broker)
+        .await
+        .expect_err("partitions need a real cluster");
+    assert!(matches!(err, KafkaError::InvalidOptions(_)));
+}

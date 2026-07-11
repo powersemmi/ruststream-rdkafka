@@ -1395,3 +1395,244 @@ async fn explicit_partition_header_targets_the_partition() {
     drop(subscriber);
     Broker::shutdown(&broker).await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_assignment_consumes_only_the_assigned_partition() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("assign");
+    create_topic(&url, &topic, 2).await;
+    let broker = connected_broker(&url).await;
+
+    for (payload, partition) in [(b"p0".as_slice(), 0), (b"p1", 1)] {
+        let mut headers = Headers::new();
+        headers.insert(PARTITION_HEADER, partition.to_string());
+        broker
+            .publisher()
+            .publish(OutgoingMessage::new(&topic, payload).with_headers(headers))
+            .await
+            .expect("publish pinned");
+    }
+
+    // A group-less reader pinned to partition 1: it must see p1 and never p0.
+    let mut subscriber = broker
+        .subscribe(
+            KafkaTopic::new(&topic)
+                .partitions([1])
+                .start(StartOffset::Earliest),
+        )
+        .await
+        .expect("subscribe assigned");
+    let mut stream = Box::pin(subscriber.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"p1");
+    assert_eq!(msg.partition(), 1);
+    msg.ack().await.expect("advisory ack");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .is_err(),
+        "the unassigned partition must stay unseen",
+    );
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_assignment_commits_into_a_group_without_joining() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("assign-commit");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+    let group = unique("group");
+
+    publish(&broker, &topic, b"first").await;
+    {
+        let mut subscriber = broker
+            .subscribe(
+                KafkaTopic::new(&topic)
+                    .partitions([0])
+                    .group(&group)
+                    .start(StartOffset::Earliest)
+                    .commit(Commit::Tracked),
+            )
+            .await
+            .expect("subscribe assigned with group");
+        let mut stream = Box::pin(subscriber.stream());
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), b"first");
+        msg.ack().await.expect("tracked ack");
+    }
+
+    // The tracked position went into the group: a fresh assignment resuming from committed
+    // offsets sees only what came after.
+    publish(&broker, &topic, b"second").await;
+    let mut resumed = broker
+        .subscribe(
+            KafkaTopic::new(&topic)
+                .partitions([0])
+                .group(&group)
+                .commit(Commit::Tracked),
+        )
+        .await
+        .expect("resubscribe assigned");
+    let mut stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"second",
+        "committed positions must survive across manual assignments",
+    );
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(resumed);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_assignment_rejects_unsupported_combinations() {
+    let Some(url) = kafka_url() else { return };
+    let broker = connected_broker(&url).await;
+
+    let multi = broker
+        .subscribe(
+            KafkaTopic::new("orders")
+                .and_topic("cancellations")
+                .partitions([0])
+                .group("g"),
+        )
+        .await
+        .expect_err("partitions with and_topic must fail");
+    assert!(matches!(multi, KafkaError::InvalidOptions(_)));
+
+    let tracked = broker
+        .subscribe(
+            KafkaTopic::new("orders")
+                .partitions([0])
+                .start(StartOffset::Earliest)
+                .commit(Commit::Tracked),
+        )
+        .await
+        .expect_err("tracked without a group must fail");
+    assert!(matches!(tracked, KafkaError::InvalidOptions(_)));
+
+    let committed = broker
+        .subscribe(KafkaTopic::new("orders").partitions([0]))
+        .await
+        .expect_err("group-less committed start must fail");
+    assert!(matches!(committed, KafkaError::InvalidOptions(_)));
+
+    let transactional = broker
+        .subscribe(
+            KafkaTopic::new("orders")
+                .partitions([0])
+                .group("g")
+                .commit(Commit::Transactional("pipe".into())),
+        )
+        .await
+        .expect_err("transactional manual assignment must fail");
+    assert!(matches!(transactional, KafkaError::InvalidOptions(_)));
+
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[derive(Clone)]
+struct AssignedLaneState {
+    expected: usize,
+    seen: Arc<Mutex<Vec<(i32, u32)>>>,
+    done: Arc<Notify>,
+}
+
+#[subscriber(
+    KafkaTopic::new(std::env::var("ASSIGNED_LANES_TOPIC").expect("topic env"))
+        .partitions([0, 1])
+        .start(StartOffset::Earliest),
+    workers(2, by_key)
+)]
+async fn assigned_lane(
+    payload: &OrderPayload,
+    ctx: &mut ruststream::runtime::Context<'_, (), AssignedLaneState>,
+) -> HandlerResult {
+    let state = ctx.state().clone();
+    {
+        let mut seen = state.seen.lock().expect("seen mutex poisoned");
+        seen.push((payload.partition, payload.seq));
+        if seen.len() < state.expected {
+            return HandlerResult::Ack;
+        }
+    }
+    state.done.notify_waiters();
+    HandlerResult::Ack
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OrderPayload {
+    partition: i32,
+    seq: u32,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_assignment_composes_with_partition_lanes() {
+    const PER_PARTITION: u32 = 20;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("assign-lanes");
+    create_topic(&url, &topic, 2).await;
+    // The macro source expression cannot capture locals; the topic travels via the env.
+    unsafe { std::env::set_var("ASSIGNED_LANES_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..PER_PARTITION {
+        for partition in [0, 1] {
+            let mut headers = Headers::new();
+            headers.insert(PARTITION_HEADER, partition.to_string());
+            let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
+            broker
+                .publisher()
+                .publish(OutgoingMessage::new(&topic, payload.as_bytes()).with_headers(headers))
+                .await
+                .expect("publish");
+        }
+    }
+    Broker::shutdown(&broker).await.expect("producer shutdown");
+
+    let state = AssignedLaneState {
+        expected: (PER_PARTITION * 2) as usize,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_state = state.clone();
+    let app = RustStream::new(AppInfo::new("assign-lanes", "0.0.0"))
+        .on_startup(move |()| {
+            let state = app_state;
+            async move { Ok::<_, Infallible>(state) }
+        })
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(assigned_lane);
+        });
+
+    let done = Arc::clone(&state.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("all messages within timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    // Each assigned partition must arrive in order on its lane, interleaving aside.
+    let seen = state.seen.lock().expect("seen mutex poisoned").clone();
+    for partition in [0, 1] {
+        let sequence: Vec<u32> = seen
+            .iter()
+            .filter(|(p, _)| *p == partition)
+            .map(|(_, seq)| *seq)
+            .collect();
+        let expected: Vec<u32> = (0..PER_PARTITION).collect();
+        assert_eq!(
+            sequence, expected,
+            "partition {partition} must stay ordered on its lane",
+        );
+    }
+}
