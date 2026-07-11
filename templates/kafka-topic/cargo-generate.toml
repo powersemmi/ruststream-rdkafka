@@ -1,0 +1,8 @@
+# cargo-generate manifest for the Kafka topic RustStream starter.
+#
+# Render it with:
+#   cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
+#
+# `{{project-name}}` (the --name value) is a cargo-generate built-in; no placeholders need declaring.
+[template]
+description = "A Kafka (consumer groups, tracked commits, retry and dead-letter topics) RustStream starter service"

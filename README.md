@@ -56,6 +56,12 @@ compression. SASL PLAIN/SCRAM/OAUTHBEARER need no feature - librdkafka implement
 built-in; other backends (gssapi, dynamic linking, ...) can be enabled by depending on
 `rdkafka` directly, since cargo features are additive across the dependency graph.
 
+## Scaffold a service
+
+```bash
+cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
+```
+
 ## License
 
 Apache-2.0.
