@@ -15,14 +15,14 @@ use std::convert::Infallible;
 use ruststream::codec::{Codec, JsonCodec};
 use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
 use ruststream::{FromRef, OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
-use ruststream_rdkafka::context::keys::{Partition, Source};
+use ruststream_rdkafka::context::keys::Partition;
 use ruststream_rdkafka::{
     Commit, EosPipeline, KafkaBroker, KafkaError, KafkaPublisher, KafkaTopic,
     TransactionalPartitions,
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Order {
     id: u64,
     items: Vec<String>,
@@ -41,7 +41,6 @@ struct ItemShipment {
 struct AppState {
     shipments: Shipments,
     invoices: Invoices,
-    enrichment: Enrichment,
 }
 
 #[derive(Clone)]
@@ -139,36 +138,18 @@ async fn bill(
 // source positions move atomically with the published records. A crash or an aborted window
 // rewinds both - the output topic never sees a duplicate. The subscription's
 // `Commit::Transactional` names the pipeline id; the consumer stops committing on its own.
-#[derive(Clone)]
-struct Enrichment {
-    pipeline: EosPipeline,
-}
-
+//
+// A publishing handler just returns the value: the runtime encodes it, and the pipeline's
+// reply publisher (wired below) pairs it with this delivery's consumed offset automatically.
 #[subscriber(
     KafkaTopic::new("raw-orders")
         .group("enrich-svc")
         .commit(Commit::Transactional("enrich-svc-1".into())),
+    publish("enriched-orders"),
     workers(4, by_key)
 )]
-async fn enrich(
-    order: &Order,
-    // The delivery's source coordinates pair the published record with its consumed offset;
-    // the key carries its context type, so no ctx parameter is needed anywhere.
-    Ctx(source): Ctx<Source>,
-    State(enrichment): State<Enrichment>,
-) -> HandlerResult {
-    let payload = JsonCodec.encode(order).expect("serializable");
-    let outgoing = OutgoingMessage::new("enriched-orders", payload.as_ref());
-    if enrichment
-        .pipeline
-        .publish(&source, outgoing)
-        .await
-        .is_err()
-    {
-        // The window aborts and redelivers; nothing became visible downstream.
-        return HandlerResult::retry();
-    }
-    HandlerResult::Ack
+async fn enrich(order: &Order) -> Order {
+    order.clone()
 }
 // --8<-- [end:eos]
 
@@ -188,20 +169,20 @@ fn app() -> impl App {
     };
     // The pipeline id doubles as the producer's transactional id; the `enrich` subscription
     // names the same id in its `Commit::Transactional` mode.
-    let enrichment = Enrichment {
-        pipeline: EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1")),
-    };
+    let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"));
     RustStream::new(AppInfo::new("shipments", "0.1.0"))
         .on_startup(move |()| async move {
             Ok::<_, Infallible>(AppState {
                 shipments,
                 invoices,
-                enrichment,
             })
         })
         .with_broker(broker, |b| {
             b.include(ship);
             b.include(bill);
-            b.include(enrich);
+            // --8<-- [start:eos_wiring]
+            // Every reply of `enrich` rides the pipeline's window, paired with its offset.
+            b.include_publishing(enrich, pipeline.replies());
+            // --8<-- [end:eos_wiring]
         })
 }
