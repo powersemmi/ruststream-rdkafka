@@ -22,7 +22,8 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::{Broker, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber};
 use ruststream_rdkafka::{
-    Commit, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, PARTITION_KEY_HEADER, StartOffset,
+    Assignment, Commit, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, PARTITION_KEY_HEADER,
+    StartOffset,
 };
 
 const WAIT: Duration = Duration::from_secs(15);
@@ -405,6 +406,28 @@ async fn bare_name_subscribe_uses_the_default_group() {
     }
     let msg = received.expect("a delivery once the group is assigned");
     assert_eq!(msg.payload(), b"bare");
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cooperative_sticky_assignment_round_trips() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("coop");
+    create_topic(&url, &topic, 2).await;
+    let broker = connected_broker(&url).await;
+
+    let def = tracked(&topic, &unique("group")).assignment(Assignment::CooperativeSticky);
+    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+
+    publish(&broker, &topic, b"coop-1").await;
+
+    let mut stream = Box::pin(subscriber.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"coop-1");
     msg.ack().await.expect("ack");
 
     drop(stream);

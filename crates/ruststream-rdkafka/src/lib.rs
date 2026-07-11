@@ -55,4 +55,4 @@ pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_KEY_HEADER};
 pub use publisher::KafkaPublisher;
 pub use subscriber::KafkaSubscriber;
-pub use topic::{Commit, KafkaTopic, StartOffset};
+pub use topic::{Assignment, Commit, KafkaTopic, StartOffset};
