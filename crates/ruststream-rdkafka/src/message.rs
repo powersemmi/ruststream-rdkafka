@@ -151,6 +151,13 @@ impl KafkaMessage {
         self.headers.get(PARTITION_KEY_HEADER)
     }
 
+    /// Replaces the payload with its registry-transcoded form (the subscriber's async
+    /// middleware), before the delivery is handed on.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn replace_payload(&mut self, payload: Bytes) {
+        self.payload = payload;
+    }
+
     fn settle(self) -> Result<(), AckError> {
         match self.settlement {
             Settlement::Advisory => Ok(()),

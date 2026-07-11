@@ -63,6 +63,20 @@ pub struct KafkaPublisher {
     conn: SharedConn,
     queue_timeout: Option<Duration>,
     tx: Option<Arc<TxState>>,
+    #[cfg(feature = "schema-registry")]
+    registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    framing: Option<SchemaFraming>,
+}
+
+/// The publisher's registry framing: which wire format to transcode into and how the
+/// destination topic maps onto a subject.
+#[cfg(feature = "schema-registry")]
+#[derive(Debug, Clone)]
+struct SchemaFraming {
+    format: crate::schema_registry::SchemaFormat,
+    strategy: crate::schema_registry::SubjectStrategy,
+    subject: Option<String>,
 }
 
 impl KafkaPublisher {
@@ -71,7 +85,99 @@ impl KafkaPublisher {
             conn,
             queue_timeout: None,
             tx: None,
+            #[cfg(feature = "schema-registry")]
+            registry: None,
+            #[cfg(feature = "schema-registry")]
+            framing: None,
         }
+    }
+
+    /// Hands the broker's registry to the publisher, so `schema_format` framing can resolve
+    /// subjects. Set by [`KafkaBroker::publisher`](crate::KafkaBroker::publisher).
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn with_registry(
+        mut self,
+        registry: Option<crate::schema_registry::SchemaRegistry>,
+    ) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// Frames every publish in the Confluent wire format: the plain-JSON payload the codec
+    /// produced is transcoded to `format` against the destination subject's schema, resolved
+    /// lazily on the (async) publish path - no startup ceremony when the subject already
+    /// exists in the registry. The subject defaults to the Confluent `TopicName` strategy
+    /// (`{topic}-value`); override the mapping with
+    /// [`subject_strategy`](Self::subject_strategy) or pin one with
+    /// [`schema_subject`](Self::schema_subject). Requires the broker to carry the registry
+    /// ([`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)); reply
+    /// publishers and the EOS pipeline compose unchanged, since framing happens inside the
+    /// publish itself.
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_format(mut self, format: crate::schema_registry::SchemaFormat) -> Self {
+        let framing = self.framing.take();
+        self.framing = Some(SchemaFraming {
+            format,
+            strategy: framing
+                .as_ref()
+                .map_or_else(Default::default, |framing| framing.strategy),
+            subject: framing.and_then(|framing| framing.subject),
+        });
+        self
+    }
+
+    /// How the destination topic maps onto the subject (default:
+    /// [`SubjectStrategy::TopicName`](crate::schema_registry::SubjectStrategy::TopicName)).
+    /// The `RecordName` strategies need the record's name, which the publisher does not know;
+    /// pin those subjects with [`schema_subject`](Self::schema_subject) instead. Only
+    /// meaningful after [`schema_format`](Self::schema_format).
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn subject_strategy(mut self, strategy: crate::schema_registry::SubjectStrategy) -> Self {
+        if let Some(framing) = &mut self.framing {
+            framing.strategy = strategy;
+        }
+        self
+    }
+
+    /// Pins the subject explicitly, overriding the strategy - for `RecordName`-style layouts
+    /// or a publisher serving one fixed subject. Only meaningful after
+    /// [`schema_format`](Self::schema_format).
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_subject(mut self, subject: impl Into<String>) -> Self {
+        if let Some(framing) = &mut self.framing {
+            framing.subject = Some(subject.into());
+        }
+        self
+    }
+
+    /// Applies the configured registry framing to an outgoing payload.
+    #[cfg(feature = "schema-registry")]
+    async fn frame_for_wire(
+        &self,
+        topic: &str,
+        payload: &[u8],
+    ) -> Result<Option<Vec<u8>>, KafkaError> {
+        let Some(framing) = &self.framing else {
+            return Ok(None);
+        };
+        let Some(registry) = &self.registry else {
+            return Err(KafkaError::InvalidOptions(
+                "schema_format needs the broker's registry: attach it with \
+                 `KafkaBroker::schema_registry` before taking publishers"
+                    .to_owned(),
+            ));
+        };
+        let subject = framing
+            .subject
+            .clone()
+            .unwrap_or_else(|| framing.strategy.subject(topic, ""));
+        registry
+            .json_to_wire(framing.format, &subject, payload)
+            .await
+            .map(Some)
     }
 
     /// How long a publish may wait for space when librdkafka's local queue is full, before
@@ -247,6 +353,14 @@ impl Publisher for KafkaPublisher {
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
     async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+        #[cfg(feature = "schema-registry")]
+        let framed = self.frame_for_wire(msg.name(), msg.payload()).await?;
+        #[cfg(feature = "schema-registry")]
+        let msg = match &framed {
+            Some(framed) => OutgoingMessage::new(msg.name(), framed.as_slice())
+                .with_headers(msg.headers().clone()),
+            None => msg,
+        };
         if let Some(tx) = &self.tx
             && Self::is_open(tx)
         {

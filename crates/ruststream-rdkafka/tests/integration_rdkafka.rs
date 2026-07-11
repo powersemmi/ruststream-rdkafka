@@ -879,10 +879,7 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include_batch(pool_page);
         });
@@ -992,10 +989,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("keyed-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(keyed_lane);
         });
@@ -1092,10 +1086,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("partition-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(partition_lane);
         });
@@ -1606,10 +1597,7 @@ async fn manual_assignment_composes_with_partition_lanes() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("assign-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(assigned_lane);
         });
@@ -1697,10 +1685,7 @@ async fn ctx_extractors_inject_delivery_fields() {
     };
     let app_probe = probe.clone();
     let app = RustStream::new(AppInfo::new("ctx-di", "0.0.0"))
-        .on_startup(move |()| {
-            let probe = app_probe;
-            async move { Ok::<_, Infallible>(CtxDiApp { probe }) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(CtxDiApp { probe: app_probe }))
         .with_broker(
             KafkaBroker::new([url.clone()]).config("auto.offset.reset", "earliest"),
             |b| {

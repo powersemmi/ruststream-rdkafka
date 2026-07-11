@@ -21,6 +21,9 @@ default = ["json"]
 json = ["ruststream/json"]
 msgpack = ["ruststream/msgpack"]
 cbor = ["ruststream/cbor"]
+# Confluent Schema Registry: the client, the wire-format envelope, and the subscriber-side
+# schema prefetch that keeps the sync codec path free of I/O.
+schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
 # Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
 testing = ["ruststream/conformance", "ruststream/testing"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
@@ -40,11 +43,16 @@ futures = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 tokio = { workspace = true }
+wiremock = "0.6"
 
 # The vendored librdkafka build makes docs.rs shy away from the TLS/SASL backends; the API
 # surface is identical either way, so document with just the `testing` module enabled.
@@ -78,6 +86,10 @@ name = "kafka_retries"
 
 [[example]]
 name = "kafka_transactions"
+
+[[example]]
+name = "kafka_schema_registry"
+required-features = ["schema-registry"]
 
 [[example]]
 name = "kafka_testing"

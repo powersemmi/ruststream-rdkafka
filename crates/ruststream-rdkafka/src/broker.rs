@@ -107,6 +107,8 @@ pub struct KafkaBroker {
     producer_config: Vec<(String, String)>,
     connect_timeout: Duration,
     flush_timeout: Duration,
+    #[cfg(feature = "schema-registry")]
+    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
 }
 
 impl KafkaBroker {
@@ -127,6 +129,8 @@ impl KafkaBroker {
             producer_config: Vec::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            #[cfg(feature = "schema-registry")]
+            schema_registry: None,
         }
     }
 
@@ -194,7 +198,10 @@ impl KafkaBroker {
     /// A publisher on the shared producer.
     #[must_use]
     pub fn publisher(&self) -> KafkaPublisher {
-        KafkaPublisher::new(Arc::clone(&self.conn))
+        let publisher = KafkaPublisher::new(Arc::clone(&self.conn));
+        #[cfg(feature = "schema-registry")]
+        let publisher = publisher.with_registry(self.schema_registry.clone());
+        publisher
     }
 
     fn connected(&self) -> Result<&ConnState, KafkaError> {
@@ -208,6 +215,17 @@ impl KafkaBroker {
             config.set(key, value);
         }
         config
+    }
+
+    /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client: every
+    /// subscription prefetches the schema a Confluent-framed delivery references before the
+    /// delivery reaches the (synchronous) codec, so registry-backed decoding never blocks the
+    /// hot path on I/O. The client is shared; clones see one cache.
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_registry(mut self, registry: crate::schema_registry::SchemaRegistry) -> Self {
+        self.schema_registry = Some(registry);
+        self
     }
 
     /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic(s)
@@ -315,14 +333,17 @@ impl KafkaBroker {
                     Arc::clone(&consumer),
                 ))
             });
-        Ok(KafkaSubscriber::new(
+        let subscriber = KafkaSubscriber::new(
             consumer,
             def.topic().to_owned(),
             def.commit_mode().clone(),
             tracker,
             def.lane_key_choice(),
             retry,
-        ))
+        );
+        #[cfg(feature = "schema-registry")]
+        let subscriber = subscriber.with_schema_registry(self.schema_registry.clone());
+        Ok(subscriber)
     }
 }
 

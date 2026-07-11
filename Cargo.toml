@@ -25,6 +25,11 @@ futures = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tracing = "0.1"
+# The Schema Registry client: rustls only (no openssl in the dependency tree by default).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
