@@ -67,29 +67,31 @@ struct LiveSource {
     consumer: Arc<StreamConsumer<TrackingContext>>,
 }
 
-/// The source coordinates of one delivery, as [`EosPipeline::publish`] needs them: read them
-/// in a handler with the [`keys::Source`](crate::context::keys::Source) context field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceOffset<'a> {
-    topic: &'a str,
+/// The source coordinates of one delivery, as [`EosPipeline::publish`] needs them.
+///
+/// In a handler, take them as a `Ctx(source): Ctx<Source>` extractor parameter, or read the
+/// [`keys::Source`](crate::context::keys::Source) field off a declared ctx parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOffset {
+    topic: String,
     partition: i32,
     offset: i64,
 }
 
-impl<'a> SourceOffset<'a> {
+impl SourceOffset {
     /// Builds the coordinates by hand; in a handler prefer the
-    /// [`keys::Source`](crate::context::keys::Source) context field.
+    /// [`keys::Source`](crate::context::keys::Source) key.
     #[must_use]
-    pub fn new(topic: &'a str, partition: i32, offset: i64) -> Self {
+    pub fn new(topic: impl Into<String>, partition: i32, offset: i64) -> Self {
         Self {
-            topic,
+            topic: topic.into(),
             partition,
             offset,
         }
     }
 
-    fn key(self) -> (String, i32) {
-        (self.topic.to_owned(), self.partition)
+    fn key(&self) -> (String, i32) {
+        (self.topic.clone(), self.partition)
     }
 }
 
@@ -246,7 +248,7 @@ impl EosPipeline {
     /// inside the pipeline (an invariant violation, not an operational failure).
     pub async fn publish(
         &self,
-        source: SourceOffset<'_>,
+        source: &SourceOffset,
         msg: OutgoingMessage<'_>,
     ) -> Result<(), KafkaError> {
         self.admit(source).await?;
@@ -261,7 +263,7 @@ impl EosPipeline {
 
     /// Joins the open window (opening one when idle), waiting out a commit in progress
     /// unless the delivery is already part of it.
-    async fn admit(&self, source: SourceOffset<'_>) -> Result<(), KafkaError> {
+    async fn admit(&self, source: &SourceOffset) -> Result<(), KafkaError> {
         loop {
             // The waiter is created before the phase check so a transition landing in
             // between is not missed.
@@ -305,7 +307,7 @@ impl EosPipeline {
     }
 
     /// Opens the transaction as the winning publisher and spawns the window's commit task.
-    async fn open_window(&self, source: SourceOffset<'_>) -> Result<(), KafkaError> {
+    async fn open_window(&self, source: &SourceOffset) -> Result<(), KafkaError> {
         let begun = self.inner.publisher.begin_transaction().await;
         let mut window = self.inner.window.lock().expect("window mutex poisoned");
         match begun {
@@ -331,7 +333,7 @@ impl EosPipeline {
     fn enroll(
         window: &mut Window,
         session_low: &Mutex<HashMap<(String, i32), i64>>,
-        source: SourceOffset<'_>,
+        source: &SourceOffset,
     ) {
         let key = source.key();
         session_low

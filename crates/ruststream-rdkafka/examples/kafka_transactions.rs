@@ -13,9 +13,9 @@
 use std::convert::Infallible;
 
 use ruststream::codec::{Codec, JsonCodec};
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, State};
+use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
 use ruststream::{FromRef, OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
-use ruststream_rdkafka::context::{KafkaContext, keys};
+use ruststream_rdkafka::context::keys::{Partition, Source};
 use ruststream_rdkafka::{
     Commit, EosPipeline, KafkaBroker, KafkaError, KafkaPublisher, KafkaTopic,
     TransactionalPartitions,
@@ -121,11 +121,11 @@ impl Invoices {
 )]
 async fn bill(
     order: &Order,
-    ctx: &mut Context<'_, KafkaContext>,
+    // The delivery's source partition picks the lane's publisher; the key injects it as a
+    // plain argument (the DI form of `ctx.context(keys::Partition)`).
+    Ctx(partition): Ctx<Partition>,
     State(invoices): State<Invoices>,
 ) -> HandlerResult {
-    // The delivery's source partition picks the lane's publisher.
-    let partition = ctx.context(keys::Partition);
     if invoices.issue(order, partition).await.is_err() {
         return HandlerResult::retry();
     }
@@ -152,14 +152,19 @@ struct Enrichment {
 )]
 async fn enrich(
     order: &Order,
-    ctx: &mut Context<'_, KafkaContext>,
+    // The delivery's source coordinates pair the published record with its consumed offset;
+    // the key carries its context type, so no ctx parameter is needed anywhere.
+    Ctx(source): Ctx<Source>,
     State(enrichment): State<Enrichment>,
 ) -> HandlerResult {
-    // The delivery's source coordinates pair the published record with its consumed offset.
-    let source = ctx.context(keys::Source);
     let payload = JsonCodec.encode(order).expect("serializable");
     let outgoing = OutgoingMessage::new("enriched-orders", payload.as_ref());
-    if enrichment.pipeline.publish(source, outgoing).await.is_err() {
+    if enrichment
+        .pipeline
+        .publish(&source, outgoing)
+        .await
+        .is_err()
+    {
         // The window aborts and redelivers; nothing became visible downstream.
         return HandlerResult::retry();
     }

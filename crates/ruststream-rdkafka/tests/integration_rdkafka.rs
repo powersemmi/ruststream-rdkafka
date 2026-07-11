@@ -23,12 +23,13 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
+use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
 use ruststream::subscriber;
 use ruststream::{
-    Broker, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
+    Broker, FromRef, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
     TransactionalPublisher,
 };
+use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
     Assignment, Commit, EosPipeline, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
     PARTITION_HEADER, PARTITION_KEY_HEADER, SourceOffset, StartOffset, TransactionalPartitions,
@@ -1200,7 +1201,7 @@ async fn eos_pipeline_commits_offsets_with_records() {
             let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
             let forwarded: Vec<u8> = msg.payload().to_vec();
             pipeline
-                .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+                .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
                 .await
                 .expect("pipeline publish");
             msg.ack().await.expect("ack");
@@ -1292,7 +1293,7 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
         let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
         let forwarded: Vec<u8> = msg.payload().to_vec();
         pipeline
-            .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
             .await
             .expect("pipeline publish (first pass)");
         if expected == b"second" {
@@ -1313,7 +1314,7 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
         let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
         let forwarded: Vec<u8> = msg.payload().to_vec();
         pipeline
-            .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
             .await
             .expect("pipeline publish (second pass)");
         msg.ack().await.expect("ack");
@@ -1635,4 +1636,90 @@ async fn manual_assignment_composes_with_partition_lanes() {
             "partition {partition} must stay ordered on its lane",
         );
     }
+}
+
+#[derive(Clone)]
+struct CtxDiProbe {
+    expected: usize,
+    seen: Arc<Mutex<Vec<(i32, i64)>>>,
+    done: Arc<Notify>,
+}
+
+#[derive(FromRef)]
+struct CtxDiApp {
+    probe: CtxDiProbe,
+}
+
+#[subscriber(
+    KafkaTopic::new(std::env::var("CTX_DI_TOPIC").expect("topic env")).group("ctx-di-svc")
+)]
+async fn ctx_di(
+    _order: &OrderPayload,
+    Ctx(partition): Ctx<keys::Partition>,
+    Ctx(offset): Ctx<keys::Offset>,
+    State(probe): State<CtxDiProbe>,
+) -> HandlerResult {
+    {
+        let mut seen = probe.seen.lock().expect("seen mutex poisoned");
+        seen.push((partition, offset));
+        if seen.len() < probe.expected {
+            return HandlerResult::Ack;
+        }
+    }
+    probe.done.notify_waiters();
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctx_extractors_inject_delivery_fields() {
+    const COUNT: usize = 3;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("ctx-di");
+    create_topic(&url, &topic, 1).await;
+    unsafe { std::env::set_var("CTX_DI_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        broker
+            .publisher()
+            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+            .await
+            .expect("publish");
+    }
+    Broker::shutdown(&broker).await.expect("producer shutdown");
+
+    let probe = CtxDiProbe {
+        expected: COUNT,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("ctx-di", "0.0.0"))
+        .on_startup(move |()| {
+            let probe = app_probe;
+            async move { Ok::<_, Infallible>(CtxDiApp { probe }) }
+        })
+        .with_broker(
+            KafkaBroker::new([url.clone()]).config("auto.offset.reset", "earliest"),
+            |b| {
+                b.include(ctx_di);
+            },
+        );
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("all messages within timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    let expected: Vec<(i32, i64)> = (0..3_i64).map(|offset| (0, offset)).collect();
+    assert_eq!(
+        seen, expected,
+        "the extractor-injected partition and offset must match the deliveries",
+    );
 }
