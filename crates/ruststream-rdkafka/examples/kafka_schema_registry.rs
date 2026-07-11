@@ -1,7 +1,8 @@
 //! Confluent Schema Registry as broker middleware: handlers and codecs stay plain JSON, the
-//! broker transcodes. Consuming strips (and, with the avro/protobuf features, converts)
-//! framed payloads on the async path; publishing frames the JSON payload for the wire, with
-//! the subject resolved lazily. No custom codecs anywhere.
+//! broker's edges transcode. Consuming strips (and, with the avro/protobuf features,
+//! converts) framed payloads on the subscription's async path; publishing frames the JSON
+//! payload for the wire through the app's publish pipeline, with the subject resolved
+//! lazily. No custom codecs anywhere.
 //!
 //! ```text
 //! just brokers-up
@@ -11,7 +12,7 @@
 use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
 use ruststream::subscriber;
 use ruststream_rdkafka::schema_registry::JsonSchema;
-use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFormat, SchemaRegistry};
+use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry};
 use serde::{Deserialize, Serialize};
 
 // --8<-- [start:types]
@@ -44,17 +45,19 @@ async fn confirm(order: &Order) -> Confirmation {
 #[ruststream::app]
 fn app() -> impl App {
     // --8<-- [start:wiring]
-    // One registry client, shared: the broker side transcodes incoming framed payloads, the
-    // publisher side frames outgoing ones (subject = "{topic}-value" by default, resolved
-    // lazily on the first publish).
+    // One registry client, shared by the two edges: the broker transcodes incoming framed
+    // payloads to JSON, and the `SchemaFrame` publish middleware frames outgoing ones by
+    // their subject's registered flavor (subject = "{topic}-value" by default, resolved
+    // lazily on the first publish; topics without a subject publish plain).
     let sr = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
         .schema_registry(sr.clone());
 
-    let confirmations = TypedPublisher::new(broker.publisher().schema_format(SchemaFormat::Json));
+    let confirmations = TypedPublisher::new(broker.publisher());
 
     RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .publish_layer(SchemaFrame::new(sr.clone()))
         // Producers own their schemas: register (or `warm`) the reply subject at startup.
         .on_startup(async move |()| {
             sr.register_json::<Confirmation>("confirmations-value")

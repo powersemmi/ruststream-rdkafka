@@ -1,19 +1,29 @@
-//! The Confluent Schema Registry client and the wire-format envelope.
+//! The Confluent Schema Registry client, the wire-format envelope, and the registry
+//! middleware.
 //!
 //! Payloads on registry-backed topics carry the Confluent wire format: a zero magic byte, a
-//! big-endian 4-byte schema id, then the encoded datum. [`SchemaRegistry`] is the async
-//! client the schema-aware codecs build on; because the core `Codec` is synchronous, the hot
-//! paths never call it directly - the subscriber prefetches schemas by id into the client's
-//! cache before deliveries reach the codec (see
-//! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)), and the encode
-//! side resolves its subject once at startup ([`register`](SchemaRegistry::register) /
-//! [`warm`](SchemaRegistry::warm)), mirroring Confluent's production guidance of not
+//! big-endian 4-byte schema id, then the encoded datum. The registry integrates as
+//! middleware on the broker's async edges, so handlers and publishers keep speaking plain
+//! JSON through the default codec:
+//!
+//! - Consuming: [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)
+//!   transcodes framed deliveries to plain JSON on the subscription's delivery path.
+//! - Publishing: [`SchemaFrame`], added app-wide with `RustStream::publish_layer`, frames
+//!   outgoing JSON for the wire by the destination subject's registered flavor.
+//!
+//! [`SchemaRegistry`] is the shared async client both sides resolve and cache schemas
+//! through. Registering schemas stays an explicit step ([`register`](SchemaRegistry::register)
+//! and the typed shorthands), mirroring Confluent's production guidance of not
 //! auto-registering schemas from producers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
 use serde::Deserialize;
 
 pub use schemars::JsonSchema;
@@ -135,7 +145,7 @@ struct RegistryInner {
 /// use ruststream_rdkafka::{KafkaBroker, SchemaRegistry};
 ///
 /// let sr = SchemaRegistry::new("http://localhost:8081").basic_auth("svc", "secret");
-/// // Consuming: the broker prefetches schemas by id before deliveries reach the codec.
+/// // Consuming: subscriptions transcode framed deliveries to plain JSON through the client.
 /// let broker = KafkaBroker::new(["localhost:9092"]).schema_registry(sr.clone());
 /// # let _ = broker;
 /// ```
@@ -273,7 +283,7 @@ impl SchemaRegistry {
     }
 
     /// Registers `definition` under `subject` (idempotent registry-side: an identical schema
-    /// keeps its id) and caches the subject's id for the sync encode path.
+    /// keeps its id) and caches the subject, so the framing middleware resolves it locally.
     ///
     /// # Errors
     ///
@@ -317,9 +327,10 @@ impl SchemaRegistry {
         Ok(registered.id)
     }
 
-    /// Resolves `subject`'s latest version and caches it for the sync encode path - the
-    /// warm-only alternative to [`register`](Self::register) when producers must not create
-    /// schemas.
+    /// Resolves `subject`'s latest version and caches it - the warm-only alternative to
+    /// [`register`](Self::register) when producers must not create schemas, and a startup
+    /// probe that a required subject exists (the framing middleware itself resolves subjects
+    /// lazily).
     ///
     /// # Errors
     ///
@@ -343,6 +354,37 @@ impl SchemaRegistry {
         Ok(schema)
     }
 
+    /// Like [`warm`](Self::warm), but a missing subject resolves to `None` instead of an
+    /// error - the framing middleware treats it as "this topic is not registry-backed".
+    pub(crate) async fn latest(
+        &self,
+        subject: &str,
+    ) -> Result<Option<Arc<RegisteredSchema>>, KafkaError> {
+        let response = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/subjects/{subject}/versions/latest"),
+            )
+            .send()
+            .await
+            .map_err(KafkaError::schema_registry)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(KafkaError::schema_registry)?;
+        let fetched: LatestVersionResponse =
+            response.json().await.map_err(KafkaError::schema_registry)?;
+        let schema = Arc::new(RegisteredSchema {
+            id: fetched.id,
+            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
+            definition: fetched.schema,
+        });
+        self.cache(subject, &schema);
+        Ok(Some(schema))
+    }
+
     fn cache(&self, subject: &str, schema: &Arc<RegisteredSchema>) {
         self.inner
             .by_id
@@ -356,8 +398,8 @@ impl SchemaRegistry {
             .insert(subject.to_owned(), schema.id);
     }
 
-    /// The cached schema for `id`, when a prefetch or an earlier lookup resolved it. The sync
-    /// decode path reads this; the subscriber prefetch keeps it warm.
+    /// The cached schema for `id`, when an earlier lookup resolved it (the subscription's
+    /// transcoding keeps ids it has seen warm).
     ///
     /// # Panics
     ///
@@ -373,8 +415,8 @@ impl SchemaRegistry {
             .cloned()
     }
 
-    /// The cached schema for `subject`, when [`register`](Self::register) or
-    /// [`warm`](Self::warm) resolved it at startup. The sync encode path reads this.
+    /// The cached schema for `subject`, when [`register`](Self::register), [`warm`](Self::warm),
+    /// or the framing middleware's lazy resolution cached it.
     ///
     /// # Panics
     ///
@@ -438,37 +480,6 @@ impl SchemaRegistry {
             }
         }
     }
-
-    /// Frames a plain-JSON payload for the wire in `format` under `subject`, resolving the
-    /// subject lazily (cache first, then the registry) - the publish path is async, so no
-    /// startup ceremony is required when the subject already exists.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::SchemaRegistry`] when the subject cannot be resolved,
-    /// [`KafkaError::InvalidOptions`] when the resolved schema's flavor does not match
-    /// `format` or the format's cargo feature is off, and the format's own conversion errors.
-    pub(crate) async fn json_to_wire(
-        &self,
-        format: SchemaFormat,
-        subject: &str,
-        payload: &[u8],
-    ) -> Result<Vec<u8>, KafkaError> {
-        let schema = match self.cached_subject(subject) {
-            Some(schema) => schema,
-            None => self.warm(subject).await?,
-        };
-        let expected = format.schema_type();
-        if schema.schema_type != expected {
-            return Err(KafkaError::InvalidOptions(format!(
-                "subject {subject:?} holds a {:?} schema, but the publisher is configured \
-                 for {expected:?}",
-                schema.schema_type,
-            )));
-        }
-        let datum = outgoing_json_to_datum(self, format, &schema, payload)?;
-        Ok(encode_envelope(schema.id, &datum))
-    }
 }
 
 /// Converts an incoming framed datum to plain JSON by its schema's flavor. The `avro` and
@@ -489,48 +500,173 @@ fn incoming_datum_to_json(
     }
 }
 
-/// Converts an outgoing plain-JSON payload to the wire datum for `format`. The `avro` and
-/// `protobuf` features extend the match; without them those formats error.
+/// Converts an outgoing plain-JSON payload to the wire datum for the subject's schema
+/// flavor. The `avro` and `protobuf` features extend the match; without them those flavors
+/// error.
 fn outgoing_json_to_datum(
     registry: &SchemaRegistry,
-    format: SchemaFormat,
     schema: &RegisteredSchema,
     payload: &[u8],
 ) -> Result<Vec<u8>, KafkaError> {
-    let _ = (registry, schema);
-    match format {
-        SchemaFormat::Json => Ok(payload.to_vec()),
+    let _ = registry;
+    match schema.schema_type {
+        SchemaType::Json => Ok(payload.to_vec()),
         other => Err(KafkaError::InvalidOptions(format!(
-            "publishing as {other:?} needs the matching cargo feature enabled on \
-             ruststream-rdkafka",
+            "the subject's schema (id {}) is {other:?}, but the matching cargo feature is \
+             not enabled on ruststream-rdkafka; enable it to publish to this topic",
+            schema.id,
         ))),
     }
 }
 
-/// The wire format a schema-registry publisher frames its payloads in.
+/// Publish middleware framing outgoing JSON in the Confluent wire format - the publish-side
+/// half of the registry integration, added app-wide with `RustStream::publish_layer`.
 ///
-/// Picked on the publisher
-/// ([`KafkaPublisher::schema_format`](crate::KafkaPublisher::schema_format)); the handler and
-/// codec side stays plain JSON either way - the publish path transcodes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SchemaFormat {
-    /// Frame the JSON document as-is (the registry's JSON Schema flavor).
-    Json,
-    /// Transcode to an Avro datum against the subject's schema (needs the `avro` feature).
-    Avro,
-    /// Transcode to a Protobuf message against the subject's schema (needs the `protobuf`
-    /// feature).
-    Protobuf,
+/// For every publish it resolves the destination topic's value subject (lazily: the shared
+/// cache first, the registry once on a miss) and frames the codec's plain-JSON payload by
+/// the subject's registered flavor: JSON keeps its bytes under the envelope, Avro and
+/// Protobuf transcode against the schema (with their cargo features). A topic with no
+/// registered subject publishes untouched - mixed registry/plain topologies need no
+/// configuration. The miss is cached (and logged) once per subject, so plain topics pay no
+/// per-publish registry round-trip; a subject registered later is picked up after a restart
+/// or an explicit [`SchemaRegistry::warm`]. A registry outage or a payload that does not fit
+/// the schema fails the publish, so a publishing handler nacks and the delivery is retried
+/// rather than a mis-framed record reaching the topic.
+///
+/// Subjects follow [`SubjectStrategy::TopicName`] by default;
+/// [`subject_strategy`](Self::subject_strategy) switches the naming, and
+/// [`subject`](Self::subject) pins a topic's subject explicitly (the `RecordName` layouts,
+/// where the topic alone cannot name the subject).
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream::runtime::{AppInfo, RustStream};
+/// use ruststream_rdkafka::{SchemaFrame, SchemaRegistry};
+///
+/// let sr = SchemaRegistry::new("http://localhost:8081");
+/// let app = RustStream::new(AppInfo::new("orders", "1.0.0"))
+///     .publish_layer(SchemaFrame::new(sr.clone()));
+/// # let _ = app;
+/// ```
+#[derive(Clone)]
+pub struct SchemaFrame {
+    registry: SchemaRegistry,
+    strategy: SubjectStrategy,
+    subjects: HashMap<String, String>,
+    /// Subjects the registry answered 404 for: their topics publish un-framed without
+    /// re-querying.
+    skipped: Arc<Mutex<HashSet<String>>>,
 }
 
-impl SchemaFormat {
-    fn schema_type(self) -> SchemaType {
-        match self {
-            Self::Json => SchemaType::Json,
-            Self::Avro => SchemaType::Avro,
-            Self::Protobuf => SchemaType::Protobuf,
+impl fmt::Debug for SchemaFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaFrame")
+            .field("strategy", &self.strategy)
+            .field("subjects", &self.subjects)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SchemaFrame {
+    /// Builds the framing middleware over `registry`. Subjects default to the Confluent
+    /// `TopicName` strategy (`{topic}-value`).
+    #[must_use]
+    pub fn new(registry: SchemaRegistry) -> Self {
+        Self {
+            registry,
+            strategy: SubjectStrategy::default(),
+            subjects: HashMap::new(),
+            skipped: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    /// How destination topics map onto subjects (default:
+    /// [`SubjectStrategy::TopicName`]). The `RecordName` strategies need the record's name,
+    /// which the publish path does not know; pin those subjects per topic with
+    /// [`subject`](Self::subject) instead.
+    #[must_use]
+    pub fn subject_strategy(mut self, strategy: SubjectStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Pins `topic`'s subject explicitly, overriding the strategy.
+    #[must_use]
+    pub fn subject(mut self, topic: impl Into<String>, subject: impl Into<String>) -> Self {
+        self.subjects.insert(topic.into(), subject.into());
+        self
+    }
+
+    /// The subject `topic` publishes under.
+    fn subject_for(&self, topic: &str) -> String {
+        self.subjects
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| self.strategy.subject(topic, ""))
+    }
+
+    fn is_skipped(&self, subject: &str) -> bool {
+        self.skipped
+            .lock()
+            .expect("skipped-subjects mutex poisoned")
+            .contains(subject)
+    }
+
+    /// Remembers (and logs, once) that `subject` is unregistered, so `topic` publishes
+    /// un-framed without re-querying the registry.
+    fn skip(&self, topic: &str, subject: &str) {
+        let mut skipped = self
+            .skipped
+            .lock()
+            .expect("skipped-subjects mutex poisoned");
+        if skipped.insert(subject.to_owned()) {
+            tracing::info!(
+                target: "ruststream_rdkafka",
+                topic,
+                subject,
+                "no schema registered for the topic's subject; its publishes go out un-framed",
+            );
+        }
+    }
+
+    /// Frames `out`'s payload in place when its topic's subject is registered.
+    async fn frame(&self, out: &mut Outgoing<'_>) -> Result<(), KafkaError> {
+        let topic = out.name().to_owned();
+        let subject = self.subject_for(&topic);
+        let cached = self.registry.cached_subject(&subject);
+        let schema = if let Some(schema) = cached {
+            schema
+        } else {
+            if self.is_skipped(&subject) {
+                return Ok(());
+            }
+            let Some(schema) = self.registry.latest(&subject).await? else {
+                self.skip(&topic, &subject);
+                return Ok(());
+            };
+            schema
+        };
+        let datum = outgoing_json_to_datum(&self.registry, &schema, out.payload())?;
+        let framed = encode_envelope(schema.id, &datum);
+        let payload = out.payload_mut();
+        payload.clear();
+        payload.extend_from_slice(&framed);
+        Ok(())
+    }
+}
+
+impl PublishLayer for SchemaFrame {
+    fn on_publish<'a, N: PublishPipeline>(
+        &'a self,
+        out: &'a mut Outgoing<'a>,
+        next: PublishNext<'a, N>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn StdError + Send + Sync>>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.frame(out).await?;
+            next.run(out).await
+        })
     }
 }
 
@@ -581,6 +717,105 @@ mod tests {
         assert!(parse_envelope(b"").is_none());
         assert!(parse_envelope(b"{\"json\":1}").is_none());
         assert!(parse_envelope(&[0, 1, 2]).is_none(), "short id");
+    }
+
+    #[tokio::test]
+    async fn frame_wraps_registered_json_subjects() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 11,
+                "version": 1,
+                "schema": "{\"type\":\"object\"}",
+                "schemaType": "JSON",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let frame = SchemaFrame::new(SchemaRegistry::new(server.uri()));
+        let json = br#"{"id":7}"#;
+        let mut out = Outgoing::new("orders", json.as_slice());
+        frame.frame(&mut out).await.expect("frame");
+        let (id, datum) = parse_envelope(out.payload()).expect("framed");
+        assert_eq!(id, 11);
+        assert_eq!(datum, json);
+
+        // The second publish resolves from the cache (expect(1) verifies).
+        let mut again = Outgoing::new("orders", json.as_slice());
+        frame.frame(&mut again).await.expect("frame cached");
+        assert_eq!(again.payload(), out.payload());
+    }
+
+    #[tokio::test]
+    async fn unregistered_subjects_pass_through_and_cache_the_miss() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/plain-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let frame = SchemaFrame::new(SchemaRegistry::new(server.uri()));
+        let json = br#"{"plain":true}"#;
+        for _ in 0..2 {
+            // The miss is remembered: the registry sees one query (expect(1) verifies).
+            let mut out = Outgoing::new("plain", json.as_slice());
+            frame.frame(&mut out).await.expect("pass through");
+            assert_eq!(out.payload(), json, "un-framed");
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_outages_fail_the_publish() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let frame = SchemaFrame::new(SchemaRegistry::new(server.uri()));
+        let mut out = Outgoing::new("orders", br#"{"id":7}"#.as_slice());
+        let err = frame.frame(&mut out).await.expect_err("outage");
+        assert!(matches!(err, KafkaError::SchemaRegistry(_)));
+    }
+
+    #[tokio::test]
+    async fn pinned_subjects_override_the_strategy() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/com.acme.Order/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 3,
+                "version": 1,
+                "schema": "{\"type\":\"object\"}",
+                "schemaType": "JSON",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let frame =
+            SchemaFrame::new(SchemaRegistry::new(server.uri())).subject("orders", "com.acme.Order");
+        let mut out = Outgoing::new("orders", br#"{"id":1}"#.as_slice());
+        frame.frame(&mut out).await.expect("frame");
+        let (id, _) = parse_envelope(out.payload()).expect("framed");
+        assert_eq!(id, 3);
     }
 
     #[test]

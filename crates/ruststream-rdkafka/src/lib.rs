@@ -63,7 +63,7 @@ pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{KafkaPublisher, TransactionalPartitions};
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
-    RegisteredSchema, SchemaFormat, SchemaRegistry, SchemaType, SubjectStrategy,
+    RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,
 };
 
 pub use retry::{

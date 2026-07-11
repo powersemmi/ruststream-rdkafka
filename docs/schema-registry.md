@@ -3,8 +3,9 @@
 Kafka deployments standardized on Confluent Schema Registry frame their payloads with the
 Confluent wire format - a zero magic byte, a big-endian 4-byte schema id, then the encoded
 datum - and keep the schemas themselves in the registry. The `schema-registry` cargo feature
-integrates all of it as **broker middleware**: handlers, codecs, and the whole runtime stay on
-plain JSON (the default codec), and the transcoding happens on the broker's own async paths.
+integrates all of it as **middleware on the async edges** - the subscription's delivery path
+on the way in, the app's publish pipeline on the way out - so handlers, codecs, and the whole
+runtime stay on plain JSON (the default codec).
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:wiring"
@@ -35,11 +36,23 @@ stalls the consumer.
 
 ## Publishing: frame on the way out
 
-`publisher.schema_format(SchemaFormat::Json | Avro | Protobuf)` frames every publish: the
-plain-JSON payload the codec produced is transcoded to the wire format against the destination
-subject's schema. The subject comes from the Confluent `TopicName` strategy (`{topic}-value`)
-by default; `subject_strategy` changes the mapping and `schema_subject` pins one explicitly
-(the `RecordName` strategies need the record's name, which the publisher does not know).
+`SchemaFrame` is publish middleware - the publish-side counterpart of the core's consume
+layers - added app-wide with `RustStream::publish_layer`. For every publish flowing through
+the app's pipeline it resolves the destination topic's subject and frames the plain-JSON
+payload by the subject's **registered flavor**: a JSON Schema subject keeps its bytes under
+the envelope, an Avro or Protobuf subject transcodes (with the matching feature). Nothing is
+declared per publisher; the registry is the source of truth for what each topic speaks.
+
+A topic whose subject the registry does not know publishes untouched - mixed registry/plain
+topologies need no configuration. The miss is cached and logged once per subject, so plain
+topics pay no per-publish round-trip (a subject registered later is picked up after a restart
+or an explicit `warm`). A registry outage or a payload that does not fit the schema fails the
+publish - a publishing handler nacks and retries rather than putting a mis-framed record on
+the topic.
+
+The subject comes from the Confluent `TopicName` strategy (`{topic}-value`) by default;
+`subject_strategy` changes the mapping and `subject(topic, subject)` pins one explicitly (the
+`RecordName` strategies need the record's name, which the publish path does not know).
 
 Subjects resolve **lazily on the async publish path** - when the subject already exists in the
 registry there is no startup ceremony at all. Producers that own their schemas register them
@@ -52,12 +65,12 @@ once at startup:
 `register` takes a raw definition (idempotent registry-side), `register_json::<T>` derives a
 JSON Schema from the type via schemars (re-exported), and `warm` only resolves an existing
 subject - for deployments where producers must not create schemas, which is Confluent's own
-production guidance (`auto.register.schemas` off). Publishing under a subject the registry
-does not know is a clear error naming the fix.
+production guidance (`auto.register.schemas` off).
 
-Reply publishers (`TypedPublisher::new(publisher.schema_format(..))`), the partition-scoped
-transactional publishers, and the EOS pipeline all compose unchanged: framing happens inside
-the publish itself.
+Publishing handlers, reply publishers, the partition-scoped transactional publishers, and the
+EOS pipeline all compose unchanged: they publish through the app's pipeline, where the layer
+sits. A raw `broker.publisher()` used outside the runtime bypasses the pipeline and publishes
+exactly what it is given.
 
 ## Formats
 

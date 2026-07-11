@@ -198,10 +198,7 @@ impl KafkaBroker {
     /// A publisher on the shared producer.
     #[must_use]
     pub fn publisher(&self) -> KafkaPublisher {
-        let publisher = KafkaPublisher::new(Arc::clone(&self.conn));
-        #[cfg(feature = "schema-registry")]
-        let publisher = publisher.with_registry(self.schema_registry.clone());
-        publisher
+        KafkaPublisher::new(Arc::clone(&self.conn))
     }
 
     fn connected(&self) -> Result<&ConnState, KafkaError> {
@@ -217,10 +214,14 @@ impl KafkaBroker {
         config
     }
 
-    /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client: every
-    /// subscription prefetches the schema a Confluent-framed delivery references before the
-    /// delivery reaches the (synchronous) codec, so registry-backed decoding never blocks the
-    /// hot path on I/O. The client is shared; clones see one cache.
+    /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client to the
+    /// consume edge: every subscription transcodes Confluent-framed deliveries to plain JSON
+    /// on its (async) delivery path, before they reach the synchronous codec - so handlers
+    /// stay ordinary serde types on the default `json` codec, streams and batches alike.
+    /// Non-framed payloads pass through untouched. The client is shared; clones see one
+    /// cache. The publish-side counterpart is the
+    /// [`SchemaFrame`](crate::schema_registry::SchemaFrame) publish middleware, added
+    /// app-wide with `RustStream::publish_layer`.
     #[cfg(feature = "schema-registry")]
     #[must_use]
     pub fn schema_registry(mut self, registry: crate::schema_registry::SchemaRegistry) -> Self {

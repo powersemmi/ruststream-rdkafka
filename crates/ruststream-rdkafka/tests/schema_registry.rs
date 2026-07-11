@@ -1,9 +1,17 @@
 //! Schema Registry client tests against a mock HTTP registry: caching (one network hit per
-//! id/subject), registration, warm-only resolution, and authentication headers.
+//! id/subject), registration, warm-only resolution, and authentication headers. The live
+//! tests at the bottom drive the full middleware round trip against a real registry and
+//! Kafka.
 
 #![cfg(feature = "schema-registry")]
 
-use ruststream_rdkafka::{KafkaError, SchemaRegistry, SchemaType};
+use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
+use ruststream::{Broker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber};
+use ruststream_rdkafka::schema_registry::{JsonSchema, parse_envelope};
+use ruststream_rdkafka::{
+    KafkaBroker, KafkaError, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
+};
+use serde::{Deserialize, Serialize};
 use wiremock::matchers::{basic_auth, body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -157,79 +165,151 @@ async fn live_registry_roundtrips_register_warm_and_fetch() {
     assert_eq!(by_id.definition(), latest.definition());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_json_transcode_end_to_end() {
-    use futures::StreamExt;
-    use ruststream::{Broker, IncomingMessage, OutgoingMessage, Publisher, Subscriber};
-    use ruststream_rdkafka::{KafkaBroker, KafkaTopic, SchemaFormat, StartOffset};
+/// The fixed reply topic of the live framing test: the macro's `publish(..)` takes a string
+/// literal, so runs share it and pick their own messages out by a unique marker id.
+const FRAMED_TOPIC: &str = "sr-json-frames-placeholder";
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+struct SrOrder {
+    id: i64,
+}
+
+// The producing side of the live test: a plain publishing handler; the app's `SchemaFrame`
+// publish layer frames its replies for the wire.
+#[subscriber(
+    KafkaTopic::new(std::env::var("SR_JSON_TRIGGER").expect("trigger env"))
+        .group(std::env::var("SR_JSON_GROUP").expect("group env"))
+        .start(StartOffset::Earliest),
+    publish("sr-json-frames-placeholder")
+)]
+async fn relay(order: &SrOrder) -> SrOrder {
+    order.clone()
+}
+
+/// Scans `topic` from the earliest offset until `pick` accepts a payload, returning it.
+async fn scan_topic(
+    broker: &KafkaBroker,
+    topic: &str,
+    pick: impl Fn(&[u8]) -> bool + Send + Sync,
+) -> Vec<u8> {
+    use futures::StreamExt;
+
+    let mut subscriber = broker
+        .subscribe(
+            KafkaTopic::new(topic)
+                .group(unique("scan"))
+                .start(StartOffset::Earliest),
+        )
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+    let found = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let msg = stream
+                .next()
+                .await
+                .expect("stream has next")
+                .expect("delivery ok");
+            let payload = IncomingMessage::payload(&msg).to_vec();
+            msg.ack().await.expect("ack");
+            if pick(&payload) {
+                return payload;
+            }
+        }
+    })
+    .await
+    .expect("marker message within the timeout");
+    drop(stream);
+    found
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_json_frame_and_transcode_end_to_end() {
     let Some(registry) = registry_url() else {
         return;
     };
     let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
         return;
     };
-    let topic = unique("sr-json");
-    let subject = format!("{topic}-value");
+    let trigger = unique("sr-json-trigger");
+    unsafe {
+        std::env::set_var("SR_JSON_TRIGGER", &trigger);
+        std::env::set_var("SR_JSON_GROUP", unique("sr-json-group"));
+    }
+    let marker = i64::from(std::process::id()) * 1000 + 7;
 
-    // The producer's subject exists in the registry; framing resolves it lazily on the
-    // first publish - no startup ceremony.
+    // The reply subject exists in the registry; the app's SchemaFrame resolves it lazily
+    // (through its own cold client) on the first publish - no startup ceremony.
     let sr = SchemaRegistry::new(&registry);
     let id = sr
         .register(
-            &subject,
+            &format!("{FRAMED_TOPIC}-value"),
             SchemaType::Json,
             r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#,
         )
         .await
         .expect("register");
 
-    let producer_broker = KafkaBroker::new([kafka.clone()]).schema_registry(sr.clone());
-    Broker::connect(&producer_broker).await.expect("connect");
-    let producer = producer_broker
+    // Seed the trigger before the app starts (its handler reads from the earliest offset).
+    let seed_broker = KafkaBroker::new([kafka.clone()]);
+    Broker::connect(&seed_broker).await.expect("connect seed");
+    seed_broker
         .publisher()
-        .schema_format(SchemaFormat::Json);
-
-    // The consumer's client starts cold: the subscriber middleware fetches the schema and
-    // strips the envelope, so the delivery arrives as plain JSON.
-    let consumer_sr = SchemaRegistry::new(&registry);
-    let broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
-    Broker::connect(&broker).await.expect("connect consumer");
-    let mut subscriber = broker
-        .subscribe(
-            KafkaTopic::new(&topic)
-                .group(unique("group"))
-                .start(StartOffset::Earliest),
-        )
+        .publish(OutgoingMessage::new(
+            &trigger,
+            format!(r#"{{"id":{marker}}}"#).as_bytes(),
+        ))
         .await
-        .expect("subscribe");
+        .expect("seed trigger");
+    Broker::shutdown(&seed_broker).await.expect("seed shutdown");
 
-    producer
-        .publish(OutgoingMessage::new(&topic, br#"{"id":7}"#.as_slice()))
-        .await
-        .expect("publish framed");
+    let app_broker = KafkaBroker::new([kafka.clone()]);
+    let replies = TypedPublisher::new(app_broker.publisher());
+    let app = RustStream::new(AppInfo::new("sr-json", "0.0.0"))
+        .publish_layer(SchemaFrame::new(SchemaRegistry::new(&registry)))
+        .with_broker(app_broker, |b| {
+            b.include_publishing(relay, replies);
+        });
 
-    let mut stream = Box::pin(subscriber.stream());
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), stream.next())
-        .await
-        .expect("delivery in time")
-        .expect("stream has next")
-        .expect("delivery ok");
-    assert_eq!(
-        IncomingMessage::payload(&msg),
-        br#"{"id":7}"#,
-        "the envelope must be stripped and the document arrive as plain JSON",
-    );
-    assert!(
-        consumer_sr.cached_schema(id).is_some(),
-        "the middleware fetched the schema into the cold client's cache",
-    );
-    msg.ack().await.expect("ack");
+    let registry_for_wait = registry.clone();
+    let wait = async move {
+        // A registry-less consumer sees the raw wire: the reply must carry the envelope.
+        let raw_broker = KafkaBroker::new([kafka.clone()]);
+        Broker::connect(&raw_broker).await.expect("connect raw");
+        let framed = scan_topic(&raw_broker, FRAMED_TOPIC, |payload| {
+            parse_envelope(payload).is_some_and(|(_, datum)| {
+                serde_json::from_slice::<SrOrder>(datum).is_ok_and(|order| order.id == marker)
+            })
+        })
+        .await;
+        let (wire_id, _) = parse_envelope(&framed).expect("framed");
+        assert_eq!(
+            wire_id, id,
+            "the envelope must carry the subject's schema id"
+        );
+        Broker::shutdown(&raw_broker).await.expect("raw shutdown");
 
-    drop(stream);
-    drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
-    Broker::shutdown(&producer_broker)
-        .await
-        .expect("producer shutdown");
+        // A transcoding consumer (cold client) sees plain JSON and warms its cache.
+        let consumer_sr = SchemaRegistry::new(&registry_for_wait);
+        let transcoding_broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
+        Broker::connect(&transcoding_broker)
+            .await
+            .expect("connect transcoding");
+        let plain = scan_topic(&transcoding_broker, FRAMED_TOPIC, |payload| {
+            serde_json::from_slice::<SrOrder>(payload).is_ok_and(|order| order.id == marker)
+        })
+        .await;
+        assert!(
+            parse_envelope(&plain).is_none(),
+            "the envelope must be stripped before the delivery reaches handlers",
+        );
+        assert!(
+            consumer_sr.cached_schema(id).is_some(),
+            "the middleware fetched the schema into the cold client's cache",
+        );
+        Broker::shutdown(&transcoding_broker)
+            .await
+            .expect("transcoding shutdown");
+    };
+    App::run_until(app, wait).await.expect("run");
 }
