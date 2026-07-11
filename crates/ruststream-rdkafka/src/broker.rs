@@ -175,19 +175,22 @@ impl KafkaBroker {
         config
     }
 
-    /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic.
+    /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic(s)
+    /// or pattern.
     ///
     /// # Errors
     ///
     /// Returns [`KafkaError::NotConnected`] before `Broker::connect`,
     /// [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
-    /// consumer group, and [`KafkaError::Subscribe`] when the consumer cannot be created or the
-    /// subscription is rejected.
+    /// consumer group (or the descriptor's pattern is not `^`-anchored), and
+    /// [`KafkaError::Subscribe`] when the consumer cannot be created or the subscription is
+    /// rejected.
     // Async without an await on purpose: librdkafka joins the group in the background, and the
     // descriptor contract (`SubscriptionSource::subscribe`) is async either way.
     #[allow(clippy::unused_async)]
     pub async fn subscribe(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
         self.connected()?;
+        def.validate()?;
         let group = def
             .group_or(self.default_group.as_deref())
             .ok_or_else(|| {
@@ -229,9 +232,8 @@ impl KafkaBroker {
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
-        consumer
-            .subscribe(&[def.topic()])
-            .map_err(KafkaError::subscribe)?;
+        let names: Vec<&str> = def.subscribed_topics().iter().map(String::as_str).collect();
+        consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
 
         Ok(KafkaSubscriber::new(
             Arc::new(consumer),

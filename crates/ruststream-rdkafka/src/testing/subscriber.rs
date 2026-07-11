@@ -19,7 +19,7 @@ use crate::error::KafkaError;
 /// not simulated.
 pub struct KafkaTestSubscriber {
     state: Arc<TestBrokerState>,
-    id: SubscriptionId,
+    ids: Vec<SubscriptionId>,
     topic: String,
     sender: DeliverySender,
     receiver: DeliveryReceiver,
@@ -27,20 +27,20 @@ pub struct KafkaTestSubscriber {
 }
 
 impl KafkaTestSubscriber {
-    pub(crate) fn open(state: &Arc<TestBrokerState>, topic: String) -> Self {
-        let (id, sender, receiver) = state.router.subscribe(topic.clone());
+    pub(crate) fn open_many(state: &Arc<TestBrokerState>, topics: &[String]) -> Self {
+        let (ids, sender, receiver) = state.router.subscribe_many(topics);
         let coordinator = state.coordinator();
         Self {
             state: Arc::clone(state),
-            id,
-            topic,
+            ids,
+            topic: topics.join(","),
             sender,
             receiver,
             coordinator,
         }
     }
 
-    /// The topic this subscriber consumes.
+    /// The subscribed topic name(s), joined with `,` when there are several.
     #[must_use]
     pub fn topic(&self) -> &str {
         &self.topic
@@ -49,7 +49,9 @@ impl KafkaTestSubscriber {
 
 impl Drop for KafkaTestSubscriber {
     fn drop(&mut self) {
-        self.state.router.unsubscribe(self.id);
+        for id in &self.ids {
+            self.state.router.unsubscribe(*id);
+        }
     }
 }
 

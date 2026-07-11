@@ -44,24 +44,29 @@ pub(crate) struct KeyRouter {
 }
 
 impl KeyRouter {
-    pub(crate) fn subscribe(
+    /// Registers one subscription entry per topic, all feeding one delivery channel, so a
+    /// multi-topic subscriber consumes them as a single stream.
+    pub(crate) fn subscribe_many(
         &self,
-        topic: String,
-    ) -> (SubscriptionId, DeliverySender, DeliveryReceiver) {
-        let id = SubscriptionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        topics: &[String],
+    ) -> (Vec<SubscriptionId>, DeliverySender, DeliveryReceiver) {
         let (sender, receiver) = mpsc::unbounded_channel();
-        self.state
-            .lock()
-            .expect("test router mutex poisoned")
-            .subscriptions
-            .insert(
-                id,
-                Subscription {
-                    topic,
-                    sender: sender.clone(),
-                },
-            );
-        (id, sender, receiver)
+        let mut state = self.state.lock().expect("test router mutex poisoned");
+        let ids = topics
+            .iter()
+            .map(|topic| {
+                let id = SubscriptionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+                state.subscriptions.insert(
+                    id,
+                    Subscription {
+                        topic: topic.clone(),
+                        sender: sender.clone(),
+                    },
+                );
+                id
+            })
+            .collect();
+        (ids, sender, receiver)
     }
 
     pub(crate) fn unsubscribe(&self, id: SubscriptionId) {

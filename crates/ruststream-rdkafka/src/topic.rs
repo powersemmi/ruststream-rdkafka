@@ -95,7 +95,12 @@ pub enum Commit {
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaTopic {
-    topic: String,
+    /// The subscribed names; librdkafka treats entries starting with `^` as regex patterns.
+    topics: Vec<String>,
+    /// The handler-metadata name: the subscribed names joined with `,`.
+    name: String,
+    /// Set by [`pattern`](Self::pattern), which promises a `^`-anchored regex.
+    requires_pattern: bool,
     group: Option<String>,
     start: StartOffset,
     commit: Commit,
@@ -104,17 +109,65 @@ pub struct KafkaTopic {
 }
 
 impl KafkaTopic {
-    /// Describes a subscription to `topic` with librdkafka defaults for everything else.
-    #[must_use]
-    pub fn new(topic: impl Into<String>) -> Self {
+    fn with_first(first: String, requires_pattern: bool) -> Self {
         Self {
-            topic: topic.into(),
+            name: first.clone(),
+            topics: vec![first],
+            requires_pattern,
             group: None,
             start: StartOffset::default(),
             commit: Commit::default(),
             assignment: None,
             config: Vec::new(),
         }
+    }
+
+    /// Describes a subscription to `topic` with librdkafka defaults for everything else.
+    #[must_use]
+    pub fn new(topic: impl Into<String>) -> Self {
+        Self::with_first(topic.into(), false)
+    }
+
+    /// Describes a subscription to every existing topic matching `pattern`.
+    ///
+    /// The pattern is a librdkafka topic regex and must start with `^` (that anchor is how
+    /// librdkafka distinguishes a pattern from a literal name); subscribing fails with a clear
+    /// error otherwise. Topics created after the group formed are picked up on the next
+    /// metadata refresh.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::KafkaTopic;
+    ///
+    /// let orders = KafkaTopic::pattern("^orders\\..*").group("orders-svc");
+    /// assert_eq!(orders.topic(), "^orders\\..*");
+    /// ```
+    #[must_use]
+    pub fn pattern(pattern: impl Into<String>) -> Self {
+        Self::with_first(pattern.into(), true)
+    }
+
+    /// Adds another topic to the same subscription: one consumer, one group, several topics.
+    ///
+    /// All matched topics share the handler (and therefore its payload type). Entries starting
+    /// with `^` are librdkafka regex patterns, exactly as in [`pattern`](Self::pattern).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::KafkaTopic;
+    ///
+    /// let both = KafkaTopic::new("orders").and_topic("cancellations");
+    /// assert_eq!(both.topic(), "orders,cancellations");
+    /// ```
+    #[must_use]
+    pub fn and_topic(mut self, topic: impl Into<String>) -> Self {
+        let topic = topic.into();
+        self.name.push(',');
+        self.name.push_str(&topic);
+        self.topics.push(topic);
+        self
     }
 
     /// The consumer group for this subscription, overriding
@@ -155,10 +208,26 @@ impl KafkaTopic {
         self
     }
 
-    /// The topic this subscription consumes.
+    /// The subscribed name(s), joined with `,` when there are several (also the handler
+    /// metadata name); a pattern subscription returns the pattern.
     #[must_use]
     pub fn topic(&self) -> &str {
-        &self.topic
+        &self.name
+    }
+
+    pub(crate) fn subscribed_topics(&self) -> &[String] {
+        &self.topics
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), KafkaError> {
+        if self.requires_pattern && !self.topics[0].starts_with('^') {
+            return Err(KafkaError::InvalidOptions(format!(
+                "pattern {:?} must start with '^' (librdkafka's anchor for topic regexes); \
+                 without it the name would be subscribed literally",
+                self.topics[0],
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn group_or<'a>(&'a self, fallback: Option<&'a str>) -> Option<&'a str> {
@@ -186,7 +255,7 @@ impl SubscriptionSource<KafkaBroker> for KafkaTopic {
     type Subscriber = KafkaSubscriber;
 
     fn name(&self) -> &str {
-        &self.topic
+        &self.name
     }
 
     async fn subscribe(self, broker: &KafkaBroker) -> Result<Self::Subscriber, KafkaError> {
@@ -199,13 +268,13 @@ impl SubscriptionSource<crate::testing::KafkaTestBroker> for KafkaTopic {
     type Subscriber = crate::testing::KafkaTestSubscriber;
 
     fn name(&self) -> &str {
-        &self.topic
+        &self.name
     }
 
     async fn subscribe(
         self,
         broker: &crate::testing::KafkaTestBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
-        broker.subscribe(&self.topic).await
+        broker.subscribe_topics(&self.topics).await
     }
 }

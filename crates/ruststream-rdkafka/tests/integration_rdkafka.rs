@@ -11,6 +11,7 @@
 //! committed positions across subscriber restarts, the two commit modes, start offsets, and
 //! native-key partitioning.
 
+use std::collections::HashMap;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -410,6 +411,93 @@ async fn bare_name_subscribe_uses_the_default_group() {
 
     drop(stream);
     drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_topic_subscription_consumes_all_topics() {
+    let Some(url) = kafka_url() else { return };
+    let orders = unique("mt-orders");
+    let cancels = unique("mt-cancels");
+    create_topic(&url, &orders, 1).await;
+    create_topic(&url, &cancels, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let def = tracked(&orders, &unique("group")).and_topic(&cancels);
+    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+
+    publish(&broker, &orders, b"o1").await;
+    publish(&broker, &cancels, b"c1").await;
+
+    let mut stream = Box::pin(subscriber.stream());
+    let mut seen = HashMap::new();
+    for _ in 0..2 {
+        let msg = next_message(&mut stream).await;
+        seen.insert(msg.topic().to_owned(), msg.payload().to_vec());
+        msg.ack().await.expect("ack");
+    }
+    assert_eq!(
+        seen.get(orders.as_str()).map(Vec::as_slice),
+        Some(b"o1".as_slice())
+    );
+    assert_eq!(
+        seen.get(cancels.as_str()).map(Vec::as_slice),
+        Some(b"c1".as_slice())
+    );
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pattern_subscription_consumes_matching_topics() {
+    let Some(url) = kafka_url() else { return };
+    let prefix = unique("pat");
+    let first = format!("{prefix}-a");
+    let second = format!("{prefix}-b");
+    create_topic(&url, &first, 1).await;
+    create_topic(&url, &second, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let def = KafkaTopic::pattern(format!("^{prefix}-.*"))
+        .group(unique("group"))
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked);
+    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+
+    publish(&broker, &first, b"p1").await;
+    publish(&broker, &second, b"p2").await;
+
+    let mut stream = Box::pin(subscriber.stream());
+    let mut topics = Vec::new();
+    for _ in 0..2 {
+        let msg = next_message(&mut stream).await;
+        topics.push(msg.topic().to_owned());
+        msg.ack().await.expect("ack");
+    }
+    topics.sort();
+    assert_eq!(topics, vec![first, second]);
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unanchored_pattern_is_rejected() {
+    let Some(url) = kafka_url() else { return };
+    let broker = connected_broker(&url).await;
+
+    let err = broker
+        .subscribe(KafkaTopic::pattern("no-anchor").group(unique("group")))
+        .await
+        .expect_err("an unanchored pattern must be rejected");
+    assert!(
+        err.to_string().contains('^'),
+        "the error must explain the anchor requirement, got: {err}",
+    );
+
     Broker::shutdown(&broker).await.expect("shutdown");
 }
 
