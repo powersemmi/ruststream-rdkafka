@@ -17,6 +17,32 @@ every message for one key to one partition, which is what keeps per-key ordering
 Without the header, the configured partitioner picks a partition (the librdkafka default is a
 hash for keyed records and round-robin-ish distribution for keyless ones).
 
+## Explicit partitions and round-robin distribution
+
+The partition header (`kafka-partition`, an ASCII decimal) pins a record to an exact
+partition: the publisher consumes the header (it never hits the wire) and sets the record's
+partition explicitly. Precedence on publish: an explicit partition wins over the record key,
+which wins over the configured partitioner. A malformed value fails the publish with a clear
+error, and a partition that does not exist fails delivery - no silent fallback either way:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_producer.rs:partition"
+```
+
+On top of it, `RoundRobin` distributes publishing-handler replies evenly: librdkafka has no
+round-robin partitioner (only the random/consistent/hash families), and keyless distribution
+may batch-stick to one partition, which turns long, near-constant per-message processing into
+one hot consumer and idle peers. The transform stamps every keyless, unpinned reply with the
+next partition of the cycle:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_distribution.rs:round_robin"
+```
+
+The count is explicit and must match the destination topic: a smaller count just leaves the
+tail partitions idle, a larger one fails publishes to the missing partitions. The header
+mechanism also serves any other placement policy through a user-written `PublishTransform`.
+
 ## Delivery guarantees
 
 Durability is the producer's `acks` setting, and everything else librdkafka offers

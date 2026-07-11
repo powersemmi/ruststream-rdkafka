@@ -31,7 +31,7 @@ use ruststream::{
 };
 use ruststream_rdkafka::{
     Assignment, Commit, EosPipeline, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
-    PARTITION_KEY_HEADER, SourceOffset, StartOffset, TransactionalPartitions,
+    PARTITION_HEADER, PARTITION_KEY_HEADER, SourceOffset, StartOffset, TransactionalPartitions,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1346,6 +1346,51 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
 
     drop(out_stream);
     drop(out_subscriber);
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_partition_header_targets_the_partition() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("pinned");
+    create_topic(&url, &topic, 2).await;
+    let broker = connected_broker(&url).await;
+
+    let mut subscriber = broker
+        .subscribe(tracked(&topic, &unique("group")))
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+
+    let mut headers = Headers::new();
+    headers.insert(PARTITION_HEADER, "1");
+    broker
+        .publisher()
+        .publish(OutgoingMessage::new(&topic, b"pinned".as_slice()).with_headers(headers))
+        .await
+        .expect("publish pinned");
+
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"pinned");
+    assert_eq!(msg.partition(), 1, "the explicit partition must win");
+    assert!(
+        msg.headers().get(PARTITION_HEADER).is_none(),
+        "the partition header must not hit the wire",
+    );
+    msg.ack().await.expect("ack");
+
+    // A malformed partition value fails the publish clearly instead of falling back.
+    let mut bad = Headers::new();
+    bad.insert(PARTITION_HEADER, "one");
+    let err = broker
+        .publisher()
+        .publish(OutgoingMessage::new(&topic, b"nope".as_slice()).with_headers(bad))
+        .await
+        .expect_err("malformed partition must fail");
+    assert!(matches!(err, KafkaError::InvalidOptions(_)));
+
     drop(stream);
     drop(subscriber);
     Broker::shutdown(&broker).await.expect("shutdown");

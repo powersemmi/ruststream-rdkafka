@@ -60,6 +60,9 @@ name = "kafka_keys"
 name = "kafka_producer"
 
 [[example]]
+name = "kafka_distribution"
+
+[[example]]
 name = "kafka_multi_topic"
 
 [[example]]
