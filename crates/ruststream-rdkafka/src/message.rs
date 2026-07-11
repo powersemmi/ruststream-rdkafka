@@ -24,6 +24,13 @@ use crate::tracker::{CommitTracker, TrackingContext};
 /// [`IncomingMessage::partition_key`]; [`Partitioned`] mirrors it as the capability surface.
 pub const PARTITION_KEY_HEADER: &str = "kafka-partition-key";
 
+/// Header naming the explicit destination partition for a publish (an ASCII decimal).
+///
+/// When present, the publisher targets that exact partition (winning over the partitioner and
+/// the record key) and strips the header from the wire. An unparsable value fails the publish
+/// with a clear error instead of silently falling back to the partitioner.
+pub const PARTITION_HEADER: &str = "kafka-partition";
+
 /// How this delivery settles when acked.
 pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.

@@ -39,6 +39,7 @@
 
 mod broker;
 mod convert;
+mod distribution;
 mod eos;
 mod error;
 mod message;
@@ -53,9 +54,10 @@ pub mod context;
 pub mod testing;
 
 pub use broker::KafkaBroker;
+pub use distribution::RoundRobin;
 pub use eos::{EosPipeline, SourceOffset};
 pub use error::KafkaError;
-pub use message::{KafkaMessage, PARTITION_KEY_HEADER};
+pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{KafkaPublisher, TransactionalPartitions};
 pub use retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,

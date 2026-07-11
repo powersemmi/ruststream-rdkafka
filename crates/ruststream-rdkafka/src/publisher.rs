@@ -209,12 +209,16 @@ impl KafkaPublisher {
         producer: &FutureProducer,
         msg: OutgoingMessage<'_>,
     ) -> Result<(), KafkaError> {
-        let (headers, key) = convert::headers_for_publish(msg.headers());
+        let parts = convert::headers_for_publish(msg.headers())?;
         let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
-        if let Some(key) = &key {
+        if let Some(key) = &parts.key {
             record = record.key(key.as_ref());
         }
-        if let Some(headers) = headers {
+        if let Some(partition) = parts.partition {
+            // An explicit partition wins over the partitioner and the record key.
+            record = record.partition(partition);
+        }
+        if let Some(headers) = parts.headers {
             record = record.headers(headers);
         }
         let queue_timeout = self.queue_timeout.map_or(Timeout::Never, Timeout::After);

@@ -348,3 +348,112 @@ async fn test_app_requeue_stays_balanced() {
 
     tb.shutdown().await.expect("shutdown");
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PlanOrder {
+    id: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct PlanItem {
+    order_id: u64,
+}
+
+#[subscriber("plan-orders", publish("work-items"))]
+async fn plan(order: &PlanOrder) -> PlanItem {
+    PlanItem { order_id: order.id }
+}
+
+#[subscriber("keyed-orders", publish("keyed-items"))]
+async fn plan_keyed(order: &PlanOrder) -> PlanItem {
+    PlanItem { order_id: order.id }
+}
+
+/// Stamps the reply with a record key, standing in for a handler that picked its placement.
+struct KeyStamp;
+
+impl<C> ruststream::runtime::PublishTransform<C> for KeyStamp {
+    fn apply(
+        &self,
+        out: &mut ruststream::runtime::Outgoing<'_>,
+        _cx: &ruststream::runtime::PublishContext<'_, C>,
+    ) {
+        out.headers_mut().insert(PARTITION_KEY_HEADER, "tenant-1");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn round_robin_stamps_cycling_partitions() {
+    use ruststream::runtime::TypedPublisher;
+    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            let work_items =
+                TypedPublisher::new(b.broker().publisher()).transform(RoundRobin::partitions(2));
+            b.include_publishing(plan, work_items);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    for id in 0..4 {
+        tb.broker::<KafkaTestBroker>()
+            .publish("plan-orders", &PlanOrder { id })
+            .await
+            .expect("publish");
+    }
+
+    let published = tb
+        .broker::<KafkaTestBroker>()
+        .published::<PlanItem>("work-items");
+    let stamped: Vec<String> = published
+        .messages()
+        .iter()
+        .map(|msg| {
+            msg.headers()
+                .get_str(PARTITION_HEADER)
+                .expect("stamped partition")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        ["0", "1", "0", "1"],
+        "the cycle targets one partition per message",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn round_robin_leaves_keyed_replies_alone() {
+    use ruststream::runtime::TypedPublisher;
+    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
+            // sees it, so the cycle must not override the placement the key implies.
+            let keyed_items = TypedPublisher::new(b.broker().publisher())
+                .transform(KeyStamp)
+                .transform(RoundRobin::partitions(2));
+            b.include_publishing(plan_keyed, keyed_items);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("keyed-orders", &PlanOrder { id: 1 })
+        .await
+        .expect("publish");
+
+    let published = tb
+        .broker::<KafkaTestBroker>()
+        .published::<PlanItem>("keyed-items");
+    let messages = published.messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(
+        messages[0].headers().get_str(PARTITION_KEY_HEADER),
+        Some("tenant-1")
+    );
+    assert!(
+        messages[0].headers().get(PARTITION_HEADER).is_none(),
+        "a keyed reply keeps its key-implied placement",
+    );
+}

@@ -160,12 +160,15 @@ impl RetryContext {
         headers: &Headers,
     ) -> Result<(), KafkaError> {
         let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
-        let (native, key) = convert::headers_for_publish(headers);
+        let parts = convert::headers_for_publish(headers)?;
         let mut record = FutureRecord::<[u8], [u8]>::to(topic).payload(payload);
-        if let Some(key) = &key {
+        if let Some(key) = &parts.key {
             record = record.key(key.as_ref());
         }
-        if let Some(native) = native {
+        if let Some(partition) = parts.partition {
+            record = record.partition(partition);
+        }
+        if let Some(native) = parts.headers {
             record = record.headers(native);
         }
         state
