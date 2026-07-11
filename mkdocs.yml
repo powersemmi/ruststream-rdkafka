@@ -73,6 +73,7 @@ nav:
   - Guide:
       - topics.md
       - publishing.md
+      - schema-registry.md
       - testing.md
   - RustStream docs: https://powersemmi.github.io/ruststream/
   - API reference: https://docs.rs/ruststream-rdkafka

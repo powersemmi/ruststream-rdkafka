@@ -107,6 +107,8 @@ pub struct KafkaBroker {
     producer_config: Vec<(String, String)>,
     connect_timeout: Duration,
     flush_timeout: Duration,
+    #[cfg(feature = "schema-registry")]
+    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
 }
 
 impl KafkaBroker {
@@ -127,6 +129,8 @@ impl KafkaBroker {
             producer_config: Vec::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            #[cfg(feature = "schema-registry")]
+            schema_registry: None,
         }
     }
 
@@ -208,6 +212,21 @@ impl KafkaBroker {
             config.set(key, value);
         }
         config
+    }
+
+    /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client to the
+    /// consume edge: every subscription transcodes Confluent-framed deliveries to plain JSON
+    /// on its (async) delivery path, before they reach the synchronous codec - so handlers
+    /// stay ordinary serde types on the default `json` codec, streams and batches alike.
+    /// Non-framed payloads pass through untouched. The client is shared; clones see one
+    /// cache. The publish-side counterpart is the
+    /// [`SchemaFrame`](crate::schema_registry::SchemaFrame) publish middleware, added
+    /// app-wide with `RustStream::publish_layer`.
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_registry(mut self, registry: crate::schema_registry::SchemaRegistry) -> Self {
+        self.schema_registry = Some(registry);
+        self
     }
 
     /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic(s)
@@ -315,14 +334,17 @@ impl KafkaBroker {
                     Arc::clone(&consumer),
                 ))
             });
-        Ok(KafkaSubscriber::new(
+        let subscriber = KafkaSubscriber::new(
             consumer,
             def.topic().to_owned(),
             def.commit_mode().clone(),
             tracker,
             def.lane_key_choice(),
             retry,
-        ))
+        );
+        #[cfg(feature = "schema-registry")]
+        let subscriber = subscriber.with_schema_registry(self.schema_registry.clone());
+        Ok(subscriber)
     }
 }
 

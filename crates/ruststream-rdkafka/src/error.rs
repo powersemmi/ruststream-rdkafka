@@ -53,6 +53,12 @@ pub enum KafkaError {
          concurrent transactional flows"
     )]
     TransactionBusy,
+
+    /// A Schema Registry request failed: unreachable registry, rejected credentials, an
+    /// unknown schema id or subject, or a schema the registry refused.
+    #[cfg(feature = "schema-registry")]
+    #[error("schema registry error: {0}")]
+    SchemaRegistry(#[source] Box<dyn StdError + Send + Sync>),
 }
 
 impl KafkaError {
@@ -62,6 +68,11 @@ impl KafkaError {
 
     pub(crate) fn publish(err: rdkafka::error::KafkaError) -> Self {
         Self::Publish(Box::new(err))
+    }
+
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn schema_registry(err: impl StdError + Send + Sync + 'static) -> Self {
+        Self::SchemaRegistry(Box::new(err))
     }
 
     pub(crate) fn subscribe(err: rdkafka::error::KafkaError) -> Self {

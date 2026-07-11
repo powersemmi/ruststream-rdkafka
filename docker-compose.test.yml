@@ -1,7 +1,8 @@
 # Test broker for the integration and conformance suites.
 #
 #   docker compose -f docker-compose.test.yml up -d --wait
-#   KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features -- --test-threads=1
+#   KAFKA_TEST_URL=127.0.0.1:9092 SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+#     cargo test --workspace --all-features -- --test-threads=1
 #
 # Single-node KRaft (combined broker + controller), plaintext, published on localhost only.
 # Topic auto-creation stays on so tests can use throwaway topics without an admin step, and the
@@ -18,10 +19,13 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      # The INTERNAL listener serves in-network clients (the schema registry): the public
+      # listener advertises 127.0.0.1, which inside another container points at itself.
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092,INTERNAL://kafka:19092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -36,4 +40,27 @@ services:
       interval: 2s
       timeout: 10s
       retries: 30
+      start_period: 5s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.7.1
+    container_name: ruststream-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:19092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -sf http://localhost:8081/subjects >/dev/null",
+        ]
+      interval: 2s
+      timeout: 10s
+      retries: 45
       start_period: 5s

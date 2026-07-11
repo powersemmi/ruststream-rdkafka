@@ -9,6 +9,8 @@ use futures::future::FutureExt as _;
 use rdkafka::Message as _;
 use rdkafka::consumer::StreamConsumer;
 use rdkafka::error::RDKafkaErrorCode;
+#[cfg(feature = "schema-registry")]
+use ruststream::IncomingMessage;
 use ruststream::{BatchSubscriber, Subscriber};
 use tracing::{debug, warn};
 
@@ -49,6 +51,8 @@ pub struct KafkaSubscriber {
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
     retry: Option<Arc<RetryContext>>,
+    #[cfg(feature = "schema-registry")]
+    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
     /// error of an episode warns, repeats are debug, recovery closes the episode.
     in_transient_episode: bool,
@@ -70,8 +74,19 @@ impl KafkaSubscriber {
             tracker,
             lane_key,
             retry,
+            #[cfg(feature = "schema-registry")]
+            schema_registry: None,
             in_transient_episode: false,
         }
+    }
+
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn with_schema_registry(
+        mut self,
+        registry: Option<crate::schema_registry::SchemaRegistry>,
+    ) -> Self {
+        self.schema_registry = registry;
+        self
     }
 
     /// Logs a transient consume error: one warning when the episode starts (the signal a
@@ -111,6 +126,20 @@ impl KafkaSubscriber {
     #[must_use]
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    /// The registry middleware: transcodes a framed payload to plain JSON on the async
+    /// consume path, so handlers and the default codec see JSON regardless of the wire
+    /// format. A no-op without an attached registry or for non-framed payloads.
+    #[cfg(feature = "schema-registry")]
+    async fn transcode(&self, item: &mut KafkaMessage) {
+        if let Some(registry) = &self.schema_registry
+            && let Some(json) = registry
+                .incoming_to_json(IncomingMessage::payload(item))
+                .await
+        {
+            item.replace_payload(Bytes::from(json));
+        }
     }
 
     fn map_delivery(&self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
@@ -203,8 +232,11 @@ impl Subscriber for KafkaSubscriber {
             loop {
                 match sub.consumer.recv().await {
                     Ok(delivery) => {
-                        let item = sub.map_delivery(&delivery);
+                        #[allow(unused_mut)] // mutated by the registry transcode only
+                        let mut item = sub.map_delivery(&delivery);
                         drop(delivery);
+                        #[cfg(feature = "schema-registry")]
+                        sub.transcode(&mut item).await;
                         sub.note_recovered();
                         return Some((Ok(item), sub));
                     }
@@ -259,6 +291,10 @@ impl BatchSubscriber for KafkaSubscriber {
                     // page's first recv.
                     Err(_) => break,
                 }
+            }
+            #[cfg(feature = "schema-registry")]
+            for item in &mut batch {
+                sub.transcode(item).await;
             }
             Some((Ok(batch), sub))
         })

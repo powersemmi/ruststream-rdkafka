@@ -53,6 +53,37 @@ fn unique(base: &str) -> String {
     )
 }
 
+/// Recreates a fixed-name topic from scratch: deleting it drops prior runs' segments and
+/// transaction markers, so an aborted or still-open transaction from a dead test process
+/// cannot hold the new run's last-stable-offset (`read_committed` readers would see nothing
+/// until the old transaction times out).
+async fn recreate_topic(url: &str, topic: &str, partitions: i32) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .create()
+        .expect("admin client");
+    let _ = admin
+        .delete_topics(&[topic], &AdminOptions::new())
+        .await
+        .expect("delete_topics call");
+    // Deletion completes asynchronously; poll creation until the name is free again.
+    for _ in 0..50 {
+        let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
+        let results = admin
+            .create_topics([&new_topic], &AdminOptions::new())
+            .await
+            .expect("create_topics call");
+        match &results[0] {
+            Ok(_) => return,
+            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err((name, code)) => panic!("recreate {name}: {code}"),
+        }
+    }
+    panic!("topic {topic} was not recreated in time");
+}
+
 /// Creates `topic` up front so the first subscribe does not race topic auto-creation.
 async fn create_topic(url: &str, topic: &str, partitions: i32) {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
@@ -879,10 +910,7 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include_batch(pool_page);
         });
@@ -992,10 +1020,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("keyed-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(keyed_lane);
         });
@@ -1092,10 +1117,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("partition-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(partition_lane);
         });
@@ -1606,10 +1628,7 @@ async fn manual_assignment_composes_with_partition_lanes() {
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("assign-lanes", "0.0.0"))
-        .on_startup(move |()| {
-            let state = app_state;
-            async move { Ok::<_, Infallible>(state) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(assigned_lane);
         });
@@ -1697,10 +1716,7 @@ async fn ctx_extractors_inject_delivery_fields() {
     };
     let app_probe = probe.clone();
     let app = RustStream::new(AppInfo::new("ctx-di", "0.0.0"))
-        .on_startup(move |()| {
-            let probe = app_probe;
-            async move { Ok::<_, Infallible>(CtxDiApp { probe }) }
-        })
+        .on_startup(async move |()| Ok::<_, Infallible>(CtxDiApp { probe: app_probe }))
         .with_broker(
             KafkaBroker::new([url.clone()]).config("auto.offset.reset", "earliest"),
             |b| {
@@ -1748,7 +1764,9 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     let group = unique("group");
     let pipeline_id = unique("eos-sugar");
     create_topic(&url, &input, 1).await;
-    create_topic(&url, "eos-sugar-replies-placeholder", 1).await;
+    // The reply topic is a macro literal, so it is fixed across runs: recreate it, or a dead
+    // previous run's open transaction pins the LSO and hides this run's replies.
+    recreate_topic(&url, "eos-sugar-replies-placeholder", 1).await;
     unsafe {
         std::env::set_var("EOS_SUGAR_TOPIC", &input);
         std::env::set_var("EOS_SUGAR_GROUP", &group);

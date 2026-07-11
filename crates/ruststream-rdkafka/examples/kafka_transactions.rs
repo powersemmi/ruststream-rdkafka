@@ -171,7 +171,7 @@ fn app() -> impl App {
     // names the same id in its `Commit::Transactional` mode.
     let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"));
     RustStream::new(AppInfo::new("shipments", "0.1.0"))
-        .on_startup(move |()| async move {
+        .on_startup(async move |()| {
             Ok::<_, Infallible>(AppState {
                 shipments,
                 invoices,

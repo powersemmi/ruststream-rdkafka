@@ -50,6 +50,8 @@ mod topic;
 mod tracker;
 
 pub mod context;
+#[cfg(feature = "schema-registry")]
+pub mod schema_registry;
 #[cfg(feature = "testing")]
 pub mod testing;
 
@@ -59,6 +61,11 @@ pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, SourceOffset};
 pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{KafkaPublisher, TransactionalPartitions};
+#[cfg(feature = "schema-registry")]
+pub use schema_registry::{
+    RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,
+};
+
 pub use retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
     RETRY_COUNT_HEADER, Retry,
