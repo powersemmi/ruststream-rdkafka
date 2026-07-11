@@ -86,7 +86,13 @@ exactly what it is given.
     ```
 - **Protobuf** (`protobuf` feature): messages to JSON and back through descriptors compiled
   from the registry's `.proto` source (well-known types available; schema references beyond
-  them are not resolved), message-indexes handled on both sides.
+  them are not resolved), message-indexes handled on both sides - nested and multi-message
+  schemas included. Outgoing messages default to the schema's first top-level message; pin
+  another per topic with `SchemaFrame::message("topic", "pkg.Message")`:
+
+    ```rust
+    --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf.rs:wiring"
+    ```
 
 The transcoding trade-off is deliberate: one JSON hop per message on registry topics buys a
 single uniform handler model - the same struct, the same codec, any wire format.

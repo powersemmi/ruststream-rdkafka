@@ -134,6 +134,8 @@ struct RegistryInner {
     by_subject: Mutex<HashMap<String, u32>>,
     #[cfg(feature = "avro")]
     parsed_avro: Mutex<HashMap<u32, Arc<apache_avro::Schema>>>,
+    #[cfg(feature = "protobuf")]
+    parsed_proto: Mutex<HashMap<u32, Arc<prost_reflect::DescriptorPool>>>,
 }
 
 /// The async Confluent Schema Registry client, shared by clones.
@@ -202,6 +204,8 @@ impl SchemaRegistry {
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
+                #[cfg(feature = "protobuf")]
+                parsed_proto: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -233,6 +237,8 @@ impl SchemaRegistry {
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
+                #[cfg(feature = "protobuf")]
+                parsed_proto: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -503,6 +509,42 @@ impl SchemaRegistry {
         Ok(parsed)
     }
 
+    /// The compiled descriptor pool for a cached Protobuf schema, compiled once (protox,
+    /// with the well-known types available) and shared. Registry schema references are not
+    /// resolved; a schema importing anything beyond the well-known types fails to compile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the source does not compile.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal cache mutex is poisoned, which requires a prior panic inside
+    /// the client (an invariant violation, not an operational failure).
+    #[cfg(feature = "protobuf")]
+    pub(crate) fn parsed_proto(
+        &self,
+        schema: &RegisteredSchema,
+    ) -> Result<Arc<prost_reflect::DescriptorPool>, KafkaError> {
+        if let Some(parsed) = self
+            .inner
+            .parsed_proto
+            .lock()
+            .expect("descriptor cache mutex poisoned")
+            .get(&schema.id)
+        {
+            return Ok(Arc::clone(parsed));
+        }
+        let pool = compile_proto(&schema.definition).map_err(KafkaError::schema_registry)?;
+        let pool = Arc::new(pool);
+        self.inner
+            .parsed_proto
+            .lock()
+            .expect("descriptor cache mutex poisoned")
+            .insert(schema.id, Arc::clone(&pool));
+        Ok(pool)
+    }
+
     /// Transcodes a Confluent-framed payload to plain JSON, so deliveries reach handlers in
     /// the default codec's format: the JSON flavor loses its envelope, Avro and Protobuf
     /// datums (with their features enabled) convert through their registry schema. Non-framed
@@ -540,6 +582,33 @@ impl SchemaRegistry {
     }
 }
 
+#[cfg(feature = "protobuf")]
+fn compile_proto(source: &str) -> Result<prost_reflect::DescriptorPool, protox::Error> {
+    use protox::file::{ChainFileResolver, File, FileResolver, GoogleFileResolver};
+
+    /// Serves the registry schema as a single in-memory file next to the well-known types.
+    struct Single(String);
+    impl FileResolver for Single {
+        fn open_file(&self, name: &str) -> Result<File, protox::Error> {
+            if name == "registry.proto" {
+                File::from_source(name, &self.0)
+            } else {
+                Err(protox::Error::file_not_found(name))
+            }
+        }
+    }
+
+    let mut resolver = ChainFileResolver::new();
+    resolver.add(GoogleFileResolver::new());
+    resolver.add(Single(source.to_owned()));
+    let mut compiler = protox::Compiler::with_file_resolver(resolver);
+    compiler.include_imports(true);
+    compiler.open_file("registry.proto")?;
+    let set = compiler.file_descriptor_set();
+    prost_reflect::DescriptorPool::from_file_descriptor_set(set)
+        .map_err(|err| protox::Error::new(err.to_string()))
+}
+
 /// Converts an incoming framed datum to plain JSON by its schema's flavor. The `avro` and
 /// `protobuf` features extend the match; without them those flavors error.
 fn incoming_datum_to_json(
@@ -552,6 +621,8 @@ fn incoming_datum_to_json(
         SchemaType::Json => Ok(datum.to_vec()),
         #[cfg(feature = "avro")]
         SchemaType::Avro => crate::avro::avro_to_json(registry, schema, datum),
+        #[cfg(feature = "protobuf")]
+        SchemaType::Protobuf => crate::protobuf::protobuf_to_json(registry, schema, datum),
         #[allow(unreachable_patterns)] // the disabled-format arms
         other => Err(KafkaError::InvalidOptions(format!(
             "schema id {} is {other:?}, but the matching cargo feature is not enabled on \
@@ -567,13 +638,18 @@ fn incoming_datum_to_json(
 fn outgoing_json_to_datum(
     registry: &SchemaRegistry,
     schema: &RegisteredSchema,
+    message: Option<&str>,
     payload: &[u8],
 ) -> Result<Vec<u8>, KafkaError> {
-    let _ = registry;
+    let _ = (registry, message);
     match schema.schema_type {
         SchemaType::Json => Ok(payload.to_vec()),
         #[cfg(feature = "avro")]
         SchemaType::Avro => crate::avro::json_to_avro(registry, schema, payload),
+        #[cfg(feature = "protobuf")]
+        SchemaType::Protobuf => {
+            crate::protobuf::json_to_protobuf(registry, schema, message, payload)
+        }
         #[allow(unreachable_patterns)] // the disabled-format arms
         other => Err(KafkaError::InvalidOptions(format!(
             "the subject's schema (id {}) is {other:?}, but the matching cargo feature is \
@@ -618,6 +694,8 @@ pub struct SchemaFrame {
     registry: SchemaRegistry,
     strategy: SubjectStrategy,
     subjects: HashMap<String, String>,
+    /// Per-topic Protobuf message names (fully qualified), for multi-message schemas.
+    messages: HashMap<String, String>,
     /// Subjects the registry answered 404 for: their topics publish un-framed without
     /// re-querying.
     skipped: Arc<Mutex<HashSet<String>>>,
@@ -641,6 +719,7 @@ impl SchemaFrame {
             registry,
             strategy: SubjectStrategy::default(),
             subjects: HashMap::new(),
+            messages: HashMap::new(),
             skipped: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -659,6 +738,15 @@ impl SchemaFrame {
     #[must_use]
     pub fn subject(mut self, topic: impl Into<String>, subject: impl Into<String>) -> Self {
         self.subjects.insert(topic.into(), subject.into());
+        self
+    }
+
+    /// Pins the Protobuf message `topic`'s payloads serialize as, by fully qualified name
+    /// (package included) - for subjects whose `.proto` schema declares several messages.
+    /// Without it a Protobuf subject serializes as the schema's first top-level message.
+    #[must_use]
+    pub fn message(mut self, topic: impl Into<String>, message: impl Into<String>) -> Self {
+        self.messages.insert(topic.into(), message.into());
         self
     }
 
@@ -711,7 +799,8 @@ impl SchemaFrame {
             };
             schema
         };
-        let datum = outgoing_json_to_datum(&self.registry, &schema, out.payload())?;
+        let message = self.messages.get(&topic).map(String::as_str);
+        let datum = outgoing_json_to_datum(&self.registry, &schema, message, out.payload())?;
         let framed = encode_envelope(schema.id, &datum);
         let payload = out.payload_mut();
         payload.clear();
