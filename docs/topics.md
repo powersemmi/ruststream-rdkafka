@@ -65,6 +65,15 @@ lanes keep per-key ordering end to end:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:consumer"
 ```
 
+## Consume errors
+
+The subscriber stream forwards consumer errors as stream items, except the ones librdkafka is
+already retrying by itself - today exactly `UnknownTopicOrPartition`, a subscribed topic that
+does not exist yet. Such an episode surfaces as one warning when it starts - the monitoring
+signal to act on - with debug lines for the repeats and the recovery, so a topic that appears
+late (broker auto-creation, provisioning races) recovers on its own without flooding the
+dispatch error log, while a topic that never appears leaves the warning standing.
+
 ## Raw configuration passthrough
 
 `KafkaTopic::config(key, value)` reaches any librdkafka consumer property this crate does not

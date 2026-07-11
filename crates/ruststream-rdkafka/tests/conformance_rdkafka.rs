@@ -41,11 +41,47 @@ async fn kafka_test_broker_passes_conformance_suite() {
     harness::run_suite(KafkaTestBroker::new).await;
 }
 
+/// The first consumer group on a fresh cluster makes the broker create `__consumer_offsets`
+/// (50 partitions), which can take longer than the harness's short delivery deadline. A
+/// throwaway group round-trip absorbs that one-time cost with a generous timeout.
+async fn warm_up_group_coordinator(url: &str) {
+    use futures::StreamExt as _;
+    use ruststream::{Broker as _, IncomingMessage as _, OutgoingMessage, Publisher as _};
+    use ruststream::{Subscriber as _, SubscriptionSource as _};
+
+    let scratch = format!("conformance-warmup-{}", std::process::id());
+    create_topic(url, &scratch).await;
+    let broker = KafkaBroker::new([url.to_owned()]);
+    broker.connect().await.expect("warm-up connect");
+    let mut subscriber = KafkaTopic::new(&scratch)
+        .group(&scratch)
+        .start(StartOffset::Earliest)
+        .subscribe(&broker)
+        .await
+        .expect("warm-up subscribe");
+    broker
+        .publisher()
+        .publish(OutgoingMessage::new(&scratch, b"warm-up"))
+        .await
+        .expect("warm-up publish");
+    let mut stream = Box::pin(subscriber.stream());
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next())
+        .await
+        .expect("warm-up delivery within timeout")
+        .expect("warm-up stream has next")
+        .expect("warm-up delivery ok");
+    msg.ack().await.expect("warm-up ack");
+    drop(stream);
+    drop(subscriber);
+    broker.shutdown().await.expect("warm-up shutdown");
+}
+
 // The harness takes higher-ranked closures that method paths cannot satisfy.
 #[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passes_lifecycle() {
     let Some(url) = kafka_url() else { return };
+    warm_up_group_coordinator(&url).await;
     create_topic(&url, "conformance.lifecycle").await;
     // A per-run group: the lifecycle subject is fixed, and a group that already committed the
     // subject's tail would otherwise never see the fresh publish.
