@@ -97,6 +97,45 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 
+  templates:
+    name: Templates (render + compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-generate
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-generate
+
+      # The template-contract drift check: render each scaffold and compile it, so an API change
+      # that breaks a template fails here, not a user's first `cargo build`. Compile-only, no live
+      # broker. The rendered projects pin `ruststream-rdkafka` by version; patch it at this
+      # checkout so the scaffolds build against the unreleased crate (`ruststream` itself is
+      # published).
+      - name: Render and check the templates
+        run: |
+          for tpl in kafka-topic; do
+            dest="$RUNNER_TEMP/$tpl"
+            mkdir -p "$dest"
+            cargo generate --path "templates/$tpl" \
+              --name smoke --destination "$dest" --vcs none
+            {
+              echo ""
+              echo "[patch.crates-io]"
+              echo "ruststream-rdkafka = { path = \"$GITHUB_WORKSPACE/crates/ruststream-rdkafka\" }"
+            } >> "$dest/smoke/Cargo.toml"
+            cargo check --manifest-path "$dest/smoke/Cargo.toml"
+          done
+
   security:
     name: Security scans
     runs-on: ubuntu-latest

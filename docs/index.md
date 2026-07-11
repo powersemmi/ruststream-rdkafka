@@ -38,6 +38,16 @@ A minimal service is one handler and one app function:
   synchronous `#[ruststream::app]` builder; the real network work happens in the idempotent
   async `Broker::connect`.
 
+## Scaffold a service
+
+```text
+cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
+```
+
+The starter wires one Kafka broker with a default consumer group, a tracked-commit subscriber
+with a retry/dead-letter pipeline and a published reply, and the `#[ruststream::app]` entry
+point (`run` / `asyncapi gen`).
+
 ## Guides
 
 - [Topics and groups](topics.md) - descriptors, start offsets, commit modes, keyed lanes.
