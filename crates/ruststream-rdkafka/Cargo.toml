@@ -60,5 +60,8 @@ name = "kafka_keys"
 name = "kafka_producer"
 
 [[example]]
+name = "kafka_multi_topic"
+
+[[example]]
 name = "kafka_testing"
 required-features = ["testing"]

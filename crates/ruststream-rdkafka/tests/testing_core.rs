@@ -220,6 +220,41 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
     assert_eq!(next_payload(&mut stream).await, b"two");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_topic_descriptor_mounts_on_the_test_broker() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = KafkaTestBroker::new();
+    let def = KafkaTopic::new("orders").and_topic("cancellations");
+    let mut subscriber = def.subscribe(&broker).await.expect("subscribe");
+
+    broker
+        .publisher()
+        .publish(OutgoingMessage::new("orders", b"o1"))
+        .await
+        .expect("publish");
+    broker
+        .publisher()
+        .publish(OutgoingMessage::new("cancellations", b"c1"))
+        .await
+        .expect("publish");
+
+    let mut stream = Box::pin(subscriber.stream());
+    let mut payloads = vec![
+        next_payload(&mut stream).await,
+        next_payload(&mut stream).await,
+    ];
+    payloads.sort();
+    assert_eq!(payloads, vec![b"c1".to_vec(), b"o1".to_vec()]);
+
+    // Patterns are real-cluster behavior: the exact-name router refuses them loudly.
+    let err = KafkaTopic::pattern("^orders\\..*")
+        .subscribe(&broker)
+        .await
+        .expect_err("patterns must be rejected in-process");
+    assert!(matches!(err, KafkaError::InvalidOptions(_)));
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 struct Order {
     id: u64,

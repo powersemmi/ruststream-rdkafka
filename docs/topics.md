@@ -55,6 +55,26 @@ Negative settlement under `Tracked`:
   then - precise, but worth knowing when a handler nacks in a loop. Retry topics, seek-back
   redelivery, and dead-letter routing are planned descriptor options.
 
+## Multiple topics and patterns
+
+One subscription can consume several topics through one consumer and one group. All matched
+topics share the handler, and therefore its payload type; each delivery still reports the
+topic it came from:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:multi"
+```
+
+For open-ended sets, a librdkafka topic regex subscribes to every matching topic - the pattern
+must start with `^` (librdkafka's anchor for distinguishing patterns from literal names):
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:pattern"
+```
+
+The in-process test broker supports multi-topic subscriptions (exact-name routing per topic)
+but not patterns.
+
 ## Partition assignment
 
 `KafkaTopic::assignment` picks how the group balances partitions across members (librdkafka's

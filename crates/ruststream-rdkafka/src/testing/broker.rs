@@ -80,7 +80,7 @@ impl KafkaTestBroker {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when `topic` is empty.
+    /// Returns [`KafkaError::InvalidOptions`] when `topic` is empty or a `^` pattern.
     // Async without an await on purpose: call-site parity with the real broker, so application
     // code and tests compile unchanged against either.
     #[allow(clippy::unused_async)]
@@ -88,14 +88,40 @@ impl KafkaTestBroker {
         &self,
         topic: impl Into<String>,
     ) -> Result<KafkaTestSubscriber, KafkaError> {
-        let topic = topic.into();
-        if topic.is_empty() {
-            return Err(KafkaError::InvalidOptions(
-                "topic name must not be empty; subscribe with the topic the handler consumes"
-                    .to_owned(),
-            ));
+        self.subscribe_topics(std::slice::from_ref(&topic.into()))
+            .await
+    }
+
+    /// Subscribes to several topics as one subscription, mirroring
+    /// [`KafkaTopic::and_topic`](crate::KafkaTopic::and_topic): every name routes exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] when a name is empty, or when a name is a `^`
+    /// pattern: the in-process broker routes by exact topic name, so pattern subscriptions
+    /// need a real cluster.
+    // Async without an await on purpose: call-site parity with the real broker.
+    #[allow(clippy::unused_async)]
+    pub async fn subscribe_topics(
+        &self,
+        topics: &[String],
+    ) -> Result<KafkaTestSubscriber, KafkaError> {
+        for topic in topics {
+            if topic.is_empty() {
+                return Err(KafkaError::InvalidOptions(
+                    "topic name must not be empty; subscribe with the topic the handler \
+                     consumes"
+                        .to_owned(),
+                ));
+            }
+            if topic.starts_with('^') {
+                return Err(KafkaError::InvalidOptions(format!(
+                    "the in-process test broker routes by exact topic name; the pattern \
+                     {topic:?} needs a real cluster",
+                )));
+            }
         }
-        Ok(KafkaTestSubscriber::open(&self.state, topic))
+        Ok(KafkaTestSubscriber::open_many(&self.state, topics))
     }
 
     /// A publisher into this broker's router.
