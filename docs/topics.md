@@ -55,6 +55,15 @@ Negative settlement under `Tracked`:
   then - precise, but worth knowing when a handler nacks in a loop. Retry topics, seek-back
   redelivery, and dead-letter routing are planned descriptor options.
 
+## Partition assignment
+
+`KafkaTopic::assignment` picks how the group balances partitions across members (librdkafka's
+`partition.assignment.strategy`): `Assignment::Range`, `Assignment::RoundRobin`, or
+`Assignment::CooperativeSticky` for incremental rebalancing where unaffected partitions keep
+flowing during a rebalance. Unset means the librdkafka default (`range,roundrobin`).
+Cooperative and eager strategies cannot mix within one group, and librdkafka offers no API for
+custom group assignors.
+
 ## Keyed worker lanes
 
 Kafka partitions by the native record key, and this crate surfaces it through

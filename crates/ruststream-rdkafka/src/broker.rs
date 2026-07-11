@@ -210,6 +210,12 @@ impl KafkaBroker {
                 config.set("auto.offset.reset", "latest");
             }
         }
+        if let Some(assignment) = def.assignment_strategy() {
+            config.set(
+                "partition.assignment.strategy",
+                assignment.as_config_value(),
+            );
+        }
         if def.commit_mode() == Commit::Tracked {
             config.set("enable.auto.offset.store", "false");
         }

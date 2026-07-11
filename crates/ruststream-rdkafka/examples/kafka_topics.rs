@@ -22,17 +22,18 @@ struct Confirmation {
 }
 
 // --8<-- [start:descriptor]
-use ruststream_rdkafka::{Commit, KafkaTopic, StartOffset};
+use ruststream_rdkafka::{Assignment, Commit, KafkaTopic, StartOffset};
 
 // Everything besides the topic is optional: unset options mean the librdkafka defaults. The
 // group overrides the broker-wide `default_group`; `Commit::Tracked` turns `ack` into a precise
-// per-message acknowledgement (a contiguous watermark backs the committed position); `config`
-// reaches any consumer property this crate does not surface as a typed option.
+// per-message acknowledgement backed by the stored position; `config` reaches any consumer
+// property this crate does not surface as a typed option.
 #[subscriber(
     KafkaTopic::new("orders")
         .group("orders-workers")
         .start(StartOffset::Earliest)
         .commit(Commit::Tracked)
+        .assignment(Assignment::CooperativeSticky)
         .config("fetch.min.bytes", "1024"),
     publish("confirmations")
 )]

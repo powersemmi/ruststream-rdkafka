@@ -25,6 +25,35 @@ pub enum StartOffset {
     Latest,
 }
 
+/// The partition assignment strategy for the consumer group (librdkafka's
+/// `partition.assignment.strategy`).
+///
+/// These are librdkafka's built-in strategies; the client offers no API for a custom group
+/// assignor (the rebalance callback only observes assignments). Cooperative and eager
+/// strategies cannot mix within one group - librdkafka rejects the join, and the error
+/// surfaces on the subscriber stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Assignment {
+    /// Co-partitioned ranges per topic (the Kafka default family).
+    Range,
+    /// Round-robin across all subscribed topics.
+    RoundRobin,
+    /// Incremental cooperative rebalancing: unaffected partitions keep flowing during a
+    /// rebalance instead of stopping the world.
+    CooperativeSticky,
+}
+
+impl Assignment {
+    pub(crate) fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Range => "range",
+            Self::RoundRobin => "roundrobin",
+            Self::CooperativeSticky => "cooperative-sticky",
+        }
+    }
+}
+
 /// How processed deliveries are committed back to the consumer group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -54,12 +83,13 @@ pub enum Commit {
 /// # Examples
 ///
 /// ```
-/// use ruststream_rdkafka::{Commit, KafkaTopic, StartOffset};
+/// use ruststream_rdkafka::{Assignment, Commit, KafkaTopic, StartOffset};
 ///
 /// let topic = KafkaTopic::new("orders")
 ///     .group("orders-svc")
 ///     .start(StartOffset::Earliest)
 ///     .commit(Commit::Tracked)
+///     .assignment(Assignment::CooperativeSticky)
 ///     .config("fetch.min.bytes", "1024");
 /// assert_eq!(topic.topic(), "orders");
 /// ```
@@ -69,6 +99,7 @@ pub struct KafkaTopic {
     group: Option<String>,
     start: StartOffset,
     commit: Commit,
+    assignment: Option<Assignment>,
     config: Vec<(String, String)>,
 }
 
@@ -81,6 +112,7 @@ impl KafkaTopic {
             group: None,
             start: StartOffset::default(),
             commit: Commit::default(),
+            assignment: None,
             config: Vec::new(),
         }
     }
@@ -104,6 +136,14 @@ impl KafkaTopic {
     #[must_use]
     pub fn commit(mut self, commit: Commit) -> Self {
         self.commit = commit;
+        self
+    }
+
+    /// The partition assignment strategy (see [`Assignment`]); unset means the librdkafka
+    /// default (`range,roundrobin`).
+    #[must_use]
+    pub fn assignment(mut self, assignment: Assignment) -> Self {
+        self.assignment = Some(assignment);
         self
     }
 
@@ -131,6 +171,10 @@ impl KafkaTopic {
 
     pub(crate) fn commit_mode(&self) -> Commit {
         self.commit
+    }
+
+    pub(crate) fn assignment_strategy(&self) -> Option<Assignment> {
+        self.assignment
     }
 
     pub(crate) fn config_entries(&self) -> &[(String, String)] {
