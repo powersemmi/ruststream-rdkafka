@@ -16,7 +16,7 @@ authors = ["RustStream contributors"]
 [workspace.dependencies]
 ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
 
-ruststream = { version = ">=0.5.0, <0.6.0", default-features = false }
+ruststream = { version = ">=0.5.2, <0.6.0", default-features = false }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }

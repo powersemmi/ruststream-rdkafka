@@ -65,6 +65,8 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 
 /// Zero-sized [`Field`] keys reading one [`KafkaContext`] field each.
 pub mod keys {
+    use ruststream::ContextField;
+
     use super::{Field, KafkaContext};
 
     use crate::eos::SourceOffset;
@@ -81,6 +83,14 @@ pub mod keys {
         }
     }
 
+    impl ContextField for Topic {
+        type Context = KafkaContext;
+        type Value = String;
+        fn read(self, src: &KafkaContext) -> String {
+            src.topic().to_owned()
+        }
+    }
+
     /// Reads the source partition.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Partition;
@@ -89,6 +99,14 @@ pub mod keys {
         type Value<'a> = i32;
 
         fn get(self, src: &KafkaContext) -> i32 {
+            src.partition()
+        }
+    }
+
+    impl ContextField for Partition {
+        type Context = KafkaContext;
+        type Value = i32;
+        fn read(self, src: &KafkaContext) -> i32 {
             src.partition()
         }
     }
@@ -105,6 +123,14 @@ pub mod keys {
         }
     }
 
+    impl ContextField for Offset {
+        type Context = KafkaContext;
+        type Value = i64;
+        fn read(self, src: &KafkaContext) -> i64 {
+            src.offset()
+        }
+    }
+
     /// Reads the record timestamp in milliseconds since the epoch, when present.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct TimestampMillis;
@@ -113,6 +139,14 @@ pub mod keys {
         type Value<'a> = Option<i64>;
 
         fn get(self, src: &KafkaContext) -> Option<i64> {
+            src.timestamp_millis()
+        }
+    }
+
+    impl ContextField for TimestampMillis {
+        type Context = KafkaContext;
+        type Value = Option<i64>;
+        fn read(self, src: &KafkaContext) -> Option<i64> {
             src.timestamp_millis()
         }
     }
@@ -129,15 +163,31 @@ pub mod keys {
         }
     }
 
+    impl ContextField for Key {
+        type Context = KafkaContext;
+        type Value = Option<Vec<u8>>;
+        fn read(self, src: &KafkaContext) -> Option<Vec<u8>> {
+            src.key().map(<[u8]>::to_vec)
+        }
+    }
+
     /// Reads the delivery's source coordinates as one value, the form
     /// [`EosPipeline::publish`](crate::EosPipeline::publish) takes.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Source;
 
     impl Field<KafkaContext> for Source {
-        type Value<'a> = SourceOffset<'a>;
+        type Value<'a> = SourceOffset;
 
-        fn get(self, src: &KafkaContext) -> SourceOffset<'_> {
+        fn get(self, src: &KafkaContext) -> SourceOffset {
+            SourceOffset::new(src.topic(), src.partition(), src.offset())
+        }
+    }
+
+    impl ContextField for Source {
+        type Context = KafkaContext;
+        type Value = SourceOffset;
+        fn read(self, src: &KafkaContext) -> SourceOffset {
             SourceOffset::new(src.topic(), src.partition(), src.offset())
         }
     }

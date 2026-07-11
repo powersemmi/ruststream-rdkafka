@@ -129,6 +129,10 @@ Three places name one id:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos"
 ```
 
+The delivery's source coordinates arrive as a `Ctx<Source>` extractor parameter - every
+`KafkaContext` field key (`Partition`, `Offset`, `Topic`, ...) works the same way, so handlers
+take exactly the delivery metadata they need without a ctx parameter.
+
 The subscription's `Commit::Transactional("enrich-svc-1")` switches its consumer's own
 committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;
 `EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"))` wires the producer
