@@ -22,6 +22,10 @@ allow = [
     # unicode-ident is (MIT OR Apache-2.0) AND Unicode-3.0; the Unicode license
     # only covers the embedded character tables and is permissive.
     "Unicode-3.0",
+    # webpki-roots ships the Mozilla CA trust store (pulled in by reqwest's
+    # rustls-tls stack); CDLA-Permissive-2.0 covers that certificate data only
+    # and is permissive.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
