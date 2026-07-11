@@ -24,6 +24,9 @@ cbor = ["ruststream/cbor"]
 # Confluent Schema Registry: the client, the wire-format envelope, and the subscriber-side
 # schema prefetch that keeps the sync codec path free of I/O.
 schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
+# Avro transcoding for the registry middleware: apache-avro's serde path plus the AvroSchema
+# derive for registering subjects from types.
+avro = ["schema-registry", "dep:apache-avro"]
 # Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
 testing = ["ruststream/conformance", "ruststream/testing"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
@@ -47,6 +50,7 @@ reqwest = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+apache-avro = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
@@ -90,6 +94,10 @@ name = "kafka_transactions"
 [[example]]
 name = "kafka_schema_registry"
 required-features = ["schema-registry"]
+
+[[example]]
+name = "kafka_avro"
+required-features = ["avro"]
 
 [[example]]
 name = "kafka_testing"

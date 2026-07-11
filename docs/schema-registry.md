@@ -78,7 +78,12 @@ exactly what it is given.
   documents untouched. Documents are not validated against the registered schema; the handler
   type's shape is the effective contract.
 - **Avro** (`avro` feature): datum to JSON on consume, JSON to datum on publish, both against
-  the registry schema; `register_avro::<T>` derives the schema from the type.
+  the registry schema; `register_avro::<T>` derives the schema from the type (the `AvroSchema`
+  derive is re-exported):
+
+    ```rust
+    --8<-- "crates/ruststream-rdkafka/examples/kafka_avro.rs:wiring"
+    ```
 - **Protobuf** (`protobuf` feature): messages to JSON and back through descriptors compiled
   from the registry's `.proto` source (well-known types available; schema references beyond
   them are not resolved), message-indexes handled on both sides.
