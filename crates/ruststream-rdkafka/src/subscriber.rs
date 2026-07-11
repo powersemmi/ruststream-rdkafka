@@ -15,6 +15,7 @@ use tracing::{debug, warn};
 use crate::convert;
 use crate::error::KafkaError;
 use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
+use crate::retry::RetryContext;
 use crate::topic::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
 
@@ -46,6 +47,7 @@ pub struct KafkaSubscriber {
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
+    retry: Option<Arc<RetryContext>>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
     /// error of an episode warns, repeats are debug, recovery closes the episode.
     in_transient_episode: bool,
@@ -58,6 +60,7 @@ impl KafkaSubscriber {
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
+        retry: Option<Arc<RetryContext>>,
     ) -> Self {
         Self {
             consumer,
@@ -65,6 +68,7 @@ impl KafkaSubscriber {
             commit,
             tracker,
             lane_key,
+            retry,
             in_transient_episode: false,
         }
     }
@@ -139,6 +143,7 @@ impl KafkaSubscriber {
             delivery.timestamp().to_millis(),
             settlement,
             lane,
+            self.retry.clone(),
         )
     }
 }

@@ -13,6 +13,7 @@ use tokio::task;
 
 use crate::error::KafkaError;
 use crate::publisher::KafkaPublisher;
+use crate::retry::RetryContext;
 use crate::subscriber::KafkaSubscriber;
 use crate::topic::{Commit, KafkaTopic, StartOffset};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -235,12 +236,24 @@ impl KafkaBroker {
         let names: Vec<&str> = def.subscribed_topics().iter().map(String::as_str).collect();
         consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
 
+        let consumer = Arc::new(consumer);
+        let retry =
+            (def.retry_policy().is_some() || def.dead_letter_topic().is_some()).then(|| {
+                Arc::new(RetryContext::new(
+                    def.retry_policy().cloned(),
+                    def.max_deliveries_cap(),
+                    def.dead_letter_topic().map(str::to_owned),
+                    Arc::clone(&self.conn),
+                    Arc::clone(&consumer),
+                ))
+            });
         Ok(KafkaSubscriber::new(
-            Arc::new(consumer),
+            consumer,
             def.topic().to_owned(),
             def.commit_mode(),
             tracker,
             def.lane_key_choice(),
+            retry,
         ))
     }
 }

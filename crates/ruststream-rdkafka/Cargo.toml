@@ -66,5 +66,8 @@ name = "kafka_multi_topic"
 name = "kafka_batches"
 
 [[example]]
+name = "kafka_retries"
+
+[[example]]
 name = "kafka_testing"
 required-features = ["testing"]
