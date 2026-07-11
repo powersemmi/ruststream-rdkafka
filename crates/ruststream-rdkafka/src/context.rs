@@ -67,6 +67,8 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 pub mod keys {
     use super::{Field, KafkaContext};
 
+    use crate::eos::SourceOffset;
+
     /// Reads the source topic name.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Topic;
@@ -124,6 +126,19 @@ pub mod keys {
 
         fn get(self, src: &KafkaContext) -> Option<&[u8]> {
             src.key()
+        }
+    }
+
+    /// Reads the delivery's source coordinates as one value, the form
+    /// [`EosPipeline::publish`](crate::EosPipeline::publish) takes.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Source;
+
+    impl Field<KafkaContext> for Source {
+        type Value<'a> = SourceOffset<'a>;
+
+        fn get(self, src: &KafkaContext) -> SourceOffset<'_> {
+            SourceOffset::new(src.topic(), src.partition(), src.offset())
         }
     }
 }

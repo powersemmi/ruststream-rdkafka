@@ -40,6 +40,19 @@ pub enum KafkaError {
     /// The message names the offending option and the remediation.
     #[error("invalid options: {0}")]
     InvalidOptions(String),
+
+    /// `begin_transaction` found a transaction already open on this publisher.
+    ///
+    /// One producer runs one transaction at a time, so a second begin means two flows share
+    /// one publisher; erroring beats silently merging their messages into one transaction.
+    /// Concurrent transactional flows need distinct publishers - one per partition via
+    /// [`TransactionalPartitions`](crate::TransactionalPartitions), or distinct explicit ids.
+    #[error(
+        "a transaction is already open on this publisher; one publisher runs one transaction \
+         at a time - use distinct publishers (for example TransactionalPartitions) for \
+         concurrent transactional flows"
+    )]
+    TransactionBusy,
 }
 
 impl KafkaError {

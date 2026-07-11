@@ -117,13 +117,20 @@ impl KafkaSubscriber {
         let payload = delivery
             .payload()
             .map_or_else(Bytes::new, Bytes::copy_from_slice);
-        let settlement = match self.commit {
+        let settlement = match &self.commit {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => {
                 self.tracker
                     .delivered(delivery.topic(), delivery.partition(), delivery.offset());
                 Settlement::Tracked {
                     consumer: Arc::clone(&self.consumer),
+                    tracker: Arc::clone(&self.tracker),
+                }
+            }
+            Commit::Transactional(_) => {
+                self.tracker
+                    .delivered(delivery.topic(), delivery.partition(), delivery.offset());
+                Settlement::Transactional {
                     tracker: Arc::clone(&self.tracker),
                 }
             }

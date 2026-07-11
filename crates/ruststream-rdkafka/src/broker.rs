@@ -1,7 +1,8 @@
 //! The broker handle: connection lifecycle, subscriptions, and the publisher constructor.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rdkafka::ClientConfig;
@@ -11,6 +12,7 @@ use ruststream::{Broker, DescribeServer, ServerSpec, Subscribe};
 use tokio::sync::OnceCell;
 use tokio::task;
 
+use crate::eos::EosSource;
 use crate::error::KafkaError;
 use crate::publisher::KafkaPublisher;
 use crate::retry::RetryContext;
@@ -18,14 +20,46 @@ use crate::subscriber::KafkaSubscriber;
 use crate::topic::{Commit, KafkaTopic, StartOffset};
 use crate::tracker::{CommitTracker, TrackingContext};
 
-/// The live client state: the shared producer every publisher clones from.
+/// The live client state: the shared producer every publisher clones from, plus the resolved
+/// producer configuration so transactional publishers can derive their own producers from it.
 pub(crate) struct ConnState {
     producer: FutureProducer,
+    producer_config: ClientConfig,
+    /// Subscriptions in `Commit::Transactional` mode, keyed by their pipeline id (the
+    /// transactional id of the `EosPipeline` that commits their offsets).
+    eos_sources: Mutex<HashMap<String, Vec<EosSource>>>,
 }
 
 impl ConnState {
     pub(crate) fn producer(&self) -> &FutureProducer {
         &self.producer
+    }
+
+    pub(crate) fn producer_config(&self) -> &ClientConfig {
+        &self.producer_config
+    }
+
+    fn register_eos(&self, pipeline: &str, source: EosSource) {
+        let mut sources = self
+            .eos_sources
+            .lock()
+            .expect("eos source registry mutex poisoned");
+        sources.entry(pipeline.to_owned()).or_default().push(source);
+    }
+
+    pub(crate) fn eos_sources(&self, pipeline: &str) -> Vec<EosSource> {
+        let mut sources = self
+            .eos_sources
+            .lock()
+            .expect("eos source registry mutex poisoned");
+        // Prune entries whose subscriber is gone, so the registry does not grow with
+        // re-subscriptions.
+        sources
+            .get_mut(pipeline)
+            .map_or_else(Vec::new, |registered| {
+                registered.retain(EosSource::alive);
+                registered.clone()
+            })
     }
 }
 
@@ -220,8 +254,17 @@ impl KafkaBroker {
                 assignment.as_config_value(),
             );
         }
-        if def.commit_mode() == Commit::Tracked {
-            config.set("enable.auto.offset.store", "false");
+        match def.commit_mode() {
+            Commit::Auto => {}
+            Commit::Tracked => {
+                config.set("enable.auto.offset.store", "false");
+            }
+            Commit::Transactional(_) => {
+                // The pipeline's producer transaction owns the offsets: the consumer must
+                // neither store nor commit them on its own.
+                config.set("enable.auto.offset.store", "false");
+                config.set("enable.auto.commit", "false");
+            }
         }
         // The raw passthrough is applied last on purpose: it wins over the typed options.
         for (key, value) in def.config_entries() {
@@ -237,6 +280,10 @@ impl KafkaBroker {
         consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
 
         let consumer = Arc::new(consumer);
+        if let Commit::Transactional(pipeline) = def.commit_mode() {
+            let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
+            state.register_eos(pipeline, EosSource::new(&tracker, &consumer));
+        }
         let retry =
             (def.retry_policy().is_some() || def.dead_letter_topic().is_some()).then(|| {
                 Arc::new(RetryContext::new(
@@ -250,7 +297,7 @@ impl KafkaBroker {
         Ok(KafkaSubscriber::new(
             consumer,
             def.topic().to_owned(),
-            def.commit_mode(),
+            def.commit_mode().clone(),
             tracker,
             def.lane_key_choice(),
             retry,
@@ -292,7 +339,11 @@ impl Broker for KafkaBroker {
                     .map_err(|err| KafkaError::Connect(Box::new(err)))?
                     .map_err(KafkaError::connect)?;
 
-                Ok(ConnState { producer })
+                Ok(ConnState {
+                    producer,
+                    producer_config: config,
+                    eos_sources: Mutex::new(HashMap::new()),
+                })
             })
             .await?;
         Ok(())

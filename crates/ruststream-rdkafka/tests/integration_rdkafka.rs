@@ -25,10 +25,13 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
-use ruststream::{Broker, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber};
+use ruststream::{
+    Broker, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
+    TransactionalPublisher,
+};
 use ruststream_rdkafka::{
-    Assignment, Commit, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
-    PARTITION_KEY_HEADER, StartOffset,
+    Assignment, Commit, EosPipeline, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
+    PARTITION_KEY_HEADER, SourceOffset, StartOffset, TransactionalPartitions,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1110,4 +1113,240 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
         seen, expected,
         "one partition = one lane: global partition order must be preserved across keys",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partition_scoped_transactions_run_independently() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("txscope");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let mut subscriber = broker
+        .subscribe(tracked(&topic, &unique("group")))
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+
+    let publishers = TransactionalPartitions::new(broker.publisher(), unique("txp"));
+    let p0 = publishers.for_partition(0);
+    let p1 = publishers.for_partition(1);
+
+    p0.begin_transaction().await.expect("begin p0");
+    // One publisher runs one transaction: a second begin is an explicit error, not a silent
+    // merge of two flows into one transaction.
+    let busy = p0
+        .begin_transaction()
+        .await
+        .expect_err("begin while open must fail");
+    assert!(matches!(busy, KafkaError::TransactionBusy));
+
+    // Another partition's publisher owns its own id and transacts independently.
+    p1.begin_transaction().await.expect("begin p1");
+    p0.publish(OutgoingMessage::new(&topic, b"from-p0".as_slice()))
+        .await
+        .expect("publish p0");
+    p1.publish(OutgoingMessage::new(&topic, b"from-p1".as_slice()))
+        .await
+        .expect("publish p1");
+
+    // Commit in the reverse order of the begins: the transactions do not entangle.
+    p1.commit().await.expect("commit p1");
+    p0.commit().await.expect("commit p0");
+
+    let first = next_message(&mut stream).await;
+    let second = next_message(&mut stream).await;
+    let mut payloads = [first.payload().to_vec(), second.payload().to_vec()];
+    payloads.sort();
+    assert_eq!(payloads, [b"from-p0".to_vec(), b"from-p1".to_vec()]);
+    first.ack().await.expect("ack first");
+    second.ack().await.expect("ack second");
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eos_pipeline_commits_offsets_with_records() {
+    let Some(url) = kafka_url() else { return };
+    let input = unique("eos-in");
+    let output = unique("eos-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    let broker = connected_broker(&url).await;
+    let pipeline_id = unique("eos");
+    let group = unique("group");
+
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        publish(&broker, &input, payload).await;
+    }
+
+    let pipeline = EosPipeline::new(broker.publisher().transactional_id(&pipeline_id))
+        .commit_interval(Duration::from_millis(50));
+    let mut subscriber = broker
+        .subscribe(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .start(StartOffset::Earliest)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("subscribe input");
+    {
+        let mut stream = Box::pin(subscriber.stream());
+        for _ in 0..3 {
+            let msg = next_message(&mut stream).await;
+            let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+            let forwarded: Vec<u8> = msg.payload().to_vec();
+            pipeline
+                .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+                .await
+                .expect("pipeline publish");
+            msg.ack().await.expect("ack");
+        }
+    }
+
+    // The committed window makes the records visible to a read_committed reader.
+    let mut out_subscriber = broker
+        .subscribe(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let mut out_stream = Box::pin(out_subscriber.stream());
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let msg = next_message(&mut out_stream).await;
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack output");
+    }
+    seen.sort();
+    assert_eq!(seen, [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+
+    // The offsets went into the transaction: a fresh consumer of the same group resumes
+    // after the processed records instead of redelivering them.
+    drop(subscriber);
+    publish(&broker, &input, b"d").await;
+    let mut resumed = broker
+        .subscribe(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("resubscribe input");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"d",
+        "transactionally committed offsets must position the group after the window",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    drop(out_stream);
+    drop(out_subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eos_aborted_window_replays_without_output_duplicates() {
+    let Some(url) = kafka_url() else { return };
+    let input = unique("eos-abort-in");
+    let output = unique("eos-abort-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    let broker = connected_broker(&url).await;
+    let pipeline_id = unique("eos-abort");
+
+    publish(&broker, &input, b"first").await;
+    publish(&broker, &input, b"second").await;
+
+    // A short transaction deadline keeps the stall-abort quick; the deadline also bounds
+    // init/commit, so the transaction coordinator is warmed up by the earlier tests.
+    let pipeline = EosPipeline::new(
+        broker
+            .publisher()
+            .transactional_id(&pipeline_id)
+            .transaction_timeout(Duration::from_secs(5)),
+    )
+    .commit_interval(Duration::from_millis(50));
+    let mut subscriber = broker
+        .subscribe(
+            KafkaTopic::new(&input)
+                .group(unique("group"))
+                .start(StartOffset::Earliest)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("subscribe input");
+    let mut stream = Box::pin(subscriber.stream());
+
+    // First pass: both deliveries publish into the window, but the second one requeues, so
+    // the window can never satisfy its settle condition: it aborts at the deadline and seeks
+    // back. The aborted copies stay invisible to read_committed readers.
+    for expected in [b"first".as_slice(), b"second"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), expected);
+        let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+        let forwarded: Vec<u8> = msg.payload().to_vec();
+        pipeline
+            .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .await
+            .expect("pipeline publish (first pass)");
+        if expected == b"second" {
+            msg.nack(true).await.expect("requeue second");
+        } else {
+            msg.ack().await.expect("ack first");
+        }
+    }
+
+    // Second pass: the seek-back redelivers the whole window; processing it cleanly commits.
+    for expected in [b"first".as_slice(), b"second"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(
+            msg.payload(),
+            expected,
+            "aborted window must redeliver whole"
+        );
+        let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+        let forwarded: Vec<u8> = msg.payload().to_vec();
+        pipeline
+            .publish(source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .await
+            .expect("pipeline publish (second pass)");
+        msg.ack().await.expect("ack");
+    }
+
+    // Exactly-once on the output: the aborted first-pass copies never became visible.
+    let mut out_subscriber = broker
+        .subscribe(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let mut out_stream = Box::pin(out_subscriber.stream());
+    let mut seen = Vec::new();
+    for _ in 0..2 {
+        let msg = next_message(&mut out_stream).await;
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack output");
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [b"first".to_vec(), b"second".to_vec()],
+        "output must contain each message exactly once",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), out_stream.next())
+            .await
+            .is_err(),
+        "no duplicate output records may follow",
+    );
+
+    drop(out_stream);
+    drop(out_subscriber);
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
 }
