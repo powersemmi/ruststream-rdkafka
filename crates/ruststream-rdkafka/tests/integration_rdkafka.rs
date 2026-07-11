@@ -55,7 +55,7 @@ fn unique(base: &str) -> String {
 
 /// Recreates a fixed-name topic from scratch: deleting it drops prior runs' segments and
 /// transaction markers, so an aborted or still-open transaction from a dead test process
-/// cannot hold the new run's last-stable-offset (read_committed readers would see nothing
+/// cannot hold the new run's last-stable-offset (`read_committed` readers would see nothing
 /// until the old transaction times out).
 async fn recreate_topic(url: &str, topic: &str, partitions: i32) {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
