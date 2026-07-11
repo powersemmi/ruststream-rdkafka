@@ -413,6 +413,38 @@ async fn bare_name_subscribe_uses_the_default_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_created_topic_recovers_without_stream_errors() {
+    let Some(url) = kafka_url() else { return };
+    // Deliberately NOT created up front: the consumer must ride out UnknownTopicOrPartition.
+    let topic = unique("late");
+    let broker = connected_broker(&url).await;
+
+    // Bound librdkafka's metadata refresh so the late topic is noticed promptly.
+    let def =
+        tracked(&topic, &unique("group")).config("topic.metadata.refresh.interval.ms", "1000");
+    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+
+    // While the topic does not exist the stream stays silent: the pending-creation errors are
+    // classified as transient and logged, not yielded.
+    let quiet = tokio::time::timeout(Duration::from_secs(2), stream.next()).await;
+    assert!(
+        quiet.is_err(),
+        "the stream must stay silent while the topic is pending",
+    );
+
+    // The first publish auto-creates the topic; the consumer notices and delivers.
+    publish(&broker, &topic, b"late-1").await;
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"late-1");
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_group_fails_subscription_clearly() {
     let Some(url) = kafka_url() else { return };
     let broker = connected_broker(&url).await;
