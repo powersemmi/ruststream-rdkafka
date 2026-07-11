@@ -5,16 +5,17 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Stream;
+use futures::future::FutureExt as _;
 use rdkafka::Message as _;
 use rdkafka::consumer::StreamConsumer;
 use rdkafka::error::RDKafkaErrorCode;
-use ruststream::Subscriber;
+use ruststream::{BatchSubscriber, Subscriber};
 use tracing::{debug, warn};
 
 use crate::convert;
 use crate::error::KafkaError;
-use crate::message::{KafkaMessage, Settlement};
-use crate::topic::Commit;
+use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
+use crate::topic::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Whether librdkafka is already retrying this error by itself, making a stream error item
@@ -44,6 +45,7 @@ pub struct KafkaSubscriber {
     topic: String,
     commit: Commit,
     tracker: Arc<CommitTracker>,
+    lane_key: LaneKey,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
     /// error of an episode warns, repeats are debug, recovery closes the episode.
     in_transient_episode: bool,
@@ -55,12 +57,14 @@ impl KafkaSubscriber {
         topic: String,
         commit: Commit,
         tracker: Arc<CommitTracker>,
+        lane_key: LaneKey,
     ) -> Self {
         Self {
             consumer,
             topic,
             commit,
             tracker,
+            lane_key,
             in_transient_episode: false,
         }
     }
@@ -120,6 +124,12 @@ impl KafkaSubscriber {
                 }
             }
         };
+        let lane = match self.lane_key {
+            LaneKey::RecordKey => headers
+                .get(PARTITION_KEY_HEADER)
+                .map(Bytes::copy_from_slice),
+            LaneKey::Partition => Some(Bytes::from(delivery.partition().to_string())),
+        };
         KafkaMessage::new(
             payload,
             headers,
@@ -128,6 +138,7 @@ impl KafkaSubscriber {
             delivery.offset(),
             delivery.timestamp().to_millis(),
             settlement,
+            lane,
         )
     }
 }
@@ -175,6 +186,55 @@ impl Subscriber for KafkaSubscriber {
                     Err(err) => return Some((Err(KafkaError::consume(err)), sub)),
                 }
             }
+        })
+    }
+}
+
+impl BatchSubscriber for KafkaSubscriber {
+    type Batch = Vec<KafkaMessage>;
+
+    /// Streams non-empty pages natively: each waits for one delivery, then drains everything
+    /// librdkafka has already fetched. There is no crate-imposed window - the page is bounded
+    /// by librdkafka's own fetch-queue limits (`queued.max.messages.kbytes` and friends,
+    /// settable through [`KafkaTopic::config`](crate::KafkaTopic::config)); wrap the source in
+    /// the core [`Buffered`](ruststream::Buffered) adapter for an explicit size/deadline
+    /// window. A consumer error inside an open page yields the page first; the error (if it
+    /// persists) surfaces on the next poll.
+    ///
+    /// # Cancel safety
+    ///
+    /// Same guarantees as [`Subscriber::stream`]: cancel safe between polls, no delivery is
+    /// lost by dropping the stream.
+    fn batches(
+        &mut self,
+    ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
+        futures::stream::unfold(self, |sub| async move {
+            // Wait for the page's first delivery.
+            let first = loop {
+                match sub.consumer.recv().await {
+                    Ok(delivery) => break sub.map_delivery(&delivery),
+                    Err(err) if is_transient(&err) => sub.note_transient(&err),
+                    Err(err) => return Some((Err(KafkaError::consume(err)), sub)),
+                }
+            };
+            sub.note_recovered();
+
+            let mut batch = vec![first];
+            // Drain what is already fetched; recv is cancel safe, so dropping the probe
+            // future loses nothing.
+            while let Some(result) = sub.consumer.recv().now_or_never() {
+                match result {
+                    Ok(delivery) => {
+                        let item = sub.map_delivery(&delivery);
+                        batch.push(item);
+                    }
+                    Err(err) if is_transient(&err) => sub.note_transient(&err),
+                    // Yield what was collected; a persistent error re-surfaces on the next
+                    // page's first recv.
+                    Err(_) => break,
+                }
+            }
+            Some((Ok(batch), sub))
         })
     }
 }

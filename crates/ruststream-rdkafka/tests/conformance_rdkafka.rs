@@ -1,6 +1,6 @@
 //! Conformance: the in-process transport passes `run_suite` unconditionally; the lifecycle
-//! suite runs against a real Kafka when `KAFKA_TEST_URL` is set (see `docker-compose.test.yml`
-//! and `just test-brokers`).
+//! and capability suites run against a real Kafka when `KAFKA_TEST_URL` is set (see
+//! `docker-compose.test.yml` and `just test-brokers`).
 
 #![cfg(feature = "testing")]
 
@@ -8,7 +8,7 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use ruststream::conformance::harness;
+use ruststream::conformance::{capabilities, harness};
 use ruststream_rdkafka::testing::KafkaTestBroker;
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic, StartOffset};
 
@@ -39,6 +39,42 @@ async fn create_topic(url: &str, topic: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kafka_test_broker_passes_conformance_suite() {
     harness::run_suite(KafkaTestBroker::new).await;
+}
+
+/// Drops and recreates `topic`, so a suite that asserts on exact publish order never sees a
+/// previous run's messages. Deletion is asynchronous on the broker; creation is retried until
+/// the name frees up.
+async fn recreate_topic(url: &str, topic: &str) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .create()
+        .expect("admin client");
+    let deleted = admin
+        .delete_topics(&[topic], &AdminOptions::new())
+        .await
+        .expect("delete_topics call");
+    for result in deleted {
+        match result {
+            Ok(_) | Err((_, RDKafkaErrorCode::UnknownTopicOrPartition)) => {}
+            Err((name, code)) => panic!("deleting topic {name} failed: {code}"),
+        }
+    }
+    let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
+    for _ in 0..100 {
+        let results = admin
+            .create_topics([&new_topic], &AdminOptions::new())
+            .await
+            .expect("create_topics call");
+        match results.into_iter().next().expect("one result") {
+            Ok(_) => return,
+            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {
+                // Still marked for deletion; poll the external state until the name frees up.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err((name, code)) => panic!("recreating topic {name} failed: {code}"),
+        }
+    }
+    panic!("topic {topic} was not recreated in time");
 }
 
 /// The first consumer group on a fresh cluster makes the broker create `__consumer_offsets`
@@ -74,6 +110,28 @@ async fn warm_up_group_coordinator(url: &str) {
     drop(stream);
     drop(subscriber);
     broker.shutdown().await.expect("warm-up shutdown");
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_batches_capability() {
+    let Some(url) = kafka_url() else { return };
+    warm_up_group_coordinator(&url).await;
+    // The suite asserts exact publish order, so a previous run's messages must not survive.
+    recreate_topic(&url, "conformance.batches").await;
+    let group = format!("conformance-batches-{}", std::process::id());
+    capabilities::batches(
+        || KafkaBroker::new([url.clone()]),
+        |name| {
+            KafkaTopic::new(name)
+                .group(group.clone())
+                .start(StartOffset::Earliest)
+                .commit(Commit::Tracked)
+        },
+        |broker| broker.publisher(),
+    )
+    .await;
 }
 
 // The harness takes higher-ranked closures that method paths cannot satisfy.

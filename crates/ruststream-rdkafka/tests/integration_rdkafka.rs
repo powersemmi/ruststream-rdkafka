@@ -12,8 +12,10 @@
 //! native-key partitioning.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -21,11 +23,15 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
+use ruststream::subscriber;
 use ruststream::{Broker, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber};
 use ruststream_rdkafka::{
-    Assignment, Commit, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, PARTITION_KEY_HEADER,
-    StartOffset,
+    Assignment, Commit, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
+    PARTITION_KEY_HEADER, StartOffset,
 };
+use serde::Deserialize;
+use tokio::sync::Notify;
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -122,12 +128,10 @@ async fn round_trip_with_headers_and_key() {
         msg.headers().get_str("content-type"),
         Some("application/json")
     );
-    // The native record key comes back as the partition-key header and as partition_key().
+    // The native record key comes back as the partition-key header; the lane key defaults to
+    // the source partition (a single-partition topic, so partition 0).
     assert_eq!(msg.key(), Some(b"order-1".as_slice()));
-    assert_eq!(
-        IncomingMessage::partition_key(&msg),
-        Some(b"order-1".as_slice())
-    );
+    assert_eq!(IncomingMessage::partition_key(&msg), Some(b"0".as_slice()));
     assert_eq!(msg.topic(), topic);
     msg.ack().await.expect("ack");
 
@@ -415,6 +419,52 @@ async fn bare_name_subscribe_uses_the_default_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batches_preserve_order_and_settle_per_message() {
+    use ruststream::{BatchSubscriber as _, Buffered, SubscriptionSource as _};
+
+    const COUNT: usize = 12;
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("batches");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    for i in 0..COUNT {
+        publish(&broker, &topic, format!("b{i:02}").as_bytes()).await;
+    }
+
+    let source = Buffered::new(tracked(&topic, &unique("group")))
+        .max_size(5)
+        .max_wait(Duration::from_millis(50));
+    let mut subscriber = source.subscribe(&broker).await.expect("subscribe");
+
+    let mut stream = Box::pin(subscriber.batches());
+    let mut payloads = Vec::new();
+    while payloads.len() < COUNT {
+        let batch = tokio::time::timeout(WAIT, stream.next())
+            .await
+            .expect("batch within timeout")
+            .expect("stream has next")
+            .expect("batch ok");
+        assert!(!batch.is_empty(), "a yielded batch must not be empty");
+        assert!(
+            batch.len() <= 5,
+            "the batch cap must hold, got {}",
+            batch.len()
+        );
+        for msg in batch {
+            payloads.push(String::from_utf8(msg.payload().to_vec()).expect("utf8"));
+            msg.ack().await.expect("ack");
+        }
+    }
+    let expected: Vec<String> = (0..COUNT).map(|i| format!("b{i:02}")).collect();
+    assert_eq!(payloads, expected, "batches must preserve publish order");
+
+    drop(stream);
+    drop(subscriber);
+    Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_topic_subscription_consumes_all_topics() {
     let Some(url) = kafka_url() else { return };
     let orders = unique("mt-orders");
@@ -571,4 +621,315 @@ async fn missing_group_fails_subscription_clearly() {
     );
 
     Broker::shutdown(&broker).await.expect("shutdown");
+}
+
+#[derive(Debug, Deserialize)]
+struct Tagged {
+    tag: String,
+}
+
+/// Collects handled tags and wakes the test once the expected count for this run arrived.
+#[derive(Clone)]
+struct BatchPoolState {
+    prefix: String,
+    expected: usize,
+    seen: Arc<Mutex<Vec<String>>>,
+    done: Arc<Notify>,
+}
+
+impl BatchPoolState {
+    fn record(&self, tag: &str) {
+        if !tag.starts_with(&self.prefix) {
+            return;
+        }
+        let mut seen = self.seen.lock().expect("seen mutex poisoned");
+        seen.push(tag.to_owned());
+        if seen.len() >= self.expected {
+            self.done.notify_one();
+        }
+    }
+}
+
+// Pages from a fixed topic, up to four in flight at once; the state filters by the run's
+// prefix so reruns against a long-lived cluster stay isolated.
+#[subscriber(
+    // Native batches: a page is one delivery plus whatever librdkafka already fetched. A
+    // fixed group keeps reruns idempotent (only this run's fresh publishes arrive), and the
+    // state filters by the run prefix.
+    batch(
+        KafkaTopic::new("e2e-batch-pool")
+            .group("e2e-batch-pool-group")
+            .start(StartOffset::Earliest)
+            .commit(Commit::Tracked)
+    ),
+    workers(4)
+)]
+async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerResult {
+    for item in items {
+        ctx.state().record(&item.tag);
+    }
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_pages_with_a_worker_pool_process_everything() {
+    const COUNT: usize = 20;
+    let Some(url) = kafka_url() else { return };
+    create_topic(&url, "e2e-batch-pool", 4).await;
+
+    let run = unique("run");
+    let broker = connected_broker(&url).await;
+    for i in 0..COUNT {
+        publish(
+            &broker,
+            "e2e-batch-pool",
+            format!(r#"{{"tag":"{run}-{i:02}"}}"#).as_bytes(),
+        )
+        .await;
+    }
+    Broker::shutdown(&broker).await.expect("shutdown seeder");
+
+    let state = BatchPoolState {
+        prefix: run.clone(),
+        expected: COUNT,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_state = state.clone();
+    let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
+        .on_startup(move |()| {
+            let state = app_state;
+            async move { Ok::<_, Infallible>(state) }
+        })
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include_batch(pool_page);
+        });
+
+    let done = Arc::clone(&state.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("all messages within timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let mut seen = state.seen.lock().expect("seen mutex poisoned").clone();
+    seen.sort();
+    let expected: Vec<String> = (0..COUNT).map(|i| format!("{run}-{i:02}")).collect();
+    assert_eq!(seen, expected, "every message must be handled exactly once");
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyedEvent {
+    key: String,
+    seq: u32,
+}
+
+/// Records per-key sequences and wakes the test once the expected total for this run arrived.
+#[derive(Clone)]
+struct KeyedLanesState {
+    prefix: String,
+    expected: usize,
+    seen: Arc<Mutex<HashMap<String, Vec<u32>>>>,
+    count: Arc<Mutex<usize>>,
+    done: Arc<Notify>,
+}
+
+impl KeyedLanesState {
+    fn record(&self, key: &str, seq: u32) {
+        if !key.starts_with(&self.prefix) {
+            return;
+        }
+        self.seen
+            .lock()
+            .expect("seen mutex poisoned")
+            .entry(key.to_owned())
+            .or_default()
+            .push(seq);
+        let mut count = self.count.lock().expect("count mutex poisoned");
+        *count += 1;
+        if *count >= self.expected {
+            self.done.notify_one();
+        }
+    }
+}
+
+// Eight keyed lanes over a fixed topic: deliveries sharing a record key must stay ordered even
+// though up to eight messages process concurrently.
+#[subscriber(
+    KafkaTopic::new("e2e-keyed-lanes")
+        .group("e2e-keyed-lanes-group")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+        .lane_key(LaneKey::RecordKey),
+    workers(8, by_key)
+)]
+async fn keyed_lane(
+    event: &KeyedEvent,
+    ctx: &mut Context<'_, (), KeyedLanesState>,
+) -> HandlerResult {
+    ctx.state().record(&event.key, event.seq);
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keyed_worker_lanes_preserve_per_key_order() {
+    const KEYS: usize = 3;
+    const PER_KEY: u32 = 6;
+    let Some(url) = kafka_url() else { return };
+    create_topic(&url, "e2e-keyed-lanes", 4).await;
+
+    let run = unique("run");
+    let broker = connected_broker(&url).await;
+    for seq in 0..PER_KEY {
+        for k in 0..KEYS {
+            let key = format!("{run}-k{k}");
+            let mut headers = Headers::new();
+            headers.insert(PARTITION_KEY_HEADER, key.clone());
+            broker
+                .publisher()
+                .publish(
+                    OutgoingMessage::new(
+                        "e2e-keyed-lanes",
+                        format!(r#"{{"key":"{key}","seq":{seq}}}"#).as_bytes(),
+                    )
+                    .with_headers(headers),
+                )
+                .await
+                .expect("publish");
+        }
+    }
+    Broker::shutdown(&broker).await.expect("shutdown seeder");
+
+    let state = KeyedLanesState {
+        prefix: run.clone(),
+        expected: KEYS * PER_KEY as usize,
+        seen: Arc::new(Mutex::new(HashMap::new())),
+        count: Arc::new(Mutex::new(0)),
+        done: Arc::new(Notify::new()),
+    };
+    let app_state = state.clone();
+    let app = RustStream::new(AppInfo::new("keyed-lanes", "0.0.0"))
+        .on_startup(move |()| {
+            let state = app_state;
+            async move { Ok::<_, Infallible>(state) }
+        })
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(keyed_lane);
+        });
+
+    let done = Arc::clone(&state.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("all messages within timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = state.seen.lock().expect("seen mutex poisoned").clone();
+    assert_eq!(seen.len(), KEYS, "every key must be seen: {seen:?}");
+    for (key, seqs) in seen {
+        let expected: Vec<u32> = (0..PER_KEY).collect();
+        assert_eq!(seqs, expected, "per-key order must be preserved for {key}");
+    }
+}
+
+/// Records the global arrival order and wakes the test once the run's total arrived.
+#[derive(Clone)]
+struct PartitionLaneState {
+    prefix: String,
+    expected: usize,
+    seen: Arc<Mutex<Vec<u32>>>,
+    done: Arc<Notify>,
+}
+
+impl PartitionLaneState {
+    fn record(&self, key: &str, seq: u32) {
+        if !key.starts_with(&self.prefix) {
+            return;
+        }
+        let mut seen = self.seen.lock().expect("seen mutex poisoned");
+        seen.push(seq);
+        if seen.len() >= self.expected {
+            self.done.notify_one();
+        }
+    }
+}
+
+// Partition lanes (the default): the topic has one partition, so every delivery (whatever
+// its record key) shares one lane and the global partition order must survive eight
+// concurrent workers.
+#[subscriber(
+    KafkaTopic::new("e2e-partition-lanes")
+        .group("e2e-partition-lanes-group")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked),
+    workers(8, by_key)
+)]
+async fn partition_lane(
+    event: &KeyedEvent,
+    ctx: &mut Context<'_, (), PartitionLaneState>,
+) -> HandlerResult {
+    ctx.state().record(&event.key, event.seq);
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partition_lanes_preserve_partition_order_across_keys() {
+    const COUNT: u32 = 18;
+    let Some(url) = kafka_url() else { return };
+    create_topic(&url, "e2e-partition-lanes", 1).await;
+
+    let run = unique("run");
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        // Alternating record keys: under record-key lanes these could interleave, but the
+        // partition lane must keep the single partition's global order.
+        let key = format!("{run}-{}", if seq % 2 == 0 { "even" } else { "odd" });
+        let mut headers = Headers::new();
+        headers.insert(PARTITION_KEY_HEADER, key.clone());
+        broker
+            .publisher()
+            .publish(
+                OutgoingMessage::new(
+                    "e2e-partition-lanes",
+                    format!(r#"{{"key":"{key}","seq":{seq}}}"#).as_bytes(),
+                )
+                .with_headers(headers),
+            )
+            .await
+            .expect("publish");
+    }
+    Broker::shutdown(&broker).await.expect("shutdown seeder");
+
+    let state = PartitionLaneState {
+        prefix: run.clone(),
+        expected: COUNT as usize,
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_state = state.clone();
+    let app = RustStream::new(AppInfo::new("partition-lanes", "0.0.0"))
+        .on_startup(move |()| {
+            let state = app_state;
+            async move { Ok::<_, Infallible>(state) }
+        })
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(partition_lane);
+        });
+
+    let done = Arc::clone(&state.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("all messages within timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = state.seen.lock().expect("seen mutex poisoned").clone();
+    let expected: Vec<u32> = (0..COUNT).collect();
+    assert_eq!(
+        seen, expected,
+        "one partition = one lane: global partition order must be preserved across keys",
+    );
 }

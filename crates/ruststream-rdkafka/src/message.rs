@@ -62,6 +62,9 @@ pub struct KafkaMessage {
     offset: i64,
     timestamp_millis: Option<i64>,
     settlement: Settlement,
+    /// The keyed-lane key: the source partition (the default), or the record key under
+    /// `LaneKey::RecordKey`.
+    lane: Option<Bytes>,
 }
 
 impl fmt::Debug for Settlement {
@@ -74,6 +77,9 @@ impl fmt::Debug for Settlement {
 }
 
 impl KafkaMessage {
+    // An internal constructor mirroring the record's natural fields; grouping them into
+    // intermediate structs would only add indirection for the one caller.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         payload: Bytes,
         headers: Headers,
@@ -82,6 +88,7 @@ impl KafkaMessage {
         offset: i64,
         timestamp_millis: Option<i64>,
         settlement: Settlement,
+        lane: Option<Bytes>,
     ) -> Self {
         Self {
             payload,
@@ -91,6 +98,7 @@ impl KafkaMessage {
             offset,
             timestamp_millis,
             settlement,
+            lane,
         }
     }
 
@@ -184,15 +192,19 @@ impl IncomingMessage for KafkaMessage {
         self.settle()
     }
 
-    /// The record key, so keyed worker lanes see it without a `Partitioned` bound.
+    /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the
+    /// source partition (the default), or the record key under
+    /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
-        self.headers.get(PARTITION_KEY_HEADER)
+        self.lane.as_deref()
     }
 }
 
 impl Partitioned for KafkaMessage {
-    /// The record key Kafka partitioned this message by, or `None` for keyless records.
+    /// The keyed-lane key (see [`IncomingMessage::partition_key`] on this type): the source
+    /// partition (the default), or the record key under
+    /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
-        self.headers.get(PARTITION_KEY_HEADER)
+        self.lane.as_deref()
     }
 }
