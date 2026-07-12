@@ -52,6 +52,8 @@ mod tracker;
 #[cfg(feature = "avro")]
 pub mod avro;
 pub mod context;
+#[cfg(feature = "protobuf")]
+pub mod protobuf;
 #[cfg(feature = "schema-registry")]
 pub mod schema_registry;
 #[cfg(feature = "testing")]

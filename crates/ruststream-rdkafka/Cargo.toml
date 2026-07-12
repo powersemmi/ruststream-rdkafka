@@ -27,6 +27,9 @@ schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
 # Avro transcoding for the registry middleware: apache-avro's serde path plus the AvroSchema
 # derive for registering subjects from types.
 avro = ["schema-registry", "dep:apache-avro"]
+# Protobuf transcoding for the registry middleware: dynamic messages (prost-reflect) with
+# descriptors compiled from the registry's .proto sources (protox).
+protobuf = ["schema-registry", "dep:prost-reflect", "dep:protox"]
 # Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
 testing = ["ruststream/conformance", "ruststream/testing"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
@@ -51,6 +54,8 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 apache-avro = { workspace = true, optional = true }
+prost-reflect = { workspace = true, optional = true }
+protox = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
@@ -98,6 +103,10 @@ required-features = ["schema-registry"]
 [[example]]
 name = "kafka_avro"
 required-features = ["avro"]
+
+[[example]]
+name = "kafka_protobuf"
+required-features = ["protobuf"]
 
 [[example]]
 name = "kafka_testing"
