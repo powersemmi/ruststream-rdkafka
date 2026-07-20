@@ -7,7 +7,7 @@ on:
     # not on every example/code merge.
     paths:
       - "docs/**"
-      - "mkdocs.yml"
+      - "properdocs.yml"
       - "overrides/**"
   workflow_dispatch:
 
