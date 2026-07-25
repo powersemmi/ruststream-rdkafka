@@ -258,19 +258,24 @@ impl EosPipeline {
         source: &SourceOffset,
         msg: OutgoingMessage<'_>,
     ) -> Result<(), KafkaError> {
-        self.admit(source).await?;
+        let epoch = self.admit(source).await?;
         let sent = self.inner.publisher.publish(msg).await;
         if sent.is_err() {
             let mut window = self.inner.window.lock().expect("window mutex poisoned");
-            // A failed produce poisons the transaction; the window task aborts it.
-            window.failed = true;
+            // A failed produce poisons the transaction it was admitted into. The epoch guard
+            // keeps a slow failure from an already-torn-down window off its successor, which
+            // every other window-touching path already checks.
+            if window.epoch == epoch {
+                window.failed = true;
+            }
         }
         sent
     }
 
     /// Joins the open window (opening one when idle), waiting out a commit in progress
-    /// unless the delivery is already part of it.
-    async fn admit(&self, source: &SourceOffset) -> Result<(), KafkaError> {
+    /// unless the delivery is already part of it. Returns the epoch of the window the source
+    /// was admitted into, so the caller can attribute a later failure to that window only.
+    async fn admit(&self, source: &SourceOffset) -> Result<u64, KafkaError> {
         loop {
             // The waiter is created before the phase check so a transition landing in
             // between is not missed.
@@ -280,7 +285,7 @@ impl EosPipeline {
                 match window.phase {
                     Phase::Open => {
                         Self::enroll(&mut window, &self.inner.session_low, source);
-                        Admission::Admitted
+                        Admission::Admitted(window.epoch)
                     }
                     Phase::Idle => {
                         window.phase = Phase::Opening;
@@ -296,7 +301,7 @@ impl EosPipeline {
                             .get(&source.key())
                             .is_some_and(|max| source.offset <= *max);
                         if participant {
-                            Admission::Admitted
+                            Admission::Admitted(window.epoch)
                         } else {
                             Admission::Wait
                         }
@@ -304,7 +309,7 @@ impl EosPipeline {
                 }
             };
             match action {
-                Admission::Admitted => return Ok(()),
+                Admission::Admitted(epoch) => return Ok(epoch),
                 Admission::Wait => {
                     phase_changed.await;
                 }
@@ -314,7 +319,8 @@ impl EosPipeline {
     }
 
     /// Opens the transaction as the winning publisher and spawns the window's commit task.
-    async fn open_window(&self, source: &SourceOffset) -> Result<(), KafkaError> {
+    /// Returns the opened window's epoch.
+    async fn open_window(&self, source: &SourceOffset) -> Result<u64, KafkaError> {
         let begun = self.inner.publisher.begin_transaction().await;
         let mut window = self.inner.window.lock().expect("window mutex poisoned");
         match begun {
@@ -325,16 +331,16 @@ impl EosPipeline {
                 let epoch = window.epoch;
                 drop(window);
                 tokio::spawn(run_window(Arc::clone(&self.inner), epoch));
+                self.inner.phase_changed.notify_waiters();
+                Ok(epoch)
             }
             Err(err) => {
                 window.phase = Phase::Idle;
                 drop(window);
                 self.inner.phase_changed.notify_waiters();
-                return Err(err);
+                Err(err)
             }
         }
-        self.inner.phase_changed.notify_waiters();
-        Ok(())
     }
 
     fn enroll(
@@ -356,7 +362,7 @@ impl EosPipeline {
 }
 
 enum Admission {
-    Admitted,
+    Admitted(u64),
     Wait,
     Opener,
 }
