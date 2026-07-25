@@ -312,6 +312,10 @@ impl KafkaTopic {
     /// drop path instead of retrying (the original delivery counts as one). Enforced by the
     /// [`retry`](Self::retry) policy - through [`RETRY_COUNT_HEADER`](crate::RETRY_COUNT_HEADER)
     /// for [`Retry::Topic`], and through an in-session counter for [`Retry::SeekBack`].
+    ///
+    /// The cap needs a [`retry`](Self::retry) policy or a [`dead_letter`](Self::dead_letter)
+    /// topic to count against; on its own it could never apply, so subscribing rejects that
+    /// combination with [`KafkaError::InvalidOptions`](crate::KafkaError::InvalidOptions).
     #[must_use]
     pub fn max_deliveries(mut self, max_deliveries: u32) -> Self {
         self.max_deliveries = Some(max_deliveries);
@@ -358,6 +362,16 @@ impl KafkaTopic {
             return Err(KafkaError::InvalidOptions(
                 "manual partition assignment names exact partitions of one topic; it does \
                  not combine with `and_topic` or `pattern`"
+                    .to_owned(),
+            ));
+        }
+        // Without a retry policy or a dead-letter topic no path ever reads the cap: nack(true)
+        // is Kafka's native re-consumption, which this crate cannot count. Accepting the cap
+        // would silently disarm a poison-message guard the user believes is in place.
+        if self.max_deliveries.is_some() && self.retry.is_none() && self.dead_letter.is_none() {
+            return Err(KafkaError::InvalidOptions(
+                "max_deliveries needs a retry(..) policy or a dead_letter(..) topic to count \
+                 against; alone it would never apply"
                     .to_owned(),
             ));
         }
@@ -437,5 +451,33 @@ impl SubscriptionSource<crate::testing::KafkaTestBroker> for KafkaTopic {
             ));
         }
         broker.subscribe_topics(&self.topics).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_deliveries_alone_is_rejected() {
+        let err = KafkaTopic::new("orders")
+            .max_deliveries(3)
+            .validate()
+            .expect_err("a cap with nothing to count against must be rejected");
+        assert!(matches!(err, KafkaError::InvalidOptions(_)));
+    }
+
+    #[test]
+    fn max_deliveries_with_retry_or_dead_letter_passes() {
+        KafkaTopic::new("orders")
+            .retry(Retry::SeekBack)
+            .max_deliveries(3)
+            .validate()
+            .expect("a cap with a retry policy is valid");
+        KafkaTopic::new("orders")
+            .dead_letter("orders.dlq")
+            .max_deliveries(3)
+            .validate()
+            .expect("a cap with a dead-letter topic is valid");
     }
 }
