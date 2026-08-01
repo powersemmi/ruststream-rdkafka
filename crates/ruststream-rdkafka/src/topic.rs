@@ -106,7 +106,7 @@ pub enum Commit {
 ///
 /// Everything except the topic name is optional; unset options fall back to the librdkafka
 /// defaults (this crate does not impose its own). The group can also come from
-/// [`KafkaBroker::default_group`]; a subscription that ends up with no group at all is a
+/// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group); a subscription that ends up with no group at all is a
 /// startup error, because Kafka cannot subscribe without one.
 ///
 /// # Examples
@@ -210,7 +210,7 @@ impl KafkaTopic {
     }
 
     /// The consumer group for this subscription, overriding
-    /// [`KafkaBroker::default_group`].
+    /// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group).
     #[must_use]
     pub fn group(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());

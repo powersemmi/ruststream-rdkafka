@@ -159,8 +159,8 @@ impl KafkaBroker {
         }
     }
 
-    /// A publisher for builder-time wiring that needs a live [`Publisher`] before the broker is
-    /// connected - today that is
+    /// A publisher for builder-time wiring that needs a live
+    /// [`Publisher`](ruststream::Publisher) before the broker is connected - today that is
     /// [`BrokerScope::retry_via`](ruststream::runtime::BrokerScope::retry_via), the deferred
     /// republish behind `retry_after` on a broker without native delayed redelivery, which
     /// Kafka is.
