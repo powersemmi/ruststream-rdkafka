@@ -1,4 +1,4 @@
-//! The publishers: fire-and-confirm production, plus Kafka transactions.
+//! The publish policies and the live publishers they pair into, transactions included.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -9,37 +9,96 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
-use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher};
+use ruststream::{
+    DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
+};
 use tokio::sync::OnceCell;
 use tokio::task;
 
-use crate::broker::SharedConn;
+use crate::broker::{ConnState, ConnectedKafkaBroker};
 use crate::convert;
 use crate::error::KafkaError;
 
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The lazily-created transactional producer shared by clones of one publisher.
-struct TxState {
-    id: String,
-    timeout: Duration,
-    producer: OnceCell<FutureProducer>,
-    /// Whether a transaction is currently open. Interleaving `publish` with
-    /// `begin_transaction`/`commit` from concurrent tasks is not supported: which side of the
-    /// transaction boundary a concurrent publish lands on would be a race either way.
-    open: Mutex<bool>,
+/// The publish policy of [`KafkaPublisher`]: pure declaration, no connection, no publish
+/// surface.
+///
+/// Constructible anywhere - in a router definition, in configuration, before startup - because
+/// it holds nothing but options. The runtime pairs it with the connected broker at startup (or
+/// [`ConnectedKafkaBroker::publisher`] does it by hand), and only the resulting
+/// [`KafkaPublisher`] can publish.
+///
+/// [`transactional_id`](Self::transactional_id) is a type transition, not a flag: it yields a
+/// [`KafkaTransactionalPublish`], so a plain publisher carries no transactional surface at all.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use ruststream_rdkafka::KafkaPublish;
+///
+/// let policy = KafkaPublish::default().queue_timeout(Duration::from_secs(5));
+/// # let _ = policy;
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaPublish {
+    queue_timeout: Option<Duration>,
 }
 
-impl fmt::Debug for TxState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TxState")
-            .field("id", &self.id)
-            .field("timeout", &self.timeout)
-            .finish_non_exhaustive()
+impl KafkaPublish {
+    /// How long a publish may wait for space when librdkafka's local queue is full, before
+    /// failing with a queue-full error. Without it a publish waits for space indefinitely,
+    /// which is the natural back-pressure behavior.
+    pub const fn queue_timeout(mut self, timeout: Duration) -> Self {
+        self.queue_timeout = Some(timeout);
+        self
+    }
+
+    /// Turns this into a transactional publish policy fenced by `id` (Kafka's
+    /// `transactional.id`).
+    ///
+    /// The id must be stable and unique per concurrent producer: Kafka uses it to fence
+    /// zombies, so two live producers sharing an id abort each other. Pair distinct policies
+    /// for concurrent transactional flows, or take one publisher per source partition with
+    /// [`KafkaTransactionalPublish::per_partition`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::KafkaPublish;
+    ///
+    /// let policy = KafkaPublish::default().transactional_id("orders-svc-1");
+    /// # let _ = policy;
+    /// ```
+    pub fn transactional_id(self, id: impl Into<String>) -> KafkaTransactionalPublish {
+        KafkaTransactionalPublish {
+            queue_timeout: self.queue_timeout,
+            id: id.into(),
+            transaction_timeout: DEFAULT_TRANSACTION_TIMEOUT,
+        }
+    }
+
+    pub(crate) const fn queue_timeout_setting(self) -> Option<Duration> {
+        self.queue_timeout
     }
 }
 
-/// A producer handle sharing the broker's connection.
+impl PublishPolicy<ConnectedKafkaBroker> for KafkaPublish {
+    type Live = KafkaPublisher;
+
+    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
+        Ok(connected.publisher(self))
+    }
+}
+
+impl DefaultPublish for ConnectedKafkaBroker {
+    type Policy = KafkaPublish;
+}
+
+/// A live producer handle on the broker's shared producer.
 ///
 /// [`OutgoingMessage::name`] is the destination topic. A
 /// [`PARTITION_KEY_HEADER`](crate::PARTITION_KEY_HEADER) header becomes the record's native key,
@@ -50,64 +109,110 @@ impl fmt::Debug for TxState {
 /// record (durability then depends on the producer's `acks` setting, configurable through
 /// [`KafkaBroker::producer_config`](crate::KafkaBroker::producer_config)).
 ///
-/// [`transactional_id`](Self::transactional_id) upgrades the handle to a transactional one
-/// implementing [`TransactionalPublisher`]: publishes between `begin_transaction` and `commit`
-/// become visible atomically (readers on Kafka's default `read_committed` isolation see all of
-/// them or none), and `abort` discards them broker-side.
-///
-/// Obtained from [`KafkaBroker::publisher`](crate::KafkaBroker::publisher); usable before
-/// `Broker::connect` resolves the connection (publishing earlier returns
-/// [`KafkaError::NotConnected`]).
-#[derive(Debug, Clone)]
+/// Exists only from a connected broker, so it never sees a "not connected" state; it does alias
+/// that connection and may outlive it, so after the broker shuts down every publish reports
+/// [`KafkaError::Closed`]. Cheap to clone.
+#[derive(Clone)]
 pub struct KafkaPublisher {
-    conn: SharedConn,
+    state: Arc<ConnState>,
     queue_timeout: Option<Duration>,
-    tx: Option<Arc<TxState>>,
+}
+
+impl fmt::Debug for KafkaPublisher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaPublisher")
+            .field("queue_timeout", &self.queue_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl KafkaPublisher {
-    pub(crate) fn new(conn: SharedConn) -> Self {
+    pub(crate) const fn new(state: Arc<ConnState>, queue_timeout: Option<Duration>) -> Self {
         Self {
-            conn,
-            queue_timeout: None,
-            tx: None,
+            state,
+            queue_timeout,
         }
     }
+}
 
-    /// How long a publish may wait for space when librdkafka's local queue is full, before
-    /// failing with a queue-full error. Without it a publish waits for space indefinitely,
-    /// which is the natural back-pressure behavior.
-    #[must_use]
-    pub fn queue_timeout(mut self, timeout: Duration) -> Self {
-        self.queue_timeout = Some(timeout);
-        self
+/// Sends one record through `producer` and awaits its delivery report.
+async fn send_via(
+    producer: &FutureProducer,
+    queue_timeout: Option<Duration>,
+    msg: OutgoingMessage<'_>,
+) -> Result<(), KafkaError> {
+    let parts = convert::headers_for_publish(msg.headers())?;
+    let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
+    if let Some(key) = &parts.key {
+        record = record.key(key.as_ref());
     }
+    if let Some(partition) = parts.partition {
+        // An explicit partition wins over the partitioner and the record key.
+        record = record.partition(partition);
+    }
+    if let Some(headers) = parts.headers {
+        record = record.headers(headers);
+    }
+    let queue_timeout = queue_timeout.map_or(Timeout::Never, Timeout::After);
+    producer
+        .send(record, queue_timeout)
+        .await
+        .map(|_delivery| ())
+        .map_err(|(err, _record)| KafkaError::publish(err))
+}
 
-    /// Upgrades to a transactional publisher fenced by `id` (Kafka's `transactional.id`).
+impl Publisher for KafkaPublisher {
+    type Error = KafkaError;
+
+    /// Publishes `msg` to the topic named by [`OutgoingMessage::name`] and awaits the delivery
+    /// report.
     ///
-    /// The id must be stable and unique per concurrent producer: Kafka uses it to fence
-    /// zombies, so two live producers sharing an id abort each other. Create several
-    /// publishers with distinct ids for concurrent transactional flows. The transactional
-    /// producer itself is created (and its transactions initialized) on first use, from the
-    /// broker's resolved producer configuration.
+    /// # Errors
     ///
-    /// # Examples
+    /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
+    /// down, and [`KafkaError::Publish`] when the cluster rejects the record or the delivery
+    /// times out (librdkafka's `message.timeout.ms`).
     ///
-    /// ```no_run
-    /// use ruststream_rdkafka::KafkaBroker;
+    /// # Cancel safety
     ///
-    /// let broker = KafkaBroker::new(["localhost:9092"]);
-    /// let replies = broker.publisher().transactional_id("orders-svc-1");
-    /// # let _ = replies;
-    /// ```
-    #[must_use]
-    pub fn transactional_id(mut self, id: impl Into<String>) -> Self {
-        self.tx = Some(Arc::new(TxState {
-            id: id.into(),
-            timeout: DEFAULT_TRANSACTION_TIMEOUT,
-            producer: OnceCell::new(),
-            open: Mutex::new(false),
-        }));
+    /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
+    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+        self.state.ensure_open(msg.name())?;
+        send_via(self.state.producer(), self.queue_timeout, msg).await
+    }
+}
+
+/// The publish policy of [`KafkaTransactionalPublisher`]: the transactional mode as its own
+/// type, reached from [`KafkaPublish::transactional_id`].
+///
+/// Pairing it is where Kafka does the real work: the transactional producer is created and its
+/// transactions initialized (the call that fences earlier producers with the same id), so a
+/// misconfigured transactional id fails at startup rather than at the first transaction.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use ruststream_rdkafka::KafkaPublish;
+///
+/// let policy = KafkaPublish::default()
+///     .transactional_id("orders-svc-1")
+///     .transaction_timeout(Duration::from_secs(10));
+/// # let _ = policy;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaTransactionalPublish {
+    queue_timeout: Option<Duration>,
+    id: String,
+    transaction_timeout: Duration,
+}
+
+impl KafkaTransactionalPublish {
+    /// See [`KafkaPublish::queue_timeout`].
+    pub const fn queue_timeout(mut self, timeout: Duration) -> Self {
+        self.queue_timeout = Some(timeout);
         self
     }
 
@@ -115,66 +220,190 @@ impl KafkaPublisher {
     /// reporting failure. Defaults to 30 seconds; this is the call deadline handed to
     /// librdkafka, not its `transaction.timeout.ms` (reachable through
     /// [`KafkaBroker::producer_config`](crate::KafkaBroker::producer_config)).
-    ///
-    /// Only meaningful after [`transactional_id`](Self::transactional_id).
-    #[must_use]
-    pub fn transaction_timeout(mut self, timeout: Duration) -> Self {
-        if let Some(tx) = &self.tx {
-            self.tx = Some(Arc::new(TxState {
-                id: tx.id.clone(),
-                timeout,
-                producer: OnceCell::new(),
-                open: Mutex::new(false),
-            }));
-        }
+    pub const fn transaction_timeout(mut self, timeout: Duration) -> Self {
+        self.transaction_timeout = timeout;
         self
     }
 
-    fn tx_or_invalid(&self) -> Result<&Arc<TxState>, KafkaError> {
-        self.tx.as_ref().ok_or_else(|| {
-            KafkaError::InvalidOptions(
-                "transactional publishing needs `KafkaPublisher::transactional_id`; a plain \
-                 publisher cannot begin, commit, or abort transactions"
-                    .to_owned(),
-            )
-        })
+    /// Turns this into a per-partition policy: the id becomes the base of one transactional id
+    /// per source partition (`"{base}-p{partition}"`), pairing into
+    /// [`TransactionalPartitions`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::KafkaPublish;
+    ///
+    /// let policy = KafkaPublish::default()
+    ///     .transactional_id("billing-svc-1")
+    ///     .per_partition();
+    /// # let _ = policy;
+    /// ```
+    pub fn per_partition(self) -> KafkaPartitionedPublish {
+        KafkaPartitionedPublish { template: self }
     }
 
-    /// Resolves (creating and initializing on first use) the transactional producer.
-    async fn tx_producer(&self, tx: &Arc<TxState>) -> Result<FutureProducer, KafkaError> {
-        let producer = tx
-            .producer
-            .get_or_try_init(|| async {
-                let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
-                let mut config = state.producer_config().clone();
-                config.set("transactional.id", &tx.id);
-                let producer: FutureProducer = config.create().map_err(KafkaError::publish)?;
-                // init_transactions blocks (it fences earlier producers with this id), so it
-                // runs on the blocking pool.
-                let init = producer.clone();
-                let timeout = tx.timeout;
-                task::spawn_blocking(move || init.init_transactions(timeout))
-                    .await
-                    .map_err(|err| KafkaError::Publish(Box::new(err)))?
-                    .map_err(KafkaError::publish)?;
-                Ok(producer)
-            })
-            .await?;
-        Ok(producer.clone())
+    /// The transactional id this policy fences with.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
-    pub(crate) fn shared_conn(&self) -> SharedConn {
-        Arc::clone(&self.conn)
+    fn with_id(&self, id: String) -> Self {
+        Self {
+            queue_timeout: self.queue_timeout,
+            id,
+            transaction_timeout: self.transaction_timeout,
+        }
+    }
+}
+
+impl PublishPolicy<ConnectedKafkaBroker> for KafkaTransactionalPublish {
+    type Live = KafkaTransactionalPublisher;
+
+    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
+        connected
+            .transactional_publisher(self)
+            .await
+            .map_err(PairError::new)
+    }
+}
+
+impl ConnectedKafkaBroker {
+    /// A live transactional publisher: creates the transactional producer from the broker's
+    /// resolved producer configuration and initializes its transactions.
+    ///
+    /// Async because the initialization is real work (it fences earlier producers holding the
+    /// same transactional id); it runs once, when the publisher comes alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Closed`] once the connection has been shut down and
+    /// [`KafkaError::Publish`] when the producer cannot be created or the initialization fails
+    /// within the policy's [`transaction_timeout`](KafkaTransactionalPublish::transaction_timeout).
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+    ///
+    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    /// let publisher = connected
+    ///     .transactional_publisher(KafkaPublish::default().transactional_id("orders-svc-1"))
+    ///     .await?;
+    /// # let _ = publisher;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn transactional_publisher(
+        &self,
+        policy: KafkaTransactionalPublish,
+    ) -> Result<KafkaTransactionalPublisher, KafkaError> {
+        open_transactional(self.state(), &policy).await
+    }
+}
+
+/// Creates and initializes one transactional producer for `policy`.
+pub(crate) async fn open_transactional(
+    state: &Arc<ConnState>,
+    policy: &KafkaTransactionalPublish,
+) -> Result<KafkaTransactionalPublisher, KafkaError> {
+    state.ensure_open(policy.id())?;
+    let mut config = state.producer_config().clone();
+    config.set("transactional.id", policy.id());
+    let producer: FutureProducer = config.create().map_err(KafkaError::publish)?;
+    // init_transactions blocks (it fences earlier producers with this id), so it runs on the
+    // blocking pool.
+    let init = producer.clone();
+    let timeout = policy.transaction_timeout;
+    task::spawn_blocking(move || init.init_transactions(timeout))
+        .await
+        .map_err(|err| KafkaError::Publish(Box::new(err)))?
+        .map_err(KafkaError::publish)?;
+    Ok(KafkaTransactionalPublisher {
+        inner: Arc::new(TxInner {
+            state: Arc::clone(state),
+            producer,
+            queue_timeout: policy.queue_timeout,
+            timeout,
+            id: policy.id.clone(),
+            open: Mutex::new(false),
+        }),
+    })
+}
+
+struct TxInner {
+    state: Arc<ConnState>,
+    producer: FutureProducer,
+    queue_timeout: Option<Duration>,
+    timeout: Duration,
+    id: String,
+    /// Whether a transaction is currently open. Interleaving `publish` with
+    /// `begin_transaction`/`commit` from concurrent tasks is not supported: which side of the
+    /// transaction boundary a concurrent publish lands on would be a race either way.
+    open: Mutex<bool>,
+}
+
+/// A live publisher that produces inside Kafka transactions.
+///
+/// Records between `begin_transaction` and `commit` become visible atomically (readers on
+/// Kafka's default `read_committed` isolation see all of them or none); `abort` discards them
+/// broker-side.
+///
+/// Its transactional producer is created and initialized when the
+/// [`KafkaTransactionalPublish`] policy pairs, so nothing is lazy here: the handle is fenced
+/// from the moment it exists. Clones share one producer and one transaction state.
+#[derive(Clone)]
+pub struct KafkaTransactionalPublisher {
+    inner: Arc<TxInner>,
+}
+
+impl fmt::Debug for KafkaTransactionalPublisher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaTransactionalPublisher")
+            .field("id", &self.inner.id)
+            .field("timeout", &self.inner.timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl KafkaTransactionalPublisher {
+    /// The transactional id fencing this publisher.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.inner.id
     }
 
-    pub(crate) fn transactional_id_str(&self) -> Option<&str> {
-        self.tx.as_ref().map(|tx| tx.id.as_str())
+    pub(crate) fn deadline(&self) -> Duration {
+        self.inner.timeout
     }
 
-    pub(crate) fn transaction_deadline(&self) -> Duration {
-        self.tx
-            .as_ref()
-            .map_or(DEFAULT_TRANSACTION_TIMEOUT, |tx| tx.timeout)
+    pub(crate) fn state(&self) -> &Arc<ConnState> {
+        &self.inner.state
+    }
+
+    fn is_open(&self) -> bool {
+        *self
+            .inner
+            .open
+            .lock()
+            .expect("transaction state mutex poisoned")
+    }
+
+    fn set_open(&self, open: bool) {
+        *self
+            .inner
+            .open
+            .lock()
+            .expect("transaction state mutex poisoned") = open;
+    }
+
+    fn no_transaction(&self) -> KafkaError {
+        KafkaError::NoTransaction {
+            id: self.inner.id.clone(),
+        }
     }
 
     /// Adds consumed source offsets (and their group's metadata) to the open transaction, so
@@ -185,9 +414,12 @@ impl KafkaPublisher {
         offsets: TopicPartitionList,
         metadata: ConsumerGroupMetadata,
     ) -> Result<(), KafkaError> {
-        let tx = self.tx_or_invalid()?.clone();
-        let producer = self.tx_producer(&tx).await?;
-        let timeout = tx.timeout;
+        self.inner.state.ensure_open(&self.inner.id)?;
+        if !self.is_open() {
+            return Err(self.no_transaction());
+        }
+        let producer = self.inner.producer.clone();
+        let timeout = self.inner.timeout;
         task::spawn_blocking(move || {
             producer.send_offsets_to_transaction(&offsets, &metadata, timeout)
         })
@@ -195,148 +427,153 @@ impl KafkaPublisher {
         .map_err(|err| KafkaError::Publish(Box::new(err)))?
         .map_err(KafkaError::publish)
     }
-
-    fn is_open(tx: &TxState) -> bool {
-        *tx.open.lock().expect("transaction state mutex poisoned")
-    }
-
-    fn set_open(tx: &TxState, open: bool) {
-        *tx.open.lock().expect("transaction state mutex poisoned") = open;
-    }
-
-    async fn send_via(
-        &self,
-        producer: &FutureProducer,
-        msg: OutgoingMessage<'_>,
-    ) -> Result<(), KafkaError> {
-        let parts = convert::headers_for_publish(msg.headers())?;
-        let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
-        if let Some(key) = &parts.key {
-            record = record.key(key.as_ref());
-        }
-        if let Some(partition) = parts.partition {
-            // An explicit partition wins over the partitioner and the record key.
-            record = record.partition(partition);
-        }
-        if let Some(headers) = parts.headers {
-            record = record.headers(headers);
-        }
-        let queue_timeout = self.queue_timeout.map_or(Timeout::Never, Timeout::After);
-        producer
-            .send(record, queue_timeout)
-            .await
-            .map(|_delivery| ())
-            .map_err(|(err, _record)| KafkaError::publish(err))
-    }
 }
 
-impl Publisher for KafkaPublisher {
+impl Publisher for KafkaTransactionalPublisher {
     type Error = KafkaError;
 
-    /// Publishes `msg` to the topic named by [`OutgoingMessage::name`] and awaits the delivery
-    /// report. Inside an open transaction the record joins it; otherwise it goes out through
-    /// the broker's shared plain producer, transactional id or not.
+    /// Publishes `msg` to the topic named by [`OutgoingMessage::name`]. Inside an open
+    /// transaction the record joins it; otherwise it goes out through the broker's shared plain
+    /// producer.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::NotConnected`] before `Broker::connect` resolves the connection and
-    /// [`KafkaError::Publish`] when the cluster rejects the record or the delivery times out
-    /// (librdkafka's `message.timeout.ms`).
+    /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
+    /// down and [`KafkaError::Publish`] when the cluster rejects the record or the delivery
+    /// times out.
     ///
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
     async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
-        if let Some(tx) = &self.tx
-            && Self::is_open(tx)
-        {
-            let producer = self.tx_producer(tx).await?;
-            return self.send_via(&producer, msg).await;
+        self.inner.state.ensure_open(msg.name())?;
+        if self.is_open() {
+            return send_via(&self.inner.producer, self.inner.queue_timeout, msg).await;
         }
-        let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
-        self.send_via(state.producer(), msg).await
+        send_via(self.inner.state.producer(), self.inner.queue_timeout, msg).await
     }
 }
 
-impl TransactionalPublisher for KafkaPublisher {
-    /// Begins a Kafka transaction (creating and initializing the transactional producer on
-    /// first use).
+impl TransactionalPublisher for KafkaTransactionalPublisher {
+    /// Begins a Kafka transaction.
     ///
     /// One producer runs one transaction at a time, so beginning while one is open is an
     /// error, not a queue: a second begin means two flows share one publisher, and silently
     /// merging their messages into one transaction would commit one flow's records with the
     /// other's. Concurrent transactional flows use distinct publishers (see
-    /// [`TransactionalPartitions`](crate::TransactionalPartitions)).
+    /// [`TransactionalPartitions`]).
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] without a
-    /// [`transactional_id`](Self::transactional_id), [`KafkaError::TransactionBusy`] when a
-    /// transaction is already open on this publisher (or a clone sharing its id),
-    /// [`KafkaError::NotConnected`] before `Broker::connect`, and [`KafkaError::Publish`] when
-    /// initialization or the begin call fails.
+    /// Returns [`KafkaError::TransactionBusy`] when a transaction is already open on this
+    /// publisher (or a clone sharing it), [`KafkaError::Closed`] after the broker shut down,
+    /// and [`KafkaError::Publish`] when the begin call fails.
     // The guard intentionally spans the begin call: check-and-begin must be atomic so two
     // concurrent begins cannot both pass the check.
     #[allow(clippy::significant_drop_tightening)]
     async fn begin_transaction(&self) -> Result<(), Self::Error> {
-        let tx = self.tx_or_invalid()?.clone();
-        let producer = self.tx_producer(&tx).await?;
-        let mut open = tx.open.lock().expect("transaction state mutex poisoned");
+        self.inner.state.ensure_open(&self.inner.id)?;
+        let mut open = self
+            .inner
+            .open
+            .lock()
+            .expect("transaction state mutex poisoned");
         if *open {
-            return Err(KafkaError::TransactionBusy);
+            return Err(KafkaError::TransactionBusy {
+                id: self.inner.id.clone(),
+            });
         }
-        producer.begin_transaction().map_err(KafkaError::publish)?;
+        // A rejected begin leaves the open transaction untouched, per the trait contract.
+        self.inner
+            .producer
+            .begin_transaction()
+            .map_err(KafkaError::publish)?;
         *open = true;
         Ok(())
     }
 
-    /// Commits the open transaction, making its records visible atomically; a no-op when none
-    /// is open.
+    /// Commits the open transaction, making its records visible atomically.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::Publish`] when the commit fails. librdkafka distinguishes
-    /// retriable failures from ones requiring an abort; after an error the transaction's state
-    /// is unresolved, so treat the publisher as needing an
-    /// [`abort`](TransactionalPublisher::abort) or replacement.
+    /// Returns [`KafkaError::NoTransaction`] when no transaction is open on this publisher,
+    /// [`KafkaError::Closed`] after the broker shut down, and [`KafkaError::Publish`] when the
+    /// commit fails. librdkafka distinguishes retriable failures from ones requiring an abort;
+    /// after an error the transaction's state is unresolved, so treat the publisher as needing
+    /// an [`abort`](TransactionalPublisher::abort) or replacement.
     async fn commit(&self) -> Result<(), Self::Error> {
-        let tx = self.tx_or_invalid()?.clone();
-        if !Self::is_open(&tx) {
-            return Ok(());
+        self.inner.state.ensure_open(&self.inner.id)?;
+        if !self.is_open() {
+            return Err(self.no_transaction());
         }
-        let producer = self.tx_producer(&tx).await?;
-        let timeout = tx.timeout;
+        let producer = self.inner.producer.clone();
+        let timeout = self.inner.timeout;
         task::spawn_blocking(move || producer.commit_transaction(timeout))
             .await
             .map_err(|err| KafkaError::Publish(Box::new(err)))?
             .map_err(KafkaError::publish)?;
-        Self::set_open(&tx, false);
+        self.set_open(false);
         Ok(())
     }
 
-    /// Aborts the open transaction, discarding its records broker-side; a no-op when none is
-    /// open.
+    /// Aborts the open transaction, discarding its records broker-side.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::Publish`] when the abort fails.
+    /// Returns [`KafkaError::NoTransaction`] when no transaction is open on this publisher,
+    /// [`KafkaError::Closed`] after the broker shut down, and [`KafkaError::Publish`] when the
+    /// abort fails.
     async fn abort(&self) -> Result<(), Self::Error> {
-        let tx = self.tx_or_invalid()?.clone();
-        if !Self::is_open(&tx) {
-            return Ok(());
+        self.inner.state.ensure_open(&self.inner.id)?;
+        if !self.is_open() {
+            return Err(self.no_transaction());
         }
-        let producer = self.tx_producer(&tx).await?;
-        let timeout = tx.timeout;
-        task::spawn_blocking(move || producer.abort_transaction(timeout))
+        let producer = self.inner.producer.clone();
+        let timeout = self.inner.timeout;
+        let aborted = task::spawn_blocking(move || producer.abort_transaction(timeout))
             .await
-            .map_err(|err| KafkaError::Publish(Box::new(err)))?
-            .map_err(KafkaError::publish)?;
-        Self::set_open(&tx, false);
-        Ok(())
+            .map_err(|err| KafkaError::Publish(Box::new(err)))?;
+        // The transaction is over either way: a failed abort resolves broker-side by its own
+        // timeout, and leaving the handle "open" would wedge it permanently.
+        self.set_open(false);
+        aborted.map_err(KafkaError::publish)
     }
 }
 
-/// Lazily materialized transactional publishers, one per source partition.
+/// The publish policy of [`TransactionalPartitions`], reached from
+/// [`KafkaTransactionalPublish::per_partition`].
+///
+/// # Examples
+///
+/// ```
+/// use ruststream_rdkafka::KafkaPublish;
+///
+/// let policy = KafkaPublish::default()
+///     .transactional_id("billing-svc-1")
+///     .per_partition();
+/// # let _ = policy;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaPartitionedPublish {
+    template: KafkaTransactionalPublish,
+}
+
+impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
+    type Live = TransactionalPartitions;
+
+    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
+        Ok(TransactionalPartitions {
+            inner: Arc::new(PartitionsInner {
+                state: Arc::clone(connected.state()),
+                template: self.template,
+                publishers: Mutex::new(HashMap::new()),
+            }),
+        })
+    }
+}
+
+/// Transactional publishers, one per source partition, materialized on first use.
 ///
 /// Kafka permits one open transaction per producer and one live producer per transactional id
 /// (initializing a second fences the first), so concurrent transactional handlers need one
@@ -351,144 +588,92 @@ impl TransactionalPublisher for KafkaPublisher {
 /// one partition across lanes, so two lanes would share a partition's publisher and collide
 /// on its single transaction ([`KafkaError::TransactionBusy`]).
 ///
-/// Clones share the cache, so one instance in the application state serves every handler
-/// invocation.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ruststream_rdkafka::{KafkaBroker, TransactionalPartitions};
-///
-/// let broker = KafkaBroker::new(["localhost:9092"]);
-/// let publishers = TransactionalPartitions::new(broker.publisher(), "billing-svc-1");
-/// // In a handler: the delivery's source partition picks the publisher.
-/// let publisher = publishers.for_partition(3); // transactional id "billing-svc-1-p3"
-/// # let _ = publisher;
-/// ```
-#[derive(Debug, Clone)]
+/// Clones share the cache, so one injected handle serves every handler invocation.
+#[derive(Clone)]
 pub struct TransactionalPartitions {
     inner: Arc<PartitionsInner>,
 }
 
-#[derive(Debug)]
 struct PartitionsInner {
-    template: KafkaPublisher,
-    id_base: String,
-    timeout: Option<Duration>,
-    publishers: Mutex<HashMap<i32, KafkaPublisher>>,
+    state: Arc<ConnState>,
+    template: KafkaTransactionalPublish,
+    /// The per-partition publishers. The set of partitions is only known as deliveries arrive,
+    /// so materialization stays lazy here (a cell per partition, so two lanes racing the same
+    /// partition initialize one producer, not two).
+    publishers: Mutex<HashMap<i32, Arc<OnceCell<KafkaTransactionalPublisher>>>>,
+}
+
+impl fmt::Debug for TransactionalPartitions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TransactionalPartitions")
+            .field("id_base", &self.inner.template.id())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TransactionalPartitions {
-    /// Creates the per-partition publisher set over `template` (which carries the broker
-    /// connection and any [`queue_timeout`](KafkaPublisher::queue_timeout)); each partition's
-    /// publisher gets the transactional id `"{id_base}-p{partition}"`. A transactional id
-    /// already set on the template is ignored.
-    ///
-    /// `id_base` must be stable across restarts and unique per service instance - it is what
-    /// scopes zombie fencing.
-    #[must_use]
-    pub fn new(template: KafkaPublisher, id_base: impl Into<String>) -> Self {
-        Self {
-            inner: Arc::new(PartitionsInner {
-                template,
-                id_base: id_base.into(),
-                timeout: None,
-                publishers: Mutex::new(HashMap::new()),
-            }),
-        }
-    }
-
-    /// The control-call deadline ([`KafkaPublisher::transaction_timeout`]) applied to each
-    /// partition's publisher. Configure before handing the set out: publishers already
-    /// materialized keep their deadline.
-    #[must_use]
-    pub fn transaction_timeout(self, timeout: Duration) -> Self {
-        Self {
-            inner: Arc::new(PartitionsInner {
-                template: self.inner.template.clone(),
-                id_base: self.inner.id_base.clone(),
-                timeout: Some(timeout),
-                publishers: Mutex::new(HashMap::new()),
-            }),
-        }
-    }
-
-    /// The publisher owning `partition`'s transactional id, created on first use.
+    /// The publisher owning `partition`'s transactional id, created and initialized on first
+    /// use.
     ///
     /// `partition` is the delivery's source partition (`KafkaContext`'s `Partition` field in a
     /// handler); passing anything else still works but forfeits the serialization argument
     /// that makes the per-partition scope safe.
     ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Closed`] once the broker has shut down and
+    /// [`KafkaError::Publish`] when the partition's producer cannot be created or its
+    /// transactions cannot be initialized.
+    ///
     /// # Panics
     ///
     /// Panics when the internal cache mutex is poisoned, which requires a prior panic while
     /// materializing a publisher (an invariant violation, not an operational failure).
-    #[must_use]
-    pub fn for_partition(&self, partition: i32) -> KafkaPublisher {
-        let mut publishers = self
+    pub async fn for_partition(
+        &self,
+        partition: i32,
+    ) -> Result<KafkaTransactionalPublisher, KafkaError> {
+        let cell = {
+            let mut publishers = self
+                .inner
+                .publishers
+                .lock()
+                .expect("partition publisher cache mutex poisoned");
+            Arc::clone(publishers.entry(partition).or_default())
+        };
+        let policy = self
             .inner
-            .publishers
-            .lock()
-            .expect("partition publisher cache mutex poisoned");
-        publishers
-            .entry(partition)
-            .or_insert_with(|| {
-                let id = format!("{}-p{partition}", self.inner.id_base);
-                let publisher = self.inner.template.clone().transactional_id(id);
-                match self.inner.timeout {
-                    Some(timeout) => publisher.transaction_timeout(timeout),
-                    None => publisher,
-                }
-            })
-            .clone()
+            .template
+            .with_id(format!("{}-p{partition}", self.inner.template.id()));
+        cell.get_or_try_init(|| open_transactional(&self.inner.state, &policy))
+            .await
+            .cloned()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ruststream::TransactionalPublisher as _;
-
     use super::*;
 
-    fn tx_id(publisher: &KafkaPublisher) -> Option<String> {
-        publisher.tx.as_ref().map(|tx| tx.id.clone())
-    }
-
-    #[tokio::test]
-    async fn transactions_without_an_id_fail_clearly() {
-        let publisher = KafkaPublisher::new(Arc::default());
-        let err = publisher
-            .begin_transaction()
-            .await
-            .expect_err("begin without transactional_id must fail");
-        assert!(matches!(err, KafkaError::InvalidOptions(_)));
-        assert!(err.to_string().contains("transactional_id"));
-    }
-
     #[test]
-    fn partitions_derive_ids_and_share_the_cache() {
-        let set = TransactionalPartitions::new(KafkaPublisher::new(Arc::default()), "svc-1");
-        let three = set.for_partition(3);
-        assert_eq!(tx_id(&three).as_deref(), Some("svc-1-p3"));
-        assert_eq!(tx_id(&set.for_partition(0)).as_deref(), Some("svc-1-p0"));
-
-        // The same partition resolves to the same producer state, through clones too: the
-        // clone shares the cache, so both handles are fenced (and serialized) together. The
-        // clone is the point of the assertion, not an artifact.
-        #[allow(clippy::redundant_clone)]
-        let cloned = set.clone();
-        let again = cloned.for_partition(3);
-        let (left, right) = (
-            three.tx.expect("transactional"),
-            again.tx.expect("transactional"),
+    fn transactional_id_is_a_type_transition() {
+        let plain = KafkaPublish::default().queue_timeout(Duration::from_secs(1));
+        let transactional = plain.transactional_id("svc-1");
+        assert_eq!(transactional.id(), "svc-1");
+        assert_eq!(transactional.queue_timeout, plain.queue_timeout_setting());
+        assert_eq!(
+            transactional.transaction_timeout,
+            DEFAULT_TRANSACTION_TIMEOUT
         );
-        assert!(Arc::ptr_eq(&left, &right));
     }
 
     #[test]
-    fn partitions_template_id_is_replaced() {
-        let template = KafkaPublisher::new(Arc::default()).transactional_id("ignored");
-        let set = TransactionalPartitions::new(template, "svc-1");
-        assert_eq!(tx_id(&set.for_partition(7)).as_deref(), Some("svc-1-p7"));
+    fn per_partition_derives_ids_from_the_base() {
+        let policy = KafkaPublish::default()
+            .transactional_id("svc-1")
+            .transaction_timeout(Duration::from_secs(5));
+        let derived = policy.with_id(format!("{}-p3", policy.id()));
+        assert_eq!(derived.id(), "svc-1-p3");
+        assert_eq!(derived.transaction_timeout, Duration::from_secs(5));
     }
 }

@@ -26,12 +26,24 @@
 //! `config(key, value)` passthroughs on the broker, the producer, and the descriptor reach
 //! every property this crate does not surface as a typed option.
 //!
-//! # Lazy startup
+//! # The lifecycle ladder
 //!
-//! [`KafkaBroker::new`] is synchronous and I/O-free, so a service composes with the synchronous
-//! `#[ruststream::app]` builder; the real network work happens in the idempotent async
-//! `Broker::connect`, called once by the runtime at startup. Publishers handed out before that
-//! resolve the shared connection on first use.
+//! Each state of the connection is its own type, so out-of-order use does not compile:
+//!
+//! ```text
+//! KafkaBroker::new(servers)      configuration only, synchronous, no I/O
+//!   .connect()   -> ConnectedKafkaBroker   the live connection: subscriptions and publishers
+//!   .shutdown()  -> ClosedKafkaBroker      the terminal witness, carrying the flush result
+//! ```
+//!
+//! [`KafkaBroker::new`] being synchronous is what lets a service compose with the synchronous
+//! `#[ruststream::app]` builder; the runtime calls `connect` once at startup.
+//!
+//! Publishers follow the same split: [`KafkaPublish`] (and its transactional and per-partition
+//! transitions) is pure policy, constructible anywhere, with no publish surface at all; pairing
+//! it with the connected broker produces the live [`KafkaPublisher`]. Handles paired before a
+//! shutdown keep aliasing the closed connection, so their operations report
+//! [`KafkaError::Closed`] rather than succeeding against a dead connection.
 //!
 //! [`rdkafka`]: https://docs.rs/rdkafka
 
@@ -59,12 +71,15 @@ pub mod schema_registry;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use broker::KafkaBroker;
+pub use broker::{ClosedKafkaBroker, ConnectedKafkaBroker, KafkaBroker};
 pub use distribution::RoundRobin;
-pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, SourceOffset};
+pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, KafkaEosPublish, SourceOffset};
 pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
-pub use publisher::{KafkaPublisher, TransactionalPartitions};
+pub use publisher::{
+    KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaTransactionalPublish,
+    KafkaTransactionalPublisher, TransactionalPartitions,
+};
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
     RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,

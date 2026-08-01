@@ -10,7 +10,9 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::conformance::{capabilities, harness};
 use ruststream_rdkafka::testing::KafkaTestBroker;
-use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic, StartOffset};
+use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPublish, KafkaTopic, StartOffset};
+use tokio::runtime::Handle;
+use tokio::task;
 
 fn kafka_url() -> Option<String> {
     std::env::var("KAFKA_TEST_URL").ok()
@@ -82,13 +84,16 @@ async fn recreate_topic(url: &str, topic: &str) {
 /// throwaway group round-trip absorbs that one-time cost with a generous timeout.
 async fn warm_up_group_coordinator(url: &str) {
     use futures::StreamExt as _;
-    use ruststream::{Broker as _, IncomingMessage as _, OutgoingMessage, Publisher as _};
+    use ruststream::{Broker as _, ConnectedBroker as _, IncomingMessage as _};
+    use ruststream::{OutgoingMessage, Publisher as _};
     use ruststream::{Subscriber as _, SubscriptionSource as _};
 
     let scratch = format!("conformance-warmup-{}", std::process::id());
     create_topic(url, &scratch).await;
-    let broker = KafkaBroker::new([url.to_owned()]);
-    broker.connect().await.expect("warm-up connect");
+    let broker = KafkaBroker::new([url.to_owned()])
+        .connect()
+        .await
+        .expect("warm-up connect");
     let mut subscriber = KafkaTopic::new(&scratch)
         .group(&scratch)
         .start(StartOffset::Earliest)
@@ -96,7 +101,7 @@ async fn warm_up_group_coordinator(url: &str) {
         .await
         .expect("warm-up subscribe");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(&scratch, b"warm-up"))
         .await
         .expect("warm-up publish");
@@ -129,7 +134,7 @@ async fn passes_batches_capability() {
                 .start(StartOffset::Earliest)
                 .commit(Commit::Tracked)
         },
-        |broker| broker.publisher(),
+        |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
 }
@@ -153,7 +158,16 @@ async fn passes_transactions_capability() {
                 .start(StartOffset::Earliest)
                 .commit(Commit::Tracked)
         },
-        |broker| broker.publisher().transactional_id(tx_id.clone()),
+        |connected| {
+            // The harness factory is synchronous, while a Kafka transactional publisher does
+            // real work when it comes alive (`init_transactions` fences earlier producers with
+            // the same id, blocking), so the pairing is driven to completion here.
+            let policy = KafkaPublish::default().transactional_id(tx_id.clone());
+            task::block_in_place(|| {
+                Handle::current().block_on(connected.transactional_publisher(policy))
+            })
+            .expect("transactional publisher must pair")
+        },
     )
     .await;
 }
@@ -176,7 +190,7 @@ async fn passes_lifecycle() {
                 .start(StartOffset::Earliest)
                 .commit(Commit::Tracked)
         },
-        |broker| broker.publisher(),
+        |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
 }

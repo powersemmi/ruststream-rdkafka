@@ -17,7 +17,7 @@ workspace = true
 [features]
 default = ["json"]
 # Codec forwarders, mirroring the core's feature names: `json` (the default) makes the core's
-# DefaultCodec available, which is what `EosPipeline::replies` encodes with.
+# DefaultCodec available, which is what `KafkaEosPublish::replies` encodes with.
 json = ["ruststream/json"]
 msgpack = ["ruststream/msgpack"]
 cbor = ["ruststream/cbor"]
@@ -30,8 +30,9 @@ avro = ["schema-registry", "dep:apache-avro"]
 # Protobuf transcoding for the registry middleware: dynamic messages (prost-reflect) with
 # descriptors compiled from the registry's .proto sources (protox).
 protobuf = ["schema-registry", "dep:prost-reflect", "dep:protox"]
-# Ships the in-process test broker (`testing` module) plus the core harness wiring it needs.
-testing = ["ruststream/conformance", "ruststream/testing"]
+# Ships the in-process test broker (`testing` module). The conformance harness is broker-author
+# tooling and stays in this repo's dev-dependencies, out of the user-facing feature.
+testing = ["ruststream/testing"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
 # that build hermetically everywhere are surfaced here (SASL PLAIN/SCRAM/OAUTHBEARER need no
 # feature at all - librdkafka implements them built-in); anything else (gssapi, cmake-build,

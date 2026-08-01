@@ -19,10 +19,9 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use ruststream::Publisher;
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
 use serde::Deserialize;
 
@@ -810,16 +809,13 @@ impl SchemaFrame {
 }
 
 impl PublishLayer for SchemaFrame {
-    fn on_publish<'a, N: PublishPipeline>(
+    async fn on_publish<'a, N: PublishPipeline, P: Publisher>(
         &'a self,
         out: &'a mut Outgoing<'a>,
-        next: PublishNext<'a, N>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn StdError + Send + Sync>>> + Send + 'a>>
-    {
-        Box::pin(async move {
-            self.frame(out).await?;
-            next.run(out).await
-        })
+        next: PublishNext<'a, N, P>,
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        self.frame(out).await?;
+        next.run(out).await
     }
 }
 
