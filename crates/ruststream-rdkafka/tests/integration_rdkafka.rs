@@ -24,7 +24,10 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
+use ruststream::runtime::{
+    App, AppInfo, Ctx, HandlerResult, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, RustStream,
+    State,
+};
 use ruststream::subscriber;
 use ruststream::{
     Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, PublishPolicy,
@@ -1675,6 +1678,112 @@ async fn manual_assignment_composes_with_partition_lanes() {
             "partition {partition} must stay ordered on its lane",
         );
     }
+}
+
+/// Records the runtime retry-count header of every delivery, so the test can tell the original
+/// from the deferred copy.
+#[derive(Clone)]
+struct DeferredRetryProbe {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+    done: Arc<Notify>,
+}
+
+// Kafka has no native delayed redelivery, so `retry_after` runs through the runtime's
+// deferred-republish fallback: the original settles, and a copy comes back through the
+// scope's retry publisher after the delay with the retry count incremented.
+#[subscriber(
+    KafkaTopic::new(std::env::var("DEFERRED_RETRY_TOPIC").expect("topic env"))
+        .group("deferred-retry-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn deferred_retry(
+    _order: &OrderPayload,
+    ctx: &mut Context<'_, (), DeferredRetryProbe>,
+) -> HandlerResult {
+    let count = ctx
+        .headers()
+        .get_str(RUNTIME_RETRY_COUNT_HEADER)
+        .map(str::to_owned);
+    let probe = ctx.state().clone();
+    probe
+        .seen
+        .lock()
+        .expect("seen mutex poisoned")
+        .push(count.clone());
+    if count.is_none() {
+        return HandlerResult::retry_after(Duration::from_millis(200));
+    }
+    probe.done.notify_one();
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_after_republishes_through_the_retry_publisher() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("deferred-retry");
+    create_topic(&url, &topic, 1).await;
+    unsafe { std::env::set_var("DEFERRED_RETRY_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    publish(&broker, &topic, br#"{"partition":0,"seq":1}"#).await;
+    broker.shutdown().await.expect("shutdown seeder");
+
+    let probe = DeferredRetryProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("deferred-retry", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            // The early publisher is what makes this wiring possible before the connection
+            // exists; `retry_via` takes a live publisher, not a policy.
+            let retries = b.broker().retry_publisher();
+            b.retry_via(retries);
+            b.include(deferred_retry);
+        });
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("the deferred copy must arrive within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    assert_eq!(
+        seen,
+        vec![None, Some("1".to_owned())],
+        "the original carries no retry count and the deferred copy carries the first one",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_early_publisher_errors_after_shutdown() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("early-publisher");
+    create_topic(&url, &topic, 1).await;
+
+    let broker = KafkaBroker::new([url.clone()]);
+    let retries = broker.retry_publisher();
+    let connected = broker.connect().await.expect("connect");
+    retries
+        .publish(OutgoingMessage::new(&topic, b"live".as_slice()))
+        .await
+        .expect("the cell resolves once the broker connects");
+
+    connected.shutdown().await.expect("shutdown");
+
+    let err = retries
+        .publish(OutgoingMessage::new(&topic, b"after".as_slice()))
+        .await
+        .expect_err("publishing through a handle aliasing a closed connection must error");
+    assert!(
+        matches!(&err, KafkaError::Closed { topic: named } if named == &topic),
+        "the error must name the topic it could not reach, got: {err}",
+    );
 }
 
 #[derive(Clone)]

@@ -45,6 +45,11 @@
 //! shutdown keep aliasing the closed connection, so their operations report
 //! [`KafkaError::Closed`] rather than succeeding against a dead connection.
 //!
+//! One publisher stands outside that split, on purpose: [`KafkaRetryPublisher`], minted from
+//! the unconnected broker for builder-time wiring that takes a live publisher rather than a
+//! policy - `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
+//! it has no native delayed redelivery. See its documentation.
+//!
 //! [`rdkafka`]: https://docs.rs/rdkafka
 
 #![forbid(unsafe_code)]
@@ -77,8 +82,8 @@ pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, KafkaEosPublish, Sourc
 pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{
-    KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaTransactionalPublish,
-    KafkaTransactionalPublisher, TransactionalPartitions,
+    KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaRetryPublisher,
+    KafkaTransactionalPublish, KafkaTransactionalPublisher, TransactionalPartitions,
 };
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{

@@ -225,10 +225,13 @@ advisory no-op and none of it applies):
   loss. Selective ack therefore works "up to the first nack" as far as the committed position
   is concerned; use a retry policy (retry topics) when a poison element must not hold the page
   hostage.
-- **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the delay
-  is dropped with a warning and the element degrades to a plain `retry()` hole as above.
-  [Retry topics](#retries-and-dead-lettering) are the Kafka-native way to keep a failed
-  delivery from blocking its partition.
+- **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the
+  runtime's deferred-republish fallback runs: with `retry_via(broker.retry_publisher())`
+  configured on the scope, the element settles immediately (the position moves past it) and a
+  copy republishes to the topic's tail after the delay, carrying an incremented
+  `x-ruststream-retry-count` header - ordering is not preserved, and the copy is at-most-once
+  across the delay window (a crash before the timer fires loses it). Without `retry_via` the
+  delay is dropped with a warning and the element degrades to a plain `retry()` hole as above.
 - **A too-short result vector** - the unmatched remainder of the page is retried (an extra
   redelivery beats a silently lost message) and the mismatch is logged.
 
