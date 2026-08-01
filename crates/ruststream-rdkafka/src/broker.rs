@@ -498,6 +498,7 @@ impl ConnectedKafkaBroker {
                     def.dead_letter_topic().map(str::to_owned),
                     Arc::clone(&self.state),
                     Arc::clone(&consumer),
+                    Arc::clone(&tracker),
                 ))
             });
         let subscriber = KafkaSubscriber::new(

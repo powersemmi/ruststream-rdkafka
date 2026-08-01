@@ -118,6 +118,60 @@ Manual assignment composes with keyed worker lanes out of the box: under the def
 its lane. Sizing `n` against the partition list is your call - fewer lanes than partitions
 means partitions share lanes (ordering still holds), more means idle lanes.
 
+## Repositioning a subscription
+
+Kafka keeps the log, so a subscription can be moved through it: replay from an earlier point,
+skip a poison run, or start a projection from the beginning on every boot. Positions are
+`KafkaPosition` values, built with its constructors:
+
+| Position | Applies to | Resumes at |
+|---|---|---|
+| `KafkaPosition::earliest()` | every assigned partition | the earliest retained offset |
+| `KafkaPosition::latest()` | every assigned partition | the end of the log (only new records) |
+| `KafkaPosition::offset(partition, n)` | one partition | the absolute offset `n` |
+| `KafkaPosition::timestamp(millis)` | every assigned partition | the first record at or after that time (its end when there is none) |
+
+A delivery also carries its own position (`Positioned::position`), which is the pinned
+topic-partition-offset form: seeking to it redelivers exactly that record and the ordered
+suffix behind it.
+
+There are two ways to use them. The `start_at(..)` clause opens the subscription at a position
+on every startup, whatever the group committed before - unlike `StartOffset`, which only
+applies when the group has no committed offset for the partition:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:start_at"
+```
+
+A `Seek(seeker): Seek<KafkaSeeker>` handler parameter moves the subscription while it runs. The
+runtime mints the seeker off this subscription's own subscriber at startup, so it is live by
+construction:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:handler"
+```
+
+Three things about the scope and the bookkeeping are worth stating plainly:
+
+- **A seek moves this consumer instance, not the group.** It repositions the partitions this
+  member currently holds; other members keep reading where they are, and nothing is committed
+  on anyone's behalf. A position naming a partition this consumer does not hold is an error,
+  not a silent no-op.
+- **A rebalance discards a seek.** The reposition lives in the assignment it was applied to.
+  When a member joins or leaves, a session times out, or topic metadata changes, the partitions
+  are revoked and whoever gets them next - this instance included - resumes from the group's
+  committed offsets. Repositioning is an operational action on a running consumer, not durable
+  state; a position that must survive restarts belongs in `start_at(..)`, which reapplies it
+  every time.
+- **The offsets follow the read position.** Under `Commit::Tracked` the contiguous-offset
+  watermark resets to the seek target (and so does librdkafka's own offset store), so a later
+  commit can never advance past records the seek replayed but nobody handled. Deliveries pulled
+  before the seek settle into nothing: they describe a position the subscription no longer
+  reads from. In an exactly-once pipeline the same rule applies to the transaction: a window
+  open when the seek lands is aborted rather than committed, so `send_offsets_to_transaction`
+  never carries the group past the replayed range, and the replayed deliveries are processed
+  into a fresh window.
+
 ## Keyed worker lanes
 
 Kafka partitions by the native record key, and this crate surfaces it through
