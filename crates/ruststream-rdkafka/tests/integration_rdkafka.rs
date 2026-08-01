@@ -30,14 +30,14 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, PublishPolicy,
-    Publisher, Subscriber, TransactionalPublisher,
+    Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, Positioned,
+    PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
 };
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
-    Assignment, Commit, ConnectedKafkaBroker, KafkaBroker, KafkaEosPublish, KafkaError,
-    KafkaMessage, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER, PARTITION_KEY_HEADER,
-    SourceOffset, StartOffset,
+    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
+    KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
+    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1678,6 +1678,273 @@ async fn manual_assignment_composes_with_partition_lanes() {
             "partition {partition} must stay ordered on its lane",
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeking_inside_an_eos_window_replays_without_committing_past_the_target() {
+    let Some(url) = kafka_url() else { return };
+    let input = unique("eos-seek-in");
+    let output = unique("eos-seek-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    let broker = connected_broker(&url).await;
+    let pipeline_id = unique("eos-seek");
+    let group = unique("group");
+
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        publish(&broker, &input, payload).await;
+    }
+
+    // A window long enough to still be open when the reposition lands.
+    let pipeline = KafkaEosPublish::new(&pipeline_id)
+        .commit_interval(Duration::from_millis(500))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
+    let mut subscriber = broker
+        .subscribe_with(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .start(StartOffset::Earliest)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("subscribe input");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    // First pass: two deliveries publish into the open window, then the handler repositions the
+    // subscription back to the first of them while that window is still open.
+    let mut replay_from = None;
+    for expected in [b"a".as_slice(), b"b"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), expected);
+        if replay_from.is_none() {
+            replay_from = Some(msg.position());
+        }
+        forward(&pipeline, &msg, &output).await;
+        msg.ack().await.expect("ack first pass");
+    }
+    seeker
+        .seek(replay_from.expect("a captured position"))
+        .await
+        .expect("seek back inside the window");
+
+    // The window that was open when the seek landed is discarded, so the whole input replays
+    // from the sought offset and is processed into fresh windows.
+    for expected in [b"a".as_slice(), b"b", b"c"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(
+            msg.payload(),
+            expected,
+            "the replay must start at the sought offset and keep the log order",
+        );
+        forward(&pipeline, &msg, &output).await;
+        msg.ack().await.expect("ack replay");
+    }
+
+    // Exactly-once on the output: a `read_committed` reader sees each record once - the
+    // discarded window's copies of "a" and "b" never became visible.
+    let mut out_subscriber = broker
+        .subscribe_with(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let mut out_stream = Box::pin(out_subscriber.stream());
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let msg = next_message(&mut out_stream).await;
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack output");
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        "each input must be published exactly once despite the reposition",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), out_stream.next())
+            .await
+            .is_err(),
+        "the discarded window must not have made its copies visible",
+    );
+
+    // The transactional offsets followed the seek: the group resumes right after the replayed
+    // range. Committing the pre-seek window would have carried it past the replay instead.
+    drop(stream);
+    drop(subscriber);
+    // The seeker keeps the consumer (and its group membership) alive; the rejoin below needs
+    // the partition free.
+    drop(seeker);
+    publish(&broker, &input, b"d").await;
+    let mut resumed = broker
+        .subscribe_with(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("resubscribe input");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"d",
+        "the committed offsets must cover the replayed range exactly, no more and no less",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    drop(out_stream);
+    drop(out_subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// Publishes a delivery's payload into the pipeline's window, paired with its source offset.
+async fn forward(pipeline: &EosPipeline, msg: &KafkaMessage, output: &str) {
+    let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+    let payload = msg.payload().to_vec();
+    pipeline
+        .publish(&source, OutgoingMessage::new(output, payload.as_slice()))
+        .await
+        .expect("pipeline publish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seek_moves_the_tracked_watermark_with_the_read_position() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("seek-tracked");
+    let group = unique("group");
+    create_topic(&url, &topic, 1).await;
+    // A long auto-commit interval pins what the test is about: the only commit that can happen
+    // here is the one the consumer flushes when it closes, after the seek. With the default
+    // five seconds a passing run could be luck.
+    let broker = KafkaBroker::new([url.clone()])
+        .config("auto.commit.interval.ms", "60000")
+        .connect()
+        .await
+        .expect("connect");
+
+    for payload in [b"1".as_slice(), b"2", b"3"] {
+        publish(&broker, &topic, payload).await;
+    }
+
+    let mut subscriber = broker
+        .subscribe_with(tracked(&topic, &group))
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    let first = next_message(&mut stream).await;
+    let replay_from = first.position();
+    first.ack().await.expect("ack first");
+    let second = next_message(&mut stream).await;
+    second.ack().await.expect("ack second");
+
+    // Back to the first record. The watermark those two acks built describes a read position
+    // this subscription no longer has, so it must not survive the seek.
+    seeker.seek(replay_from).await.expect("seek back");
+    for expected in [b"1".as_slice(), b"2"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), expected, "the whole suffix must replay");
+        // Deliberately NOT acked: nothing after the seek was handled, so nothing after the
+        // seek may be committed.
+        drop(msg);
+    }
+
+    // The seeker holds the consumer alive, so it goes before the group is rejoined; otherwise
+    // the old member keeps the partition and the new one waits out a rebalance.
+    drop(stream);
+    drop(subscriber);
+    drop(seeker);
+
+    // A fresh member of the same group must start at the seek target: had the pre-seek acks
+    // still decided the committed position, the replayed records would be skipped here.
+    let mut resumed = broker
+        .subscribe_with(tracked(&topic, &group))
+        .await
+        .expect("resubscribe");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"1",
+        "a commit must never advance past records the seek replayed but nobody handled",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positions_reach_every_assigned_partition_and_report_bad_targets() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("seek-vocab");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"first").await;
+    publish(&broker, &topic, b"second").await;
+
+    let mut subscriber = broker
+        .subscribe_with(tracked(&topic, &unique("group")))
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    let msg = next_message(&mut stream).await;
+    let published_at = msg
+        .timestamp_millis()
+        .expect("the broker stamps a timestamp");
+    msg.ack().await.expect("ack");
+
+    // Stream-wide: every assigned partition goes back to the start of the log.
+    seeker
+        .seek(KafkaPosition::earliest())
+        .await
+        .expect("seek earliest");
+    let replayed = next_message(&mut stream).await;
+    assert_eq!(replayed.payload(), b"first");
+    replayed.ack().await.expect("ack replayed");
+
+    // A timestamp resolves per partition; the first record's own timestamp resolves to it.
+    seeker
+        .seek(KafkaPosition::timestamp(published_at))
+        .await
+        .expect("seek timestamp");
+    let by_time = next_message(&mut stream).await;
+    assert_eq!(by_time.payload(), b"first");
+    by_time.ack().await.expect("ack by_time");
+
+    // A partition this consumer does not hold is a clear error, not a silent no-op.
+    let err = seeker
+        .seek(KafkaPosition::offset(7, 0))
+        .await
+        .expect_err("an unassigned partition must be rejected");
+    assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err}");
+
+    // Latest parks the subscription at the end of the log: only new records arrive.
+    seeker
+        .seek(KafkaPosition::latest())
+        .await
+        .expect("seek latest");
+    publish(&broker, &topic, b"third").await;
+    let live = next_message(&mut stream).await;
+    assert_eq!(
+        live.payload(),
+        b"third",
+        "after seeking to the end only fresh records arrive",
+    );
+    live.ack().await.expect("ack live");
+
+    drop(stream);
+    drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
 }
 
 /// Records the runtime retry-count header of every delivery, so the test can tell the original

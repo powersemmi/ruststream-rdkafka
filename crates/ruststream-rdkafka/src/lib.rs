@@ -62,6 +62,7 @@ mod error;
 mod message;
 mod publisher;
 mod retry;
+mod seek;
 mod subscriber;
 mod topic;
 mod tracker;
@@ -89,6 +90,7 @@ pub use publisher::{
 pub use schema_registry::{
     RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,
 };
+pub use seek::{KafkaPosition, KafkaSeeker};
 
 pub use retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,

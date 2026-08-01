@@ -11,7 +11,7 @@ use rdkafka::consumer::StreamConsumer;
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
-use ruststream::{BatchSubscriber, Subscriber};
+use ruststream::{BatchSubscriber, Seekable, Subscriber};
 use tracing::{debug, warn};
 
 use crate::convert;
@@ -19,6 +19,7 @@ use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
 use crate::retry::RetryContext;
+use crate::seek::KafkaSeeker;
 use crate::topic::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
 
@@ -160,23 +161,28 @@ impl KafkaSubscriber {
         let payload = delivery
             .payload()
             .map_or_else(Bytes::new, Bytes::copy_from_slice);
+        // The generation is captured here, where the delivery is pulled, never where it settles:
+        // that is what lets a reposition landing in between tell a delivery of the replaced read
+        // position apart from one the new position produced.
         let settlement = match &self.commit {
             Commit::Auto => Settlement::Advisory,
-            Commit::Tracked => {
-                self.tracker
-                    .delivered(delivery.topic(), delivery.partition(), delivery.offset());
-                Settlement::Tracked {
-                    consumer: Arc::clone(&self.consumer),
-                    tracker: Arc::clone(&self.tracker),
-                }
-            }
-            Commit::Transactional(_) => {
-                self.tracker
-                    .delivered(delivery.topic(), delivery.partition(), delivery.offset());
-                Settlement::Transactional {
-                    tracker: Arc::clone(&self.tracker),
-                }
-            }
+            Commit::Tracked => Settlement::Tracked {
+                consumer: Arc::clone(&self.consumer),
+                tracker: Arc::clone(&self.tracker),
+                generation: self.tracker.delivered(
+                    delivery.topic(),
+                    delivery.partition(),
+                    delivery.offset(),
+                ),
+            },
+            Commit::Transactional(_) => Settlement::Transactional {
+                tracker: Arc::clone(&self.tracker),
+                generation: self.tracker.delivered(
+                    delivery.topic(),
+                    delivery.partition(),
+                    delivery.offset(),
+                ),
+            },
         };
         let lane = match self.lane_key {
             LaneKey::RecordKey => headers
@@ -245,6 +251,16 @@ impl Subscriber for KafkaSubscriber {
                 }
             }
         })
+    }
+}
+
+impl Seekable for KafkaSubscriber {
+    type Seeker = KafkaSeeker;
+
+    /// Mints a handle for repositioning this subscription; see [`KafkaSeeker`] for the scope of
+    /// a seek and what a rebalance does to it.
+    fn seeker(&self) -> Self::Seeker {
+        KafkaSeeker::new(Arc::clone(&self.consumer), Arc::clone(&self.tracker))
     }
 }
 

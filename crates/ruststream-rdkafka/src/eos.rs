@@ -141,6 +141,10 @@ struct PipelineInner {
     window: Mutex<Window>,
     /// Woken on every phase transition; publishers waiting for admission re-check then.
     phase_changed: tokio::sync::Notify,
+    /// The sources registered under this pipeline id, refreshed whenever a window opens. The
+    /// publish path reads them to notice a reposition without touching the broker-wide registry
+    /// per message.
+    sources: Mutex<Vec<EosSource>>,
     /// Offsets committed by this pipeline per (topic, partition) ("next to consume"), the
     /// seek target when a window aborts.
     committed: Mutex<HashMap<(String, i32), i64>>,
@@ -270,6 +274,7 @@ impl EosPipeline {
                     epoch: 0,
                 }),
                 phase_changed: tokio::sync::Notify::new(),
+                sources: Mutex::new(Vec::new()),
                 committed: Mutex::new(HashMap::new()),
                 session_low: Mutex::new(HashMap::new()),
             }),
@@ -325,9 +330,14 @@ impl EosPipeline {
             // The waiter is created before the phase check so a transition landing in
             // between is not missed.
             let phase_changed = self.inner.phase_changed.notified();
+            // A window whose sources were repositioned is void: its transaction is about to
+            // abort, and anything published into it would be purged with it. The replayed
+            // delivery waits for the fresh window instead.
+            let voided = self.repositioned();
             let action = {
                 let mut window = self.inner.window.lock().expect("window mutex poisoned");
                 match window.phase {
+                    _ if voided && window.phase != Phase::Idle => Admission::Wait,
                     Phase::Open => {
                         Self::enroll(&mut window, &self.inner.session_low, source);
                         Admission::Admitted
@@ -365,6 +375,15 @@ impl EosPipeline {
 
     /// Opens the transaction as the winning publisher and spawns the window's commit task.
     async fn open_window(&self, source: &SourceOffset) -> Result<(), KafkaError> {
+        // The registry lookup happens once per window, here, and the publish path reads the
+        // cached list. A reposition from before this window is already reflected in the
+        // sources' bookkeeping, so its flag is cleared: only a seek landing while the window is
+        // open has offsets of this window to invalidate.
+        let registered = self.inner.publisher.state().eos_sources(&self.inner.id);
+        for source in registered.iter().filter_map(EosSource::upgrade) {
+            source.tracker.take_repositioned();
+        }
+        *self.inner.sources.lock().expect("sources mutex poisoned") = registered;
         let begun = self.inner.publisher.begin_transaction().await;
         let mut window = self.inner.window.lock().expect("window mutex poisoned");
         match begun {
@@ -385,6 +404,19 @@ impl EosPipeline {
         }
         self.inner.phase_changed.notify_waiters();
         Ok(())
+    }
+
+    /// Whether any source of the open window has a pending reposition. Reads the cached source
+    /// list (refreshed once per window) and one atomic per source, so it stays cheap enough for
+    /// the publish path.
+    fn repositioned(&self) -> bool {
+        self.inner
+            .sources
+            .lock()
+            .expect("sources mutex poisoned")
+            .iter()
+            .filter_map(EosSource::upgrade)
+            .any(|source| source.tracker.is_repositioned())
     }
 
     fn enroll(
@@ -414,7 +446,7 @@ enum Admission {
 /// The per-window task: sleeps out the commit interval, closes admission, waits for the
 /// participants to settle, and commits (or aborts and seeks back).
 async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
-    tokio::time::sleep(inner.interval).await;
+    stay_open(&inner).await;
     let enrolled = {
         let mut window = inner.window.lock().expect("window mutex poisoned");
         if window.epoch != epoch || window.phase != Phase::Open {
@@ -442,19 +474,68 @@ async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
     }
 }
 
+/// Holds the window open for the commit interval, or until a source is repositioned.
+///
+/// A seek voids everything the window would commit, so waiting out the rest of the interval
+/// would only strand the replayed deliveries behind a transaction that is going to abort.
+async fn stay_open(inner: &Arc<PipelineInner>) {
+    let sources: Vec<LiveSource> = inner
+        .sources
+        .lock()
+        .expect("sources mutex poisoned")
+        .iter()
+        .filter_map(EosSource::upgrade)
+        .collect();
+    // Waiters first, flag second: a reposition landing between the two is caught by the
+    // already-registered waiters.
+    let waiters: Vec<_> = sources
+        .iter()
+        .map(|source| Box::pin(source.tracker.reposition_waiter()))
+        .collect();
+    if waiters.is_empty()
+        || sources
+            .iter()
+            .any(|source| source.tracker.is_repositioned())
+    {
+        if waiters.is_empty() {
+            tokio::time::sleep(inner.interval).await;
+        }
+        return;
+    }
+    tokio::select! {
+        () = tokio::time::sleep(inner.interval) => {}
+        (..) = select_all(waiters) => {}
+    }
+}
+
 /// Commits the window: settle-wait, offsets into the transaction, commit. Any failure runs
 /// the abort path (abort the transaction, seek the sources back) and reports the cause.
 async fn commit_window(
     inner: &Arc<PipelineInner>,
     enrolled: &HashMap<(String, i32), i64>,
 ) -> Result<(), KafkaError> {
-    let sources: Vec<LiveSource> = inner
-        .publisher
-        .state()
-        .eos_sources(&inner.id)
+    let sources = live_sources(&inner.id, &inner.publisher);
+
+    // A seek while the window was open moved the read position out from under it: the offsets
+    // this window would attach to its transaction describe records the subscription no longer
+    // reads from, so committing them would carry the group past everything the seek replayed.
+    // The window aborts instead, and the seek-back is skipped - the consumer already sits where
+    // the seek put it.
+    // Counting rather than `any`: the flag has to be taken from every source, so a second
+    // source's reposition cannot linger into the next window.
+    let repositioned = sources
         .iter()
-        .filter_map(EosSource::upgrade)
-        .collect();
+        .filter(|source| source.tracker.take_repositioned())
+        .count()
+        > 0;
+    if repositioned {
+        abort_window(inner, &sources, enrolled, Repositioned::Yes).await;
+        return Err(KafkaError::InvalidOptions(
+            "the subscription was repositioned while this window was open; its records are \
+             discarded and the replayed deliveries are processed into a fresh window"
+                .to_owned(),
+        ));
+    }
 
     let failed = {
         let window = inner.window.lock().expect("window mutex poisoned");
@@ -474,10 +555,28 @@ async fn commit_window(
         Err(err) => Err(err),
     };
     if let Err(err) = result {
-        abort_window(inner, &sources, enrolled).await;
+        abort_window(inner, &sources, enrolled, Repositioned::No).await;
         return Err(err);
     }
     Ok(())
+}
+
+/// The pipeline's registered sources that are still alive.
+fn live_sources(id: &str, publisher: &KafkaTransactionalPublisher) -> Vec<LiveSource> {
+    publisher
+        .state()
+        .eos_sources(id)
+        .iter()
+        .filter_map(EosSource::upgrade)
+        .collect()
+}
+
+/// Whether the window is aborting because its sources were repositioned, which decides the fate
+/// of the seek-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repositioned {
+    Yes,
+    No,
 }
 
 /// Waits until every enrolled (topic, partition) has settled up to its enrolled offset, with
@@ -579,10 +678,16 @@ fn group_metadata(source: &LiveSource) -> Result<ConsumerGroupMetadata, KafkaErr
 /// The abort path: abort the transaction and seek every enrolled partition back to the last
 /// offset this pipeline committed (or the first offset it ever saw), so the whole window
 /// redelivers promptly instead of waiting for a rebalance.
+///
+/// A window aborting because it was repositioned skips the seek-back entirely: the consumer is
+/// already where the seek put it, and rewinding to this pipeline's own bookkeeping would undo
+/// the caller's reposition. That bookkeeping is dropped with it, since it describes offsets of a
+/// read position this subscription no longer has.
 async fn abort_window(
     inner: &Arc<PipelineInner>,
     sources: &[LiveSource],
     enrolled: &HashMap<(String, i32), i64>,
+    repositioned: Repositioned,
 ) {
     if let Err(err) = inner.publisher.abort().await {
         error!(
@@ -590,6 +695,24 @@ async fn abort_window(
             error = %err,
             "EOS window abort failed; the transaction resolves by its broker-side timeout",
         );
+    }
+    if repositioned == Repositioned::Yes {
+        {
+            let mut committed = inner.committed.lock().expect("committed mutex poisoned");
+            for key in enrolled.keys() {
+                committed.remove(key);
+            }
+        }
+        {
+            let mut session_low = inner
+                .session_low
+                .lock()
+                .expect("session low mutex poisoned");
+            for key in enrolled.keys() {
+                session_low.remove(key);
+            }
+        }
+        return;
     }
     let committed = inner
         .committed

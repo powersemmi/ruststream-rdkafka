@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
-use ruststream::{AckError, Headers, IncomingMessage, Partitioned};
+use ruststream::{AckError, Headers, IncomingMessage, Partitioned, Positioned};
 
 use crate::retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
     RETRY_COUNT_HEADER, Retry, RetryContext,
 };
+use crate::seek::KafkaPosition;
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
@@ -32,6 +33,10 @@ pub const PARTITION_KEY_HEADER: &str = "kafka-partition-key";
 pub const PARTITION_HEADER: &str = "kafka-partition";
 
 /// How this delivery settles when acked.
+///
+/// The tracked forms carry the generation the delivery was pulled in, so a settle that arrives
+/// after the subscription was repositioned (a seek, a rebalance) is dropped instead of moving a
+/// position that no longer describes what this consumer reads.
 pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.
     Advisory,
@@ -39,10 +44,14 @@ pub(crate) enum Settlement {
     Tracked {
         consumer: Arc<StreamConsumer<TrackingContext>>,
         tracker: Arc<CommitTracker>,
+        generation: u64,
     },
     /// `Commit::Transactional`: an ack advances the shared watermark only - the EOS pipeline
     /// commits positions through the producer transaction, so nothing is stored here.
-    Transactional { tracker: Arc<CommitTracker> },
+    Transactional {
+        tracker: Arc<CommitTracker>,
+        generation: u64,
+    },
 }
 
 /// One Kafka delivery: an owned snapshot of the record plus its settlement handle.
@@ -161,15 +170,30 @@ impl KafkaMessage {
     fn settle(self) -> Result<(), AckError> {
         match self.settlement {
             Settlement::Advisory => Ok(()),
-            Settlement::Tracked { consumer, tracker } => tracker
-                .settle_with(&self.topic, self.partition, self.offset, |position| {
-                    consumer.store_offset(&self.topic, self.partition, position)
-                })
+            Settlement::Tracked {
+                consumer,
+                tracker,
+                generation,
+            } => tracker
+                .settle_with(
+                    &self.topic,
+                    self.partition,
+                    self.offset,
+                    generation,
+                    |position| consumer.store_offset(&self.topic, self.partition, position),
+                )
                 .map_err(|err| AckError::Broker(Box::new(err))),
-            Settlement::Transactional { tracker } => {
-                let infallible: Result<(), Infallible> =
-                    tracker
-                        .settle_with(&self.topic, self.partition, self.offset, |_position| Ok(()));
+            Settlement::Transactional {
+                tracker,
+                generation,
+            } => {
+                let infallible: Result<(), Infallible> = tracker.settle_with(
+                    &self.topic,
+                    self.partition,
+                    self.offset,
+                    generation,
+                    |_position| Ok(()),
+                );
                 infallible.expect("no-op store cannot fail");
                 Ok(())
             }
@@ -294,6 +318,16 @@ impl IncomingMessage for KafkaMessage {
     /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
         self.lane.as_deref()
+    }
+}
+
+impl Positioned for KafkaMessage {
+    type Position = KafkaPosition;
+
+    /// This delivery's own coordinates: seeking to them redelivers exactly this record (and the
+    /// ordered suffix behind it on the partition).
+    fn position(&self) -> Self::Position {
+        KafkaPosition::topic_offset(&self.topic, self.partition, self.offset)
     }
 }
 

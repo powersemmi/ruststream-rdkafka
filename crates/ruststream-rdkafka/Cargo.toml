@@ -95,6 +95,9 @@ name = "kafka_batches"
 name = "kafka_retries"
 
 [[example]]
+name = "kafka_seek"
+
+[[example]]
 name = "kafka_transactions"
 
 [[example]]

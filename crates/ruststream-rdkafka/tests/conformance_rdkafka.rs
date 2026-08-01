@@ -175,6 +175,29 @@ async fn passes_transactions_capability() {
 // The harness takes higher-ranked closures that method paths cannot satisfy.
 #[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_seeking_capability() {
+    let Some(url) = kafka_url() else { return };
+    warm_up_group_coordinator(&url).await;
+    // The suite pins exact offsets inside the subject, so a previous run's records must not
+    // survive.
+    recreate_topic(&url, "conformance.seeking").await;
+    let group = format!("conformance-seeking-{}", std::process::id());
+    capabilities::seeking(
+        || KafkaBroker::new([url.clone()]),
+        |name| {
+            KafkaTopic::new(name)
+                .group(group.clone())
+                .start(StartOffset::Earliest)
+                .commit(Commit::Tracked)
+        },
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn passes_lifecycle() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;
