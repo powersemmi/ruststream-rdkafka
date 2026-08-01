@@ -51,8 +51,8 @@ async fn handle_page(orders: &[Order]) -> HandlerResult {
 // --8<-- [start:selective]
 // Per-element settlement: entry `i` settles page element `i`. This works, but read the docs on
 // how it maps onto Kafka's one-position-per-partition commits: under `Commit::Tracked` the
-// committed position only advances up to the first non-acked element, and Kafka has no native
-// delayed redelivery, so `retry_after` degrades to a plain `retry()` hole.
+// committed position only advances up to the first non-acked element, and `retry_after` runs
+// through the runtime's deferred-republish fallback (`retry_via` below), not a native delay.
 // Wrapping the source in the core `Buffered` adapter is the opt-in for an explicit
 // size/deadline page window on top of the native batching.
 #[subscriber(batch(
@@ -82,6 +82,12 @@ async fn reconcile_page(payments: &[Payment]) -> Vec<HandlerResult> {
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+        // Kafka has no native delayed redelivery: retry_after re-publishes a delayed copy
+        // through this publisher (and settles the original, so the committed position moves).
+        // `retry_via` takes a live publisher, not a policy, so the broker mints its early
+        // publisher for it - the one handle that resolves the connection at startup.
+        let retries = b.broker().retry_publisher();
+        b.retry_via(retries);
         b.include_batch(handle_page);
         b.include_batch(reconcile_page);
     })

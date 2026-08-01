@@ -27,6 +27,19 @@ pub enum KafkaError {
     #[error("kafka consume error: {0}")]
     Consume(#[source] Box<dyn StdError + Send + Sync>),
 
+    /// A [`KafkaRetryPublisher`](crate::KafkaRetryPublisher) was used before its broker
+    /// connected.
+    ///
+    /// Only the early publisher can report this: it is the one handle minted before
+    /// [`Broker::connect`](ruststream::Broker::connect), for builder-time wiring that needs a
+    /// live publisher (`retry_via`). Everything on the policy path pairs with the connected
+    /// broker, so "not connected" is not representable there.
+    #[error("kafka broker is not connected yet; cannot reach {topic}")]
+    NotConnected {
+        /// The topic the operation targeted.
+        topic: String,
+    },
+
     /// A handle aliasing the connection was used after the broker shut down.
     ///
     /// The lifecycle ladder makes misuse through the owner's handle a compile error:

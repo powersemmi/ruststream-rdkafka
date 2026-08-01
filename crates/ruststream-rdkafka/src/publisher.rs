@@ -15,7 +15,7 @@ use ruststream::{
 use tokio::sync::OnceCell;
 use tokio::task;
 
-use crate::broker::{ConnState, ConnectedKafkaBroker};
+use crate::broker::{ConnState, ConnectedKafkaBroker, EarlyConn};
 use crate::convert;
 use crate::error::KafkaError;
 
@@ -179,6 +179,75 @@ impl Publisher for KafkaPublisher {
     async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
         self.state.ensure_open(msg.name())?;
         send_via(self.state.producer(), self.queue_timeout, msg).await
+    }
+}
+
+/// A publisher minted from an unconnected [`KafkaBroker`](crate::KafkaBroker), for the one
+/// wiring that cannot take a policy.
+///
+/// [`BrokerScope::retry_via`](ruststream::runtime::BrokerScope::retry_via) - the deferred
+/// republish behind `retry_after`, which Kafka relies on because it has no native delayed
+/// redelivery - is configured while the app builder runs and takes a live [`Publisher`], since
+/// a publisher that cannot send would be a lie. This type is the sanctioned exception that
+/// makes the pair work on a lazy-connect broker: it holds the cell
+/// [`Broker::connect`](ruststream::Broker::connect) fills, not a connection. The policy path
+/// ([`KafkaPublish`] and its transitions) is untouched and stays connection-free by
+/// construction.
+///
+/// Its two runtime checks are the aliasing rule the broker contract deliberately keeps
+/// dynamic: a handle that predates the connection, or outlives it, must surface an error rather
+/// than silently succeed. Publishing before `connect` reports [`KafkaError::NotConnected`];
+/// publishing after the connected broker shut down reports [`KafkaError::Closed`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream_rdkafka::KafkaBroker;
+///
+/// let broker = KafkaBroker::new(["localhost:9092"]);
+/// let retries = broker.retry_publisher();
+/// // ... `b.retry_via(retries)` while the app builder runs.
+/// # let _ = retries;
+/// ```
+#[derive(Clone)]
+pub struct KafkaRetryPublisher {
+    conn: EarlyConn,
+}
+
+impl fmt::Debug for KafkaRetryPublisher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaRetryPublisher")
+            .field("connected", &self.conn.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl KafkaRetryPublisher {
+    pub(crate) const fn new(conn: EarlyConn) -> Self {
+        Self { conn }
+    }
+}
+
+impl Publisher for KafkaRetryPublisher {
+    type Error = KafkaError;
+
+    /// Publishes `msg` through the broker's shared producer and awaits the delivery report.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::NotConnected`] before the broker connects,
+    /// [`KafkaError::Closed`] once it has shut down, and [`KafkaError::Publish`] when the
+    /// cluster rejects the record or the delivery times out.
+    ///
+    /// # Cancel safety
+    ///
+    /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
+    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+        let state = self.conn.get().ok_or_else(|| KafkaError::NotConnected {
+            topic: msg.name().to_owned(),
+        })?;
+        state.ensure_open(msg.name())?;
+        send_via(state.producer(), None, msg).await
     }
 }
 
@@ -653,7 +722,23 @@ impl TransactionalPartitions {
 
 #[cfg(test)]
 mod tests {
+    use crate::broker::KafkaBroker;
+
     use super::*;
+
+    #[tokio::test]
+    async fn the_early_publisher_errors_before_connect() {
+        // No I/O anywhere: the cell is simply still empty.
+        let publisher = KafkaBroker::new(["localhost:9092"]).retry_publisher();
+        let err = publisher
+            .publish(OutgoingMessage::new("orders", b"deferred".as_slice()))
+            .await
+            .expect_err("publishing before connect must error");
+        assert!(
+            matches!(&err, KafkaError::NotConnected { topic } if topic == "orders"),
+            "the error must name the topic it could not reach, got: {err}",
+        );
+    }
 
     #[test]
     fn transactional_id_is_a_type_transition() {

@@ -19,6 +19,14 @@ Where a policy is named:
 - `connected.publisher(policy)` - outside the runtime, straight off a broker you connected
   yourself (see the `kafka_producer` example).
 
+One publisher stands outside the split, deliberately. `broker.retry_publisher()` is minted from
+the *unconnected* broker for builder-time wiring that takes a live publisher rather than a
+policy - today `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
+it has no native delayed redelivery (see
+[batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)). It resolves the connection
+at startup; used before `connect` it reports `KafkaError::NotConnected`, and after the broker
+shuts down `KafkaError::Closed` - never a silent success.
+
 ## Record keys
 
 The partition-key header becomes the record's native key on publish (and is not duplicated as a
@@ -191,8 +199,9 @@ Practical notes:
   commit, not at publish.
 - `retry()` from a participant stalls its window until the transaction deadline, then aborts
   it; prefer `drop()`/dead-lettering for poison messages in EOS handlers.
-- The `retry_after` deferred-republish fallback does not apply to EOS replies: a delayed copy
-  would break the offset-record pairing.
+- The `retry_after` deferred-republish fallback (`retry_via`, see
+  [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)) does not apply to EOS
+  replies: a delayed copy would break the offset-record pairing.
 - The reply publisher pairs only with `Commit::Transactional` subscriptions naming this
   pipeline's id; a reply from any other subscription fails with a clear error instead of
   silently downgrading the guarantee.
