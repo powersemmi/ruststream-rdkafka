@@ -2,12 +2,18 @@
 //! key, so every message for one key lands on one partition, in order (consume it with the
 //! `kafka_keys` example).
 //!
+//! Its subject is the low-level surface itself: a hand-written `main` climbing the lifecycle
+//! ladder (`new` -> `connect` -> `shutdown`) and publishing through a paired handle, with no
+//! application runtime around it. A service uses `#[ruststream::app]` instead, where the
+//! runtime climbs the same ladder (see the other examples).
+//!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_producer
 //! ```
 
-use ruststream::Broker;
+use ruststream::{Broker, ConnectedBroker};
+use ruststream_rdkafka::KafkaPublish;
 
 // --8<-- [start:producer]
 use ruststream::{Headers, OutgoingMessage, Publisher};
@@ -51,8 +57,10 @@ async fn publish_pinned(
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), KafkaError> {
-    let broker = KafkaBroker::connect(["localhost:9092"]).await?;
-    let publisher = broker.publisher();
+    // `new` is pure configuration; `connect` does the I/O and yields the connected form, the
+    // only place a live publisher comes from.
+    let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    let publisher = connected.publisher(KafkaPublish::default());
 
     for id in 0..8 {
         let tenant = if id % 2 == 0 { "acme" } else { "globex" };
@@ -60,7 +68,12 @@ async fn main() -> Result<(), KafkaError> {
     }
     publish_pinned(&publisher, 8, 0).await?;
 
-    broker.shutdown().await?;
-    println!("published 8 keyed orders and 1 pinned order");
+    // `shutdown` consumes the connected form, so publishing afterwards does not compile here;
+    // the closed witness carries the teardown diagnostics.
+    let closed = connected.shutdown().await?;
+    println!(
+        "published 8 keyed orders and 1 pinned order, {} records left unflushed",
+        closed.unflushed_records()
+    );
     Ok(())
 }

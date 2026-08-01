@@ -10,7 +10,7 @@
 
 use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
 use ruststream::subscriber;
-use ruststream_rdkafka::{KafkaBroker, RoundRobin};
+use ruststream_rdkafka::{KafkaBroker, KafkaPublish, RoundRobin};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -38,9 +38,11 @@ fn app() -> impl App {
         // message each. Replies that already carry an explicit partition or a record key are
         // left alone - keys exist for ordering, and the transform must not break placement
         // the handler chose. The count is explicit and must match the destination topic.
+        // The transform stacks on the publish policy; the runtime pairs it into the live
+        // publisher once the broker is connected.
         let work_items =
-            TypedPublisher::new(b.broker().publisher()).transform(RoundRobin::partitions(8));
-        b.include_publishing(plan, work_items);
+            TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(8));
+        b.include(plan).publisher(work_items);
         // --8<-- [end:round_robin]
     })
 }

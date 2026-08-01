@@ -1,9 +1,9 @@
 //! A minimal Kafka service: one `#[subscriber]` handler on one topic.
 //!
-//! `KafkaBroker::new` is synchronous and does no I/O, so the whole service fits the
-//! `#[ruststream::app]` macro. The runtime connects the broker once at startup
-//! (`Broker::connect`) before opening subscriptions, and the generated binary understands
-//! `run` and `asyncapi gen`.
+//! `KafkaBroker::new` only records configuration, so the whole service fits the
+//! `#[ruststream::app]` macro. The runtime climbs the lifecycle ladder for it: `Broker::connect`
+//! once at startup, then every subscription against the connected broker, then `shutdown`. The
+//! generated binary understands `run` and `asyncapi gen`.
 //!
 //! The bare-string subscriber form consumes the topic named `orders` through the broker's
 //! default consumer group (Kafka cannot subscribe without a group). Start a broker first:
