@@ -8,7 +8,7 @@
 //! cargo run --example kafka_protobuf --features protobuf -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream::subscriber;
 use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry, SchemaType};
 use serde::{Deserialize, Serialize};
@@ -55,8 +55,6 @@ fn app() -> impl App {
         .default_group("orders-svc")
         .schema_registry(sr.clone());
 
-    let confirmations = TypedPublisher::new(broker.publisher());
-
     // The reply subject holds a Protobuf schema, so replies go out as framed Protobuf; the
     // message defaults to the schema's first top-level one (pin another per topic with
     // `.message("confirmations", "acme.Confirmation")`).
@@ -72,7 +70,9 @@ fn app() -> impl App {
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {
-            b.include_publishing(confirm, confirmations);
+            // The reply rides the broker's default publish policy, so the include site names
+            // no publisher.
+            b.include(confirm);
         })
     // --8<-- [end:wiring]
 }

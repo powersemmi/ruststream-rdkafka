@@ -9,7 +9,7 @@
 //! cargo run --example kafka_schema_registry --features schema-registry -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream::subscriber;
 use ruststream_rdkafka::schema_registry::JsonSchema;
 use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry};
@@ -54,8 +54,6 @@ fn app() -> impl App {
         .default_group("orders-svc")
         .schema_registry(sr.clone());
 
-    let confirmations = TypedPublisher::new(broker.publisher());
-
     RustStream::new(AppInfo::new("orders", "0.1.0"))
         .publish_layer(SchemaFrame::new(sr.clone()))
         // Producers own their schemas: register (or `warm`) the reply subject at startup.
@@ -65,7 +63,9 @@ fn app() -> impl App {
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {
-            b.include_publishing(confirm, confirmations);
+            // The reply rides the broker's default publish policy, so the include site names
+            // no publisher.
+            b.include(confirm);
         })
     // --8<-- [end:wiring]
 }
