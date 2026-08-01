@@ -17,7 +17,7 @@ use rdkafka::producer::FutureRecord;
 use rdkafka::util::Timeout;
 use ruststream::Headers;
 
-use crate::broker::SharedConn;
+use crate::broker::ConnState;
 use crate::convert;
 use crate::error::KafkaError;
 use crate::tracker::TrackingContext;
@@ -62,7 +62,7 @@ pub(crate) struct RetryContext {
     policy: Option<Retry>,
     max_deliveries: Option<u32>,
     dead_letter: Option<String>,
-    conn: SharedConn,
+    state: Arc<ConnState>,
     consumer: Arc<StreamConsumer<TrackingContext>>,
     /// In-session delivery counts for `SeekBack`, keyed by the seeked offset. Entries are
     /// removed when the offset resolves to the drop path; a poison offset therefore holds at
@@ -85,14 +85,14 @@ impl RetryContext {
         policy: Option<Retry>,
         max_deliveries: Option<u32>,
         dead_letter: Option<String>,
-        conn: SharedConn,
+        state: Arc<ConnState>,
         consumer: Arc<StreamConsumer<TrackingContext>>,
     ) -> Self {
         Self {
             policy,
             max_deliveries,
             dead_letter,
-            conn,
+            state,
             consumer,
             seeks: Mutex::new(HashMap::new()),
         }
@@ -159,7 +159,7 @@ impl RetryContext {
         payload: &[u8],
         headers: &Headers,
     ) -> Result<(), KafkaError> {
-        let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
+        self.state.ensure_open(topic)?;
         let parts = convert::headers_for_publish(headers)?;
         let mut record = FutureRecord::<[u8], [u8]>::to(topic).payload(payload);
         if let Some(key) = &parts.key {
@@ -171,7 +171,7 @@ impl RetryContext {
         if let Some(native) = parts.headers {
             record = record.headers(native);
         }
-        state
+        self.state
             .producer()
             .send(record, Timeout::Never)
             .await

@@ -6,10 +6,13 @@
 #![cfg(feature = "schema-registry")]
 
 use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
-use ruststream::{Broker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber};
+use ruststream::{
+    Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber,
+};
 use ruststream_rdkafka::schema_registry::{JsonSchema, parse_envelope};
 use ruststream_rdkafka::{
-    KafkaBroker, KafkaError, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
+    ConnectedKafkaBroker, KafkaBroker, KafkaError, KafkaPublish, KafkaTopic, SchemaFrame,
+    SchemaRegistry, SchemaType, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use wiremock::matchers::{basic_auth, body_partial_json, method, path};
@@ -188,14 +191,14 @@ async fn relay(order: &SrOrder) -> SrOrder {
 
 /// Scans `topic` from the earliest offset until `pick` accepts a payload, returning it.
 async fn scan_topic(
-    broker: &KafkaBroker,
+    broker: &ConnectedKafkaBroker,
     topic: &str,
     pick: impl Fn(&[u8]) -> bool + Send + Sync,
 ) -> Vec<u8> {
     use futures::StreamExt;
 
     let mut subscriber = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(topic)
                 .group(unique("scan"))
                 .start(StartOffset::Earliest),
@@ -251,31 +254,34 @@ async fn live_json_frame_and_transcode_end_to_end() {
         .expect("register");
 
     // Seed the trigger before the app starts (its handler reads from the earliest offset).
-    let seed_broker = KafkaBroker::new([kafka.clone()]);
-    Broker::connect(&seed_broker).await.expect("connect seed");
+    let seed_broker = KafkaBroker::new([kafka.clone()])
+        .connect()
+        .await
+        .expect("connect seed");
     seed_broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(
             &trigger,
             format!(r#"{{"id":{marker}}}"#).as_bytes(),
         ))
         .await
         .expect("seed trigger");
-    Broker::shutdown(&seed_broker).await.expect("seed shutdown");
+    seed_broker.shutdown().await.expect("seed shutdown");
 
-    let app_broker = KafkaBroker::new([kafka.clone()]);
-    let replies = TypedPublisher::new(app_broker.publisher());
+    let replies = TypedPublisher::new(KafkaPublish::default());
     let app = RustStream::new(AppInfo::new("sr-json", "0.0.0"))
         .publish_layer(SchemaFrame::new(SchemaRegistry::new(&registry)))
-        .with_broker(app_broker, |b| {
-            b.include_publishing(relay, replies);
+        .with_broker(KafkaBroker::new([kafka.clone()]), |b| {
+            b.include(relay).publisher(replies);
         });
 
     let registry_for_wait = registry.clone();
     let wait = async move {
         // A registry-less consumer sees the raw wire: the reply must carry the envelope.
-        let raw_broker = KafkaBroker::new([kafka.clone()]);
-        Broker::connect(&raw_broker).await.expect("connect raw");
+        let raw_broker = KafkaBroker::new([kafka.clone()])
+            .connect()
+            .await
+            .expect("connect raw");
         let framed = scan_topic(&raw_broker, FRAMED_TOPIC, |payload| {
             parse_envelope(payload).is_some_and(|(_, datum)| {
                 serde_json::from_slice::<SrOrder>(datum).is_ok_and(|order| order.id == marker)
@@ -287,12 +293,13 @@ async fn live_json_frame_and_transcode_end_to_end() {
             wire_id, id,
             "the envelope must carry the subject's schema id"
         );
-        Broker::shutdown(&raw_broker).await.expect("raw shutdown");
+        raw_broker.shutdown().await.expect("raw shutdown");
 
         // A transcoding consumer (cold client) sees plain JSON and warms its cache.
         let consumer_sr = SchemaRegistry::new(&registry_for_wait);
-        let transcoding_broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
-        Broker::connect(&transcoding_broker)
+        let transcoding_broker = KafkaBroker::new([kafka])
+            .schema_registry(consumer_sr.clone())
+            .connect()
             .await
             .expect("connect transcoding");
         let plain = scan_topic(&transcoding_broker, FRAMED_TOPIC, |payload| {
@@ -307,7 +314,8 @@ async fn live_json_frame_and_transcode_end_to_end() {
             consumer_sr.cached_schema(id).is_some(),
             "the middleware fetched the schema into the cold client's cache",
         );
-        Broker::shutdown(&transcoding_broker)
+        transcoding_broker
+            .shutdown()
             .await
             .expect("transcoding shutdown");
     };

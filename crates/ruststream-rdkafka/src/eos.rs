@@ -23,11 +23,14 @@ use ruststream::runtime::{
     Outgoing, PublishContext, PublishTransform, PublishTransformIdentity, PublishTransformStack,
     TypedPublisher,
 };
-use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher as _};
+use ruststream::{
+    OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
+};
 use tracing::{debug, error};
 
+use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
-use crate::publisher::KafkaPublisher;
+use crate::publisher::{KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The Kafka Streams default for exactly-once commit intervals.
@@ -130,10 +133,10 @@ struct Window {
 }
 
 struct PipelineInner {
-    publisher: KafkaPublisher,
+    publisher: KafkaTransactionalPublisher,
     /// The pipeline id: the publisher's transactional id, which `Commit::Transactional`
     /// subscriptions name to register their offsets here.
-    id: Option<String>,
+    id: String,
     interval: Duration,
     window: Mutex<Window>,
     /// Woken on every phase transition; publishers waiting for admission re-check then.
@@ -146,20 +149,90 @@ struct PipelineInner {
     session_low: Mutex<HashMap<(String, i32), i64>>,
 }
 
-/// An exactly-once pipeline over one transactional producer.
+/// The publish policy of [`EosPipeline`]: the pipeline id (the producer's transactional id)
+/// plus the commit interval, declared anywhere and paired with the connected broker at startup.
 ///
 /// Wiring, all three naming the same id:
 ///
-/// 1. The publisher: `broker.publisher().transactional_id("pipeline-1")`.
+/// 1. The policy: `KafkaEosPublish::new("pipeline-1")`, attached at the include site
+///    (`b.include(handler).publisher(policy)`) or bound for an `after_startup` hook.
 /// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
 ///    stops committing offsets on its own and registers with the pipeline instead.
-/// 3. The pipeline: `EosPipeline::new(publisher)`, held in the application state; handlers
-///    call [`publish`](Self::publish) with the delivery's [`SourceOffset`].
+/// 3. The handler: it receives the paired [`EosPipeline`] and calls
+///    [`publish`](EosPipeline::publish) with the delivery's [`SourceOffset`].
 ///
-/// Every [`commit_interval`](Self::commit_interval) the pipeline closes the window: it waits
-/// until every delivery that published into it has settled (the shared watermark reached the
-/// enrolled offsets), adds the settled source positions and their group metadata to the
-/// transaction, and commits. On any failure - a failed publish, a settle stall (a handler
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use ruststream_rdkafka::KafkaEosPublish;
+///
+/// let policy = KafkaEosPublish::new("enrich-1").commit_interval(Duration::from_millis(50));
+/// # let _ = policy;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaEosPublish {
+    transactional: KafkaTransactionalPublish,
+    interval: Duration,
+}
+
+impl KafkaEosPublish {
+    /// Declares a pipeline fenced by `id`, which doubles as the pipeline id that
+    /// `Commit::Transactional` subscriptions register under.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            transactional: KafkaPublish::default().transactional_id(id),
+            interval: DEFAULT_COMMIT_INTERVAL,
+        }
+    }
+
+    /// How long a window stays open before committing; defaults to 100ms (the Kafka Streams
+    /// exactly-once default). Longer intervals amortize the commit over more records at the
+    /// cost of end-to-end latency (records become visible only at the commit).
+    pub const fn commit_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// See [`KafkaTransactionalPublish::transaction_timeout`]; it doubles as the deadline a
+    /// window waits for its participants to settle.
+    pub fn transaction_timeout(mut self, timeout: Duration) -> Self {
+        self.transactional = self.transactional.transaction_timeout(timeout);
+        self
+    }
+
+    /// See [`KafkaPublish::queue_timeout`].
+    pub fn queue_timeout(mut self, timeout: Duration) -> Self {
+        self.transactional = self.transactional.queue_timeout(timeout);
+        self
+    }
+
+    /// The pipeline id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.transactional.id()
+    }
+}
+
+impl PublishPolicy<ConnectedKafkaBroker> for KafkaEosPublish {
+    type Live = EosPipeline;
+
+    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
+        let interval = self.interval;
+        let publisher = self.transactional.pair(connected).await?;
+        Ok(EosPipeline::new(publisher, interval))
+    }
+}
+
+/// An exactly-once pipeline over one transactional producer, the live form of
+/// [`KafkaEosPublish`].
+///
+/// Every [`commit_interval`](KafkaEosPublish::commit_interval) the pipeline closes the window:
+/// it waits until every delivery that published into it has settled (the shared watermark
+/// reached the enrolled offsets), adds the settled source positions and their group metadata to
+/// the transaction, and commits. On any failure - a failed publish, a settle stall (a handler
 /// hanging or `retry()`-ing past the publisher's transaction timeout), a rebalance revoking
 /// an enrolled partition, a commit error - the window aborts and the consumers seek back, so
 /// the whole window redelivers and republishes into a fresh transaction; committed output
@@ -183,41 +256,12 @@ impl std::fmt::Debug for EosPipeline {
 }
 
 impl EosPipeline {
-    /// Builds the pipeline over `publisher`, which must carry a
-    /// [`transactional_id`](KafkaPublisher::transactional_id) - it doubles as the pipeline id
-    /// that `Commit::Transactional` subscriptions register under. A publisher without one
-    /// fails the first publish with a clear error.
-    #[must_use]
-    pub fn new(publisher: KafkaPublisher) -> Self {
-        let id = publisher.transactional_id_str().map(str::to_owned);
+    fn new(publisher: KafkaTransactionalPublisher, interval: Duration) -> Self {
+        let id = publisher.id().to_owned();
         Self {
             inner: Arc::new(PipelineInner {
                 publisher,
                 id,
-                interval: DEFAULT_COMMIT_INTERVAL,
-                window: Mutex::new(Window {
-                    phase: Phase::Idle,
-                    enrolled: HashMap::new(),
-                    failed: false,
-                    epoch: 0,
-                }),
-                phase_changed: tokio::sync::Notify::new(),
-                committed: Mutex::new(HashMap::new()),
-                session_low: Mutex::new(HashMap::new()),
-            }),
-        }
-    }
-
-    /// How long a window stays open before committing; defaults to 100ms (the Kafka Streams
-    /// exactly-once default). Longer intervals amortize the commit over more records at the
-    /// cost of end-to-end latency (records become visible only at the commit). Configure
-    /// before handing the pipeline out.
-    #[must_use]
-    pub fn commit_interval(self, interval: Duration) -> Self {
-        Self {
-            inner: Arc::new(PipelineInner {
-                publisher: self.inner.publisher.clone(),
-                id: self.inner.id.clone(),
                 interval,
                 window: Mutex::new(Window {
                     phase: Phase::Idle,
@@ -232,6 +276,13 @@ impl EosPipeline {
         }
     }
 
+    /// The pipeline id: the transactional id its producer is fenced by, and the id
+    /// `Commit::Transactional` subscriptions register under.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.inner.id
+    }
+
     /// Publishes `msg` into the pipeline's open window on behalf of the delivery at `source`.
     ///
     /// The record joins the window's transaction and becomes visible at its commit, atomically
@@ -240,10 +291,9 @@ impl EosPipeline {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the publisher carries no transactional id,
-    /// [`KafkaError::NotConnected`] before `Broker::connect`, and [`KafkaError::Publish`] when
-    /// opening the transaction or producing the record fails - the window aborts and
-    /// redelivers, so failing the handler (`retry()`) is the right response.
+    /// Returns [`KafkaError::Closed`] once the broker has shut down and
+    /// [`KafkaError::Publish`] when opening the transaction or producing the record fails - the
+    /// window aborts and redelivers, so failing the handler (`retry()`) is the right response.
     ///
     /// # Cancel safety
     ///
@@ -391,7 +441,7 @@ async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
     if let Err(err) = outcome {
         error!(
             target: "ruststream_rdkafka",
-            pipeline = inner.id.as_deref().unwrap_or("<no id>"),
+            pipeline = %inner.id,
             error = %err,
             "EOS window aborted; its sources seek back and the window redelivers",
         );
@@ -404,15 +454,10 @@ async fn commit_window(
     inner: &Arc<PipelineInner>,
     enrolled: &HashMap<(String, i32), i64>,
 ) -> Result<(), KafkaError> {
-    let id = inner.id.clone().ok_or_else(|| {
-        KafkaError::InvalidOptions(
-            "an EosPipeline publisher needs `KafkaPublisher::transactional_id`".to_owned(),
-        )
-    })?;
-    let conn = inner.publisher.shared_conn();
-    let state = conn.get().ok_or(KafkaError::NotConnected)?;
-    let sources: Vec<LiveSource> = state
-        .eos_sources(&id)
+    let sources: Vec<LiveSource> = inner
+        .publisher
+        .state()
+        .eos_sources(&inner.id)
         .iter()
         .filter_map(EosSource::upgrade)
         .collect();
@@ -448,7 +493,7 @@ async fn wait_settled(
     sources: &[LiveSource],
     enrolled: &HashMap<(String, i32), i64>,
 ) -> Result<(), KafkaError> {
-    let deadline = tokio::time::Instant::now() + inner.publisher.transaction_deadline();
+    let deadline = tokio::time::Instant::now() + inner.publisher.deadline();
     loop {
         // Waiters first, condition second: an advance between the two is caught by the
         // already-registered waiters.
@@ -618,8 +663,8 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 /// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
 /// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
 ///
-/// [`EosPipeline::replies`] wires it for you; name it directly to keep the explicit
-/// `TypedPublisher` form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+/// [`KafkaEosPublish::replies`] wires it for you; name it directly to keep the explicit
+/// `TypedPublisher` form: `TypedPublisher::new(policy).transform(EosReplies)`.
 /// Generic over the handler's context type, so bare handlers (no ctx parameter, no `Ctx`
 /// extractors) work.
 #[derive(Debug, Clone, Copy, Default)]
@@ -634,7 +679,7 @@ impl<C> PublishTransform<C> for EosReplies {
     }
 }
 
-impl EosPipeline {
+impl KafkaEosPublish {
     /// A reply publisher for `#[subscriber(.., publish("replies"))]` handlers: every reply
     /// joins the pipeline's open window paired with its delivery's consumed offset, making the
     /// publishing-handler form exactly-once end to end - the handler just returns the value.
@@ -644,38 +689,36 @@ impl EosPipeline {
     /// subscription fails with a clear error. The `retry_after` deferred-republish fallback
     /// does not apply to these replies: a delayed copy would break the offset-record pairing.
     ///
-    /// Equivalent explicit form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+    /// Equivalent explicit form: `TypedPublisher::new(policy).transform(EosReplies)`.
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use ruststream_rdkafka::{EosPipeline, KafkaBroker};
+    /// ```
+    /// use ruststream_rdkafka::KafkaEosPublish;
     ///
-    /// let broker = KafkaBroker::new(["localhost:9092"]);
-    /// let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-1"));
-    /// let replies = pipeline.replies();
-    /// // b.include_publishing(enrich, replies);
+    /// let replies = KafkaEosPublish::new("enrich-1").replies();
+    /// // b.include(enrich).publisher(replies);
     /// # let _ = replies;
     /// ```
     #[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
     #[must_use]
     pub fn replies(
-        &self,
+        self,
     ) -> TypedPublisher<
         Self,
         DefaultCodec,
         PublishTransformStack<PublishTransformIdentity, EosReplies>,
     > {
-        TypedPublisher::new(self.clone()).transform(EosReplies)
+        TypedPublisher::new(self).transform(EosReplies)
     }
 
     /// Like [`replies`](Self::replies), with an explicit codec instead of the default one.
     #[must_use]
     pub fn replies_with<C: Codec>(
-        &self,
+        self,
         codec: C,
     ) -> TypedPublisher<Self, C, PublishTransformStack<PublishTransformIdentity, EosReplies>> {
-        TypedPublisher::with_codec(self.clone(), codec).transform(EosReplies)
+        TypedPublisher::with_codec(self, codec).transform(EosReplies)
     }
 }
 
@@ -690,7 +733,7 @@ impl Publisher for EosPipeline {
     /// Returns [`KafkaError::InvalidOptions`] when the header is missing or malformed - the
     /// originating subscription is not in `Commit::Transactional` mode for this pipeline, or
     /// the reply publisher was wired without [`EosReplies`] (use
-    /// [`replies`](EosPipeline::replies)); otherwise as
+    /// [`replies`](KafkaEosPublish::replies)); otherwise as
     /// [`EosPipeline::publish`](EosPipeline::publish).
     ///
     /// # Cancel safety
@@ -705,7 +748,7 @@ impl Publisher for EosPipeline {
             return Err(KafkaError::InvalidOptions(
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
-                 relay them (wire it with `EosPipeline::replies()` or add the `EosReplies` \
+                 relay them (wire it with `KafkaEosPublish::replies()` or add the `EosReplies` \
                  transform)"
                     .to_owned(),
             ));
@@ -719,8 +762,6 @@ impl Publisher for EosPipeline {
 
 #[cfg(test)]
 mod tests {
-    use ruststream::Headers;
-
     use super::*;
 
     #[test]
@@ -737,14 +778,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn reply_without_source_coordinates_fails_clearly() {
-        let pipeline = EosPipeline::new(KafkaPublisher::new(Arc::default()).transactional_id("p1"));
-        let err = Publisher::publish(&pipeline, OutgoingMessage::new("replies", b"x".as_slice()))
-            .await
-            .expect_err("a reply without the source header must fail");
-        assert!(matches!(err, KafkaError::InvalidOptions(_)));
-        assert!(err.to_string().contains("Commit::Transactional"));
-        let _ = Headers::new();
+    #[test]
+    fn the_policy_carries_the_pipeline_id_and_interval() {
+        let policy = KafkaEosPublish::new("enrich-1").commit_interval(Duration::from_millis(250));
+        assert_eq!(policy.id(), "enrich-1");
+        assert_eq!(policy.interval, Duration::from_millis(250));
     }
 }

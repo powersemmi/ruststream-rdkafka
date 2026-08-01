@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ruststream::{OutgoingMessage, Publisher};
+use ruststream::{DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher};
 
-use super::broker::TestBrokerState;
+use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
 use crate::error::KafkaError;
+use crate::publisher::KafkaPublish;
 
 /// Publisher into the in-process router.
 ///
@@ -23,6 +24,20 @@ impl KafkaTestPublisher {
     }
 }
 
+/// The in-process broker pairs the real [`KafkaPublish`] policy, so an application's include
+/// sites and routers compile unchanged against either broker.
+impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaPublish {
+    type Live = KafkaTestPublisher;
+
+    async fn pair(self, connected: &ConnectedKafkaTestBroker) -> Result<Self::Live, PairError> {
+        Ok(connected.publisher(self))
+    }
+}
+
+impl DefaultPublish for ConnectedKafkaTestBroker {
+    type Policy = KafkaPublish;
+}
+
 impl Publisher for KafkaTestPublisher {
     type Error = KafkaError;
 
@@ -30,7 +45,8 @@ impl Publisher for KafkaTestPublisher {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty.
+    /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty, and
+    /// [`KafkaError::Closed`] once the transport this handle aliases has been shut down.
     async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
         if msg.name().is_empty() {
             return Err(KafkaError::InvalidOptions(
@@ -39,6 +55,7 @@ impl Publisher for KafkaTestPublisher {
                     .to_owned(),
             ));
         }
+        self.state.ensure_open(msg.name())?;
         self.state.router.publish(
             msg.name(),
             &Bytes::copy_from_slice(msg.payload()),
