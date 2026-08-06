@@ -57,8 +57,9 @@ Negative settlement under `Tracked`:
 - `nack(true)` (requeue) leaves the offset unsettled: the committed position stays below it, so
   Kafka redelivers from there when the partition is next fetched (a rebalance or a restart).
   The unsettled offset also blocks the watermark, keeping every later ack uncommitted until
-  then - precise, but worth knowing when a handler nacks in a loop. Retry topics, seek-back
-  redelivery, and dead-letter routing are planned descriptor options.
+  then: precise, and a handler that nacks in a loop holds the committed position back. Retry
+  topics, seek-back redelivery, and dead-letter routing are descriptor options, see
+  [Retries and dead-lettering](#retries-and-dead-lettering).
 
 ## Multiple topics and patterns
 
@@ -93,9 +94,8 @@ custom group assignors.
 
 `KafkaTopic::partitions` switches the subscription from the group protocol (`subscribe`) to
 manual assignment (`assign`): the consumer takes exactly the named partitions of the topic -
-no group membership, no rebalancing. It is the honest answer to "consume exactly these
-partitions": static pinning, inspection and replay readers, one-consumer-per-partition
-deployments.
+no group membership, no rebalancing. It covers consuming exactly these partitions: static
+pinning, inspection and replay readers, one-consumer-per-partition deployments.
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_topics.rs:assign"
@@ -112,11 +112,11 @@ does not combine with `and_topic`/`pattern` (it names exact partitions of one to
 `Commit::Transactional`, and the in-process test broker rejects it (it does not simulate
 partitions).
 
-Manual assignment composes with keyed worker lanes out of the box: under the default
-`LaneKey::Partition` each assigned partition lanes independently, so
-`partitions([0, 2, 5])` + `workers(n, by_key)` processes every assigned partition in order on
-its lane. Sizing `n` against the partition list is your call - fewer lanes than partitions
-means partitions share lanes (ordering still holds), more means idle lanes.
+Manual assignment composes with keyed worker lanes: under the default `LaneKey::Partition`
+each assigned partition lanes independently, so `partitions([0, 2, 5])` +
+`workers(n, by_key)` processes every assigned partition in order on its lane. Size `n` against
+the partition list - fewer lanes than partitions means partitions share lanes (ordering still
+holds), more means idle lanes.
 
 ## Repositioning a subscription
 
@@ -151,7 +151,7 @@ construction:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:handler"
 ```
 
-Three things about the scope and the bookkeeping are worth stating plainly:
+The scope and the bookkeeping:
 
 - **A seek moves this consumer instance, not the group.** It repositions the partitions this
   member currently holds; other members keep reading where they are, and nothing is committed
@@ -248,9 +248,9 @@ no crate-imposed knobs. Page size is bounded by librdkafka's own fetch-queue lim
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
 ```
 
-Need an explicit page window instead? The core `Buffered` adapter wraps any source and closes
-a page at `max_size` deliveries or `max_wait` after the first one (see the second handler in
-the example below). Batch handlers mount with `include_batch`:
+For an explicit page window, the core `Buffered` adapter wraps any source and closes a page at
+`max_size` deliveries or `max_wait` after the first one (see the second handler in the example
+below). Batch handlers mount with `include_batch`:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"
@@ -269,9 +269,9 @@ Kafka commits one position per partition, not per message, so the outcomes map a
 (everything below assumes `Commit::Tracked`; under `Commit::Auto` every settlement is an
 advisory no-op and none of it applies):
 
-- **Uniform `Ack`** - works exactly as expected: the page settles, the position advances.
-- **Per-element with `Ack`s only** - also exact: acks may even land out of order across
-  concurrent pages, the position always advances to just below the lowest unsettled delivery.
+- **Uniform `Ack`** - the page settles, the position advances.
+- **Per-element with `Ack`s only** - also exact: acks may land out of order across concurrent
+  pages, the position always advances to just below the lowest unsettled delivery.
 - **Per-element with a `retry()` in the middle** - the runtime does settle each element
   individually, but the committed position stops in front of the first retried element and
   stays there until that offset redelivers (the next fetch of the partition: a rebalance or a

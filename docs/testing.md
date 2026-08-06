@@ -27,9 +27,9 @@ finished state - no sleeps:
 ## What the test broker does not simulate
 
 The in-process broker implements the core routing contract: exact topic-name fanout,
-settlement, headers, and the partition-key header. It deliberately does not simulate Kafka
-itself - consumer groups, partitions, committed positions, start offsets, rebalancing, and
-retention are transport behavior. `nack(true)` redelivers immediately in-process, while the
+settlement, headers, and the partition-key header. It does not simulate Kafka itself: consumer
+groups, partitions, committed positions, start offsets, rebalancing, and retention are
+transport behavior. `nack(true)` redelivers immediately in-process, while the
 real transport redelivers from the committed position on the next fetch.
 
 Exercise the real semantics against a live cluster:

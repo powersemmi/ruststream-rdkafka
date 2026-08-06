@@ -19,7 +19,7 @@ Where a policy is named:
 - `connected.publisher(policy)` - outside the runtime, straight off a broker you connected
   yourself (see the `kafka_producer` example).
 
-One publisher stands outside the split, deliberately. `broker.retry_publisher()` is minted from
+One publisher stands outside the split. `broker.retry_publisher()` is minted from
 the *unconnected* broker for builder-time wiring that takes a live publisher rather than a
 policy - today `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
 it has no native delayed redelivery (see
@@ -120,9 +120,8 @@ The id is picked at the include site, one per concurrent producer:
 Two Kafka facts shape everything here: one producer runs one transaction at a time, and one
 transactional id belongs to one live producer (initializing a second fences the first). A
 `workers(n, by_key)` pool therefore cannot share a single transactional publisher - a second
-`begin_transaction` while one is open is a `TransactionBusy` error, deliberately: silently
-merging two lanes' messages into one transaction would commit one flow's records with the
-other's.
+`begin_transaction` while one is open is a `TransactionBusy` error: silently merging two lanes'
+messages into one transaction would commit one flow's records with the other's.
 
 The scope that composes with a worker pool is the source partition. Under the default
 `LaneKey::Partition` lanes a partition's deliveries process serially on one lane, so the
@@ -141,7 +140,7 @@ The include site names the base id:
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 
-This deliberately does not compose with `LaneKey::RecordKey` pools: record-key lanes spread
+This does not compose with `LaneKey::RecordKey` pools: record-key lanes spread
 one partition across lanes, two lanes would collide on its publisher, and a per-lane id scheme
 would tie fencing identity to a runtime knob (`n`) instead of a Kafka-native unit. Sharing one
 id across a pool is the exactly-once pipeline below.
