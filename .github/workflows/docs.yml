@@ -5,7 +5,7 @@ on:
     branches: [main, "0.5.*"]
     paths: &docs-paths
       - "docs/**"
-      - "mkdocs.yml"
+      - "properdocs.yml"
       - "overrides/**"
       - "crates/ruststream-rdkafka/examples/**"
       - "scripts/lint_doc_fences.py"
@@ -43,5 +43,5 @@ jobs:
       - name: Lint doc fences
         run: python3 scripts/lint_doc_fences.py
 
-      - name: mkdocs build
-        run: mkdocs build --strict
+      - name: properdocs build
+        run: properdocs build --strict
