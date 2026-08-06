@@ -65,6 +65,21 @@ with no publish surface of its own. The include site names the policy
 into the **live** publisher the handler receives. A handler that only replies to its
 `publish("dest")` topic names nothing at all: the broker's default policy is used.
 
+## Capabilities
+
+The framework's optional capability traits, and which of them this broker implements natively:
+
+| Capability | Native | Detail |
+|---|---|---|
+| `Subscribe` | yes | A bare-string `#[subscriber("orders")]` resolves through the broker's [default consumer group](topics.md#consumer-groups). |
+| `BatchSubscriber` | yes | A page is one delivery plus everything librdkafka has already fetched, with no added waiting: [Batches](topics.md#batches). |
+| `TransactionalPublisher` | yes | `KafkaTransactionalPublisher` drives the producer's transaction API, one open transaction per handle: [Transactions](publishing.md#transactions). |
+| `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows use [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
+| `RequestReply` | no | The protocol has no reply correlation; request/reply on Kafka is an application-level reply topic plus a correlation header. |
+| `Partitioned` | yes | The partition key of a delivery is the record's native Kafka key: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
+| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, and every delivery carries its topic-partition-offset: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
+| `DescribeServer` | yes | The broker reports its bootstrap servers under the `kafka` protocol for generated AsyncAPI documents. |
+
 ## Scaffold a service
 
 ```text
