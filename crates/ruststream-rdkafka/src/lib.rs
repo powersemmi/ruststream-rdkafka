@@ -45,7 +45,7 @@
 //! shutdown keep aliasing the closed connection, so their operations report
 //! [`KafkaError::Closed`] rather than succeeding against a dead connection.
 //!
-//! One publisher stands outside that split, on purpose: [`KafkaRetryPublisher`], minted from
+//! One publisher stands outside that split: [`KafkaRetryPublisher`], minted from
 //! the unconnected broker for builder-time wiring that takes a live publisher rather than a
 //! policy - `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
 //! it has no native delayed redelivery. See its documentation.

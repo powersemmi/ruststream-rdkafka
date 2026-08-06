@@ -94,5 +94,5 @@ pipeline and publishes exactly what it is given.
     --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf.rs:wiring"
     ```
 
-The transcoding trade-off is deliberate: one JSON hop per message on registry topics buys a
+The transcoding trade-off: one JSON hop per message on registry topics buys a
 single uniform handler model - the same struct, the same codec, any wire format.
