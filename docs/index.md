@@ -6,8 +6,8 @@
 
 ```toml
 [dependencies]
-ruststream = { version = "0.5", features = ["macros", "json"] }
-ruststream-rdkafka = "0.5"
+ruststream = { version = "0.6", features = ["macros", "json"] }
+ruststream-rdkafka = "0.6"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -34,9 +34,36 @@ A minimal service is one handler and one app function:
 - Configuration delegates to librdkafka: unset options mean librdkafka defaults, and raw
   `config(key, value)` passthroughs on the broker, the producer, and the descriptor reach every
   property this crate does not surface as a typed option.
-- Lazy startup: `KafkaBroker::new` is synchronous and I/O-free, so a service composes with the
-  synchronous `#[ruststream::app]` builder; the real network work happens in the idempotent
-  async `Broker::connect`.
+
+## The lifecycle ladder
+
+Each state of the connection is its own type, so out-of-order use does not compile:
+
+```text
+KafkaBroker::new(servers)          configuration only, synchronous, no I/O
+  |
+  | .connect().await?              creates the producer, probes the cluster
+  v
+ConnectedKafkaBroker               subscriptions and live publishers hang off this
+  |
+  | .shutdown().await?             flushes in-flight publishes
+  v
+ClosedKafkaBroker                  terminal witness: unflushed_records()
+```
+
+`KafkaBroker::new` recording configuration instead of connecting is what lets a service compose
+with the synchronous `#[ruststream::app]` builder: the runtime calls `connect` once at startup,
+opens every subscription against the connected form, and shuts it down at the end. Only the
+owner of the handle gets the compile-time guarantee - handles that alias the connection
+(publishers paired earlier, subscribers still open) report `KafkaError::Closed` after the
+shutdown instead of succeeding against a dead connection.
+
+Publishers follow the same split. `KafkaPublish` - and its `transactional_id`, `per_partition`,
+and `KafkaEosPublish` transitions - is a **policy**: pure declaration, constructible anywhere,
+with no publish surface of its own. The include site names the policy
+(`b.include(handler).publisher(policy)`), and the runtime pairs it against the connected broker
+into the **live** publisher the handler receives. A handler that only replies to its
+`publish("dest")` topic names nothing at all: the broker's default policy is used.
 
 ## Scaffold a service
 
@@ -51,5 +78,6 @@ point (`run` / `asyncapi gen`).
 ## Guides
 
 - [Topics and groups](topics.md) - descriptors, start offsets, commit modes, keyed lanes.
-- [Publishing](publishing.md) - producing to topics, record keys, delivery guarantees.
+- [Publishing](publishing.md) - publish policies, record keys, transactions, delivery guarantees.
+- [Schema Registry](schema-registry.md) - Confluent framing, Avro and Protobuf transcoding.
 - [Testing](testing.md) - the in-process test broker and the live-cluster suites.

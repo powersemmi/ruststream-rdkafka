@@ -1,24 +1,21 @@
 //! Transactional publishing from a handler: an order fans out into per-item shipment commands,
-//! published all-or-nothing through a transactional publisher held in the typed application
-//! state (the framework's DI: the handler declares `State<Shipments>` and the runtime injects
-//! it). Readers on Kafka's default `read_committed` isolation see the whole fan-out or none of
-//! it, and the transactional id fences a zombie instance the moment its replacement
-//! initializes.
+//! published all-or-nothing through a transactional publisher the runtime injects into the
+//! handler (an `Out` parameter paired from the policy the include site names). Readers on
+//! Kafka's default `read_committed` isolation see the whole fan-out or none of it, and the
+//! transactional id fences a zombie instance the moment its replacement initializes.
 //!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_transactions -- run
 //! ```
 
-use std::convert::Infallible;
-
 use ruststream::codec::{Codec, JsonCodec};
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
-use ruststream::{FromRef, OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
+use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, Out, RustStream};
+use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
 use ruststream_rdkafka::context::keys::Partition;
 use ruststream_rdkafka::{
-    Commit, EosPipeline, KafkaBroker, KafkaError, KafkaPublisher, KafkaTopic,
-    TransactionalPartitions,
+    Commit, KafkaBroker, KafkaEosPublish, KafkaError, KafkaPublish, KafkaTopic,
+    KafkaTransactionalPublisher, TransactionalPartitions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,47 +31,38 @@ struct ItemShipment {
     item: String,
 }
 
-// --8<-- [start:state]
-// The application state wires the use-case object once at startup; `#[derive(FromRef)]` makes
-// each field injectable into handlers as `State<FieldType>`.
-#[derive(Clone, FromRef)]
-struct AppState {
-    shipments: Shipments,
-    invoices: Invoices,
-}
-
-#[derive(Clone)]
-struct Shipments {
-    publisher: KafkaPublisher,
-}
-
-impl Shipments {
-    /// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch
-    /// visible atomically to `read_committed` readers, and any failure aborts so shipments are
-    /// never half-visible.
-    async fn dispatch(&self, order: &Order) -> Result<(), KafkaError> {
-        self.publisher.begin_transaction().await?;
-        for item in &order.items {
-            let command = ItemShipment {
-                order_id: order.id,
-                item: item.clone(),
-            };
-            let payload = JsonCodec.encode(&command).expect("serializable");
-            let outgoing = OutgoingMessage::new("shipments", payload.as_ref());
-            if let Err(err) = self.publisher.publish(outgoing).await {
-                self.publisher.abort().await.ok();
-                return Err(err);
-            }
+// --8<-- [start:fanout]
+/// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch
+/// visible atomically to `read_committed` readers, and any failure aborts so shipments are
+/// never half-visible.
+async fn dispatch(
+    publisher: &KafkaTransactionalPublisher,
+    order: &Order,
+) -> Result<(), KafkaError> {
+    publisher.begin_transaction().await?;
+    for item in &order.items {
+        let command = ItemShipment {
+            order_id: order.id,
+            item: item.clone(),
+        };
+        let payload = JsonCodec.encode(&command).expect("serializable");
+        let outgoing = OutgoingMessage::new("shipments", payload.as_ref());
+        if let Err(err) = publisher.publish(outgoing).await {
+            publisher.abort().await.ok();
+            return Err(err);
         }
-        self.publisher.commit().await
     }
+    publisher.commit().await
 }
-// --8<-- [end:state]
+// --8<-- [end:fanout]
 
 // --8<-- [start:handler]
+// The publisher is a handler parameter, not application state: `Out` pairs the policy attached
+// at the include site once the subscription opens, before the first delivery, so the handler
+// holds a live, already-fenced producer by construction.
 #[subscriber("orders")]
-async fn ship(order: &Order, State(shipments): State<Shipments>) -> HandlerResult {
-    if shipments.dispatch(order).await.is_err() {
+async fn ship(order: &Order, Out(shipments): Out<KafkaTransactionalPublisher>) -> HandlerResult {
+    if dispatch(shipments, order).await.is_err() {
         // Nothing became visible; ask for redelivery and try the whole fan-out again.
         return HandlerResult::retry();
     }
@@ -85,33 +73,30 @@ async fn ship(order: &Order, State(shipments): State<Shipments>) -> HandlerResul
 // --8<-- [start:partitions]
 // Concurrent transactional handlers: one producer runs one transaction at a time, so a worker
 // pool cannot share one publisher (a second `begin_transaction` is a `TransactionBusy` error,
-// not a silent merge). Under the default partition lanes a partition processes serially on
-// one lane, so a publisher per source partition gives every lane its own independent
-// transaction - and the id set follows the topic's partitions, not the worker count, so
-// zombie fencing survives `workers(n)` changes.
-#[derive(Clone)]
-struct Invoices {
-    publishers: TransactionalPartitions,
-}
-
-impl Invoices {
-    async fn issue(&self, order: &Order, partition: i32) -> Result<(), KafkaError> {
-        let publisher = self.publishers.for_partition(partition);
-        publisher.begin_transaction().await?;
-        for item in &order.items {
-            let line = ItemShipment {
-                order_id: order.id,
-                item: item.clone(),
-            };
-            let payload = JsonCodec.encode(&line).expect("serializable");
-            let outgoing = OutgoingMessage::new("invoice-lines", payload.as_ref());
-            if let Err(err) = publisher.publish(outgoing).await {
-                publisher.abort().await.ok();
-                return Err(err);
-            }
+// not a silent merge). Under the default partition lanes a partition processes serially on one
+// lane, so a publisher per source partition gives every lane its own independent transaction -
+// and the id set follows the topic's partitions, not the worker count, so zombie fencing
+// survives `workers(n)` changes.
+async fn issue(
+    publishers: &TransactionalPartitions,
+    order: &Order,
+    partition: i32,
+) -> Result<(), KafkaError> {
+    let publisher = publishers.for_partition(partition).await?;
+    publisher.begin_transaction().await?;
+    for item in &order.items {
+        let line = ItemShipment {
+            order_id: order.id,
+            item: item.clone(),
+        };
+        let payload = JsonCodec.encode(&line).expect("serializable");
+        let outgoing = OutgoingMessage::new("invoice-lines", payload.as_ref());
+        if let Err(err) = publisher.publish(outgoing).await {
+            publisher.abort().await.ok();
+            return Err(err);
         }
-        publisher.commit().await
     }
+    publisher.commit().await
 }
 
 #[subscriber(
@@ -123,9 +108,9 @@ async fn bill(
     // The delivery's source partition picks the lane's publisher; the key injects it as a
     // plain argument (the DI form of `ctx.context(keys::Partition)`).
     Ctx(partition): Ctx<Partition>,
-    State(invoices): State<Invoices>,
+    Out(invoices): Out<TransactionalPartitions>,
 ) -> HandlerResult {
-    if invoices.issue(order, partition).await.is_err() {
+    if issue(invoices, order, partition).await.is_err() {
         return HandlerResult::retry();
     }
     HandlerResult::Ack
@@ -133,7 +118,7 @@ async fn bill(
 // --8<-- [end:partitions]
 
 // --8<-- [start:eos]
-// Exactly-once: every lane publishes into one shared EosPipeline, and the pipeline commits
+// Exactly-once: every lane publishes into one shared EOS pipeline, and the pipeline commits
 // the consumed offsets inside the producer transaction (send_offsets_to_transaction), so
 // source positions move atomically with the published records. A crash or an aborted window
 // rewinds both - the output topic never sees a duplicate. The subscription's
@@ -156,33 +141,29 @@ async fn enrich(order: &Order) -> Order {
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("shipments-svc");
-    // --8<-- [start:id]
-    // The transactional id must be stable and unique per concurrent producer: it is what
-    // fences a zombie instance. One id per service replica (pod ordinal, instance id) is the
-    // usual scheme.
-    let shipments = Shipments {
-        publisher: broker.publisher().transactional_id("shipments-svc-1"),
-    };
-    // --8<-- [end:id]
-    let invoices = Invoices {
-        publishers: TransactionalPartitions::new(broker.publisher(), "billing-svc-1"),
-    };
-    // The pipeline id doubles as the producer's transactional id; the `enrich` subscription
-    // names the same id in its `Commit::Transactional` mode.
-    let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"));
-    RustStream::new(AppInfo::new("shipments", "0.1.0"))
-        .on_startup(async move |()| {
-            Ok::<_, Infallible>(AppState {
-                shipments,
-                invoices,
-            })
-        })
-        .with_broker(broker, |b| {
-            b.include(ship);
-            b.include(bill);
-            // --8<-- [start:eos_wiring]
-            // Every reply of `enrich` rides the pipeline's window, paired with its offset.
-            b.include_publishing(enrich, pipeline.replies());
-            // --8<-- [end:eos_wiring]
-        })
+    RustStream::new(AppInfo::new("shipments", "0.1.0")).with_broker(broker, |b| {
+        // --8<-- [start:id]
+        // A publish policy is pure declaration - it holds no connection, so it is written at
+        // the include site and the runtime pairs it into a live publisher after the broker
+        // connects. The transactional id must be stable and unique per concurrent producer:
+        // it is what fences a zombie instance. One id per service replica (pod ordinal,
+        // instance id) is the usual scheme.
+        b.include(ship)
+            .publisher(KafkaPublish::default().transactional_id("shipments-svc-1"));
+        // --8<-- [end:id]
+        // `per_partition` makes the id the base of one id per source partition
+        // ("billing-svc-1-p{partition}"), pairing into `TransactionalPartitions`.
+        b.include(bill).publisher(
+            KafkaPublish::default()
+                .transactional_id("billing-svc-1")
+                .per_partition(),
+        );
+        // --8<-- [start:eos_wiring]
+        // Every reply of `enrich` rides the pipeline's window, paired with its offset. The
+        // pipeline id doubles as the producer's transactional id, and the `enrich`
+        // subscription names the same id in its `Commit::Transactional` mode.
+        b.include(enrich)
+            .publisher(KafkaEosPublish::new("enrich-svc-1").replies());
+        // --8<-- [end:eos_wiring]
+    })
 }

@@ -6,7 +6,7 @@
 //! cargo run --example kafka_topics -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
 use ruststream_rdkafka::{Assignment, Commit, KafkaBroker, KafkaTopic, StartOffset};
 use serde::{Deserialize, Serialize};
@@ -62,10 +62,14 @@ async fn audit_partition_zero(order: &Order) -> HandlerResult {
 // --8<-- [start:app]
 #[ruststream::app]
 fn app() -> impl App {
+    // `KafkaBroker::new` records configuration and does no I/O; the runtime connects it once
+    // at startup, then opens these subscriptions against the connected form.
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        let confirmations = TypedPublisher::new(b.broker().publisher());
-        b.include_publishing(confirm, confirmations);
+        // `confirm` replies through the broker's default publish policy, so the include site
+        // names no publisher; the explicit spelling is
+        // `.publisher(TypedPublisher::new(KafkaPublish::default()))`.
+        b.include(confirm);
         b.include(audit_partition_zero);
     })
 }

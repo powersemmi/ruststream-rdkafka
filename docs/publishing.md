@@ -1,8 +1,31 @@
 # Publishing
 
-The outgoing message name is the destination topic: `KafkaBroker::publisher()` hands out one
-shared producer handle, and each publish awaits the cluster's delivery report, so an `Ok` means
-Kafka accepted the record.
+The outgoing message name is the destination topic. Publishing comes in two halves: a
+`KafkaPublish` **policy** (pure declaration - queue timeout, transactional id - constructible
+anywhere, with no publish surface) and the **live** `KafkaPublisher` the runtime pairs from it
+against the connected broker. Every publisher on this page follows that split, so a handler
+never holds a publisher that is not connected yet. A plain live publisher rides the broker's
+shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
+the cluster's delivery report, so an `Ok` means Kafka accepted the record.
+
+Where a policy is named:
+
+- `b.include(handler)` alone - a `publish("dest")` handler replies through the broker's default
+  policy, `KafkaPublish::default()`.
+- `b.include(handler).publisher(policy)` - the handler's reply publisher, or the publisher its
+  `Out<..>` parameter receives.
+- `b.after_startup(policy, hook)` - a scope-level hook that runs once with the live publisher,
+  after the subscriptions open.
+- `connected.publisher(policy)` - outside the runtime, straight off a broker you connected
+  yourself (see the `kafka_producer` example).
+
+One publisher stands outside the split, deliberately. `broker.retry_publisher()` is minted from
+the *unconnected* broker for builder-time wiring that takes a live publisher rather than a
+policy - today `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
+it has no native delayed redelivery (see
+[batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)). It resolves the connection
+at startup; used before `connect` it reports `KafkaError::NotConnected`, and after the broker
+shuts down `KafkaError::Closed` - never a silent success.
 
 ## Record keys
 
@@ -57,34 +80,36 @@ For at-least-once end to end, pair an idempotent producer
 
 ## Transactions
 
-`broker.publisher().transactional_id("orders-svc-1")` upgrades the handle to the core
-`TransactionalPublisher` capability: publishes between `begin_transaction` and `commit` become
-visible atomically (readers on Kafka's default `read_committed` isolation see all of them or
-none), and `abort` discards them broker-side. The id fences zombies, so it must be stable and
-unique per concurrent producer - create several publishers with distinct ids for concurrent
-transactional flows. Outside an open transaction the handle publishes like a plain one, and
-calling the transaction methods without an id is a clear error. The transactional producer is
-created and initialized on first use from the broker's resolved producer configuration;
+`KafkaPublish::default().transactional_id("orders-svc-1")` is the transactional policy; it pairs
+into a `KafkaTransactionalPublisher`, which adds the core `TransactionalPublisher` capability:
+publishes between `begin_transaction` and `commit` become visible atomically (readers on Kafka's
+default `read_committed` isolation see all of them or none), and `abort` discards them
+broker-side. The id fences zombies, so it must be stable and unique per concurrent producer -
+name distinct policies for concurrent transactional flows. Outside an open transaction the
+handle publishes like a plain one; `commit` or `abort` with no open transaction is a
+`NoTransaction` error, and a second `begin_transaction` is `TransactionBusy`. The transactional
+producer is created and initialized when the policy pairs (that initialization is what fences
+earlier producers holding the id), so the handle is fenced from the moment it exists;
 `transaction_timeout` bounds the control calls, while Kafka's own `transaction.timeout.ms` is
 one `producer_config` away. Tying consumed offsets into the producer transaction (full
 consume-transform-produce exactly-once) is the
 [exactly-once pipeline](#exactly-once-pipelines) below.
 
-The usual shape is a use-case object in the application state that owns the transactional
-publisher and runs one atomic fan-out per call:
+One atomic fan-out per call, committing at the end and aborting on any failure:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:state"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:fanout"
 ```
 
-Handlers receive it through `State` and settle by the outcome - an abort left nothing visible,
-so a retry redelivers and reruns the whole fan-out:
+The handler receives the live publisher as an injected `Out` parameter - the runtime pairs it
+once, right after the subscription opens - and settles by the outcome: an abort left nothing
+visible, so a retry redelivers and reruns the whole fan-out:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:handler"
 ```
 
-The id is picked where the publisher is created, one per concurrent producer:
+The id is picked at the include site, one per concurrent producer:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:id"
@@ -100,15 +125,21 @@ merging two lanes' messages into one transaction would commit one flow's records
 other's.
 
 The scope that composes with a worker pool is the source partition. Under the default
-`LaneKey::Partition` lanes a partition's deliveries process serially on one lane, so
-`TransactionalPartitions` - a publisher per partition, ids `"{base}-p{partition}"` - gives
-every lane an independent transaction with no coordination. The id set follows the topic's
-partitions rather than the worker count, so changing `workers(n)` neither changes the ids nor
-weakens zombie fencing (the same scheme Kafka Streams uses for its per-task producers):
+`LaneKey::Partition` lanes a partition's deliveries process serially on one lane, so the
+`per_partition()` policy - pairing into `TransactionalPartitions`, a publisher per partition
+with ids `"{base}-p{partition}"` - gives every lane an independent transaction with no
+coordination. The id set follows the topic's partitions rather than the worker count, so
+changing `workers(n)` neither changes the ids nor weakens zombie fencing (the same scheme Kafka
+Streams uses for its per-task producers):
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:partitions"
 ```
+
+The include site names the base id:
+`.publisher(KafkaPublish::default().transactional_id("billing-svc-1").per_partition())`. Each
+partition's publisher is created and initialized on its first delivery, so `for_partition` is
+async and reports the initialization failure rather than hiding it.
 
 This deliberately does not compose with `LaneKey::RecordKey` pools: record-key lanes spread
 one partition across lanes, two lanes would collide on its publisher, and a per-lane id scheme
@@ -117,8 +148,9 @@ id across a pool is the exactly-once pipeline below.
 
 ### Exactly-once pipelines
 
-`EosPipeline` is the full consume-transform-produce shape (KIP-447): one transactional
-producer shared by every lane, committing the consumed offsets inside the transaction
+`KafkaEosPublish` declares the full consume-transform-produce shape (KIP-447), pairing into the
+live `EosPipeline`: one transactional producer shared by every lane, committing the consumed
+offsets inside the transaction
 (`send_offsets_to_transaction`), so source positions move atomically with the published
 records. A crash or an aborted window rewinds both - handlers reprocess (at-least-once on the
 handler side, as always), but the output topic never sees a duplicate.
@@ -136,16 +168,18 @@ publisher, and every reply joins the window paired with its delivery's consumed 
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos_wiring"
 ```
 
-`pipeline.replies()` is a plain `TypedPublisher` under the hood (the explicit spelling is
-`TypedPublisher::new(pipeline.clone()).transform(EosReplies)`), so codecs and further
-transforms compose as usual; `replies_with(codec)` names a non-default codec. For manual
-publishes from a plain handler, `EosPipeline::publish` takes the delivery's coordinates
-explicitly - as a `Ctx<Source>` extractor parameter, like every other `KafkaContext` field key.
+`KafkaEosPublish::replies()` is a plain `TypedPublisher` over the policy (the explicit spelling
+is `TypedPublisher::new(policy).transform(EosReplies)`), so codecs and further transforms
+compose as usual; `replies_with(codec)` names a non-default codec. For manual publishes from a
+plain handler, take the pipeline as an `Out<EosPipeline>` parameter: `EosPipeline::publish`
+takes the delivery's coordinates explicitly - as a `Ctx<Source>` extractor parameter, like
+every other `KafkaContext` field key.
 
 The subscription's `Commit::Transactional("enrich-svc-1")` switches its consumer's own
 committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;
-`EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"))` wires the producer
-side. Publishes join the pipeline's open window; every `commit_interval` (100ms by default,
+`KafkaEosPublish::new("enrich-svc-1")` wires the producer side, and the pipeline itself exists
+only by pairing that policy against the connected broker. Publishes join the pipeline's open
+window; every `commit_interval` (100ms by default,
 the Kafka Streams EOS default) the window closes: the pipeline waits for its participants to
 settle, adds the settled positions and the consumer's group metadata to the transaction, and
 commits. The group metadata is what fences a stale consumer server-side, so a rebalance
@@ -165,8 +199,9 @@ Practical notes:
   commit, not at publish.
 - `retry()` from a participant stalls its window until the transaction deadline, then aborts
   it; prefer `drop()`/dead-lettering for poison messages in EOS handlers.
-- The `retry_after`/`retry_via` deferred-republish fallback does not apply to EOS replies: a
-  delayed copy would break the offset-record pairing.
+- The `retry_after` deferred-republish fallback (`retry_via`, see
+  [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)) does not apply to EOS
+  replies: a delayed copy would break the offset-record pairing.
 - The reply publisher pairs only with `Commit::Transactional` subscriptions naming this
   pipeline's id; a reply from any other subscription fails with a clear error instead of
   silently downgrading the guarantee.
@@ -176,8 +211,11 @@ Practical notes:
 ## Back-pressure and shutdown
 
 A publish waits indefinitely for space when librdkafka's local queue is full - the natural
-back-pressure behavior. `KafkaPublisher::queue_timeout` bounds that wait instead, failing the
+back-pressure behavior. `KafkaPublish::queue_timeout` bounds that wait instead, failing the
 publish with a queue-full error.
 
-`Broker::shutdown` flushes in-flight publishes and reports an error when they do not make it
-out within `KafkaBroker::flush_timeout` (30 seconds unless configured).
+`ConnectedKafkaBroker::shutdown` flushes in-flight publishes and reports an error when they do
+not make it out within `KafkaBroker::flush_timeout` (30 seconds unless configured); it consumes
+the connected broker and returns the `ClosedKafkaBroker` witness, whose `unflushed_records()`
+counts what librdkafka still held. Publishers paired before the shutdown stay usable as values
+but report `KafkaError::Closed` on every publish.

@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,16 +24,20 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, State};
+use ruststream::runtime::{
+    App, AppInfo, Ctx, HandlerResult, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, RustStream,
+    State,
+};
 use ruststream::subscriber;
 use ruststream::{
-    Broker, FromRef, Headers, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
-    TransactionalPublisher,
+    Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, Positioned,
+    PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
 };
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
-    Assignment, Commit, EosPipeline, KafkaBroker, KafkaError, KafkaMessage, KafkaTopic, LaneKey,
-    PARTITION_HEADER, PARTITION_KEY_HEADER, SourceOffset, StartOffset, TransactionalPartitions,
+    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
+    KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
+    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -103,10 +108,11 @@ async fn create_topic(url: &str, topic: &str, partitions: i32) {
     }
 }
 
-async fn connected_broker(url: &str) -> KafkaBroker {
-    let broker = KafkaBroker::new([url.to_owned()]);
-    Broker::connect(&broker).await.expect("connect");
-    broker
+async fn connected_broker(url: &str) -> ConnectedKafkaBroker {
+    KafkaBroker::new([url.to_owned()])
+        .connect()
+        .await
+        .expect("connect")
 }
 
 fn tracked(topic: &str, group: &str) -> KafkaTopic {
@@ -127,9 +133,9 @@ where
         .expect("delivery ok")
 }
 
-async fn publish(broker: &KafkaBroker, topic: &str, payload: &[u8]) {
+async fn publish(broker: &ConnectedKafkaBroker, topic: &str, payload: &[u8]) {
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(topic, payload))
         .await
         .expect("publish");
@@ -143,7 +149,7 @@ async fn round_trip_with_headers_and_key() {
     let broker = connected_broker(&url).await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &unique("group")))
+        .subscribe_with(tracked(&topic, &unique("group")))
         .await
         .expect("subscribe");
 
@@ -151,7 +157,7 @@ async fn round_trip_with_headers_and_key() {
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "order-1");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(&topic, b"{}").with_headers(headers))
         .await
         .expect("publish");
@@ -172,7 +178,7 @@ async fn round_trip_with_headers_and_key() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -188,7 +194,7 @@ async fn tracked_commit_survives_subscriber_restart() {
 
     {
         let mut subscriber = broker
-            .subscribe(tracked(&topic, &group))
+            .subscribe_with(tracked(&topic, &group))
             .await
             .expect("subscribe");
         let mut stream = Box::pin(subscriber.stream());
@@ -205,7 +211,7 @@ async fn tracked_commit_survives_subscriber_restart() {
     publish(&broker, &topic, b"m3").await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &group))
+        .subscribe_with(tracked(&topic, &group))
         .await
         .expect("re-subscribe");
     let mut stream = Box::pin(subscriber.stream());
@@ -219,7 +225,7 @@ async fn tracked_commit_survives_subscriber_restart() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,7 +240,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
 
     {
         let mut subscriber = broker
-            .subscribe(tracked(&topic, &group))
+            .subscribe_with(tracked(&topic, &group))
             .await
             .expect("subscribe");
         let mut stream = Box::pin(subscriber.stream());
@@ -244,7 +250,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     }
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &group))
+        .subscribe_with(tracked(&topic, &group))
         .await
         .expect("re-subscribe");
     let mut stream = Box::pin(subscriber.stream());
@@ -258,7 +264,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -273,7 +279,7 @@ async fn nack_drop_settles_the_offset() {
 
     {
         let mut subscriber = broker
-            .subscribe(tracked(&topic, &group))
+            .subscribe_with(tracked(&topic, &group))
             .await
             .expect("subscribe");
         let mut stream = Box::pin(subscriber.stream());
@@ -285,7 +291,7 @@ async fn nack_drop_settles_the_offset() {
     publish(&broker, &topic, b"next").await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &group))
+        .subscribe_with(tracked(&topic, &group))
         .await
         .expect("re-subscribe");
     let mut stream = Box::pin(subscriber.stream());
@@ -299,7 +305,7 @@ async fn nack_drop_settles_the_offset() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,7 +322,7 @@ async fn out_of_order_acks_commit_only_the_contiguous_prefix() {
 
     {
         let mut subscriber = broker
-            .subscribe(tracked(&topic, &group))
+            .subscribe_with(tracked(&topic, &group))
             .await
             .expect("subscribe");
         let mut stream = Box::pin(subscriber.stream());
@@ -331,7 +337,7 @@ async fn out_of_order_acks_commit_only_the_contiguous_prefix() {
     }
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &group))
+        .subscribe_with(tracked(&topic, &group))
         .await
         .expect("re-subscribe");
     let mut stream = Box::pin(subscriber.stream());
@@ -345,7 +351,7 @@ async fn out_of_order_acks_commit_only_the_contiguous_prefix() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -358,7 +364,7 @@ async fn auto_commit_mode_receives_and_acks_advisorily() {
     let def = KafkaTopic::new(&topic)
         .group(unique("group"))
         .start(StartOffset::Earliest);
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
 
     publish(&broker, &topic, b"auto-1").await;
 
@@ -369,7 +375,7 @@ async fn auto_commit_mode_receives_and_acks_advisorily() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -381,7 +387,7 @@ async fn shared_key_lands_on_one_partition() {
     let broker = connected_broker(&url).await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &unique("group")))
+        .subscribe_with(tracked(&topic, &unique("group")))
         .await
         .expect("subscribe");
 
@@ -389,7 +395,7 @@ async fn shared_key_lands_on_one_partition() {
         let mut headers = Headers::new();
         headers.insert(PARTITION_KEY_HEADER, "same-key");
         broker
-            .publisher()
+            .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(&topic, format!("k{i}").as_bytes()).with_headers(headers))
             .await
             .expect("publish");
@@ -411,7 +417,7 @@ async fn shared_key_lands_on_one_partition() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -420,8 +426,11 @@ async fn bare_name_subscribe_uses_the_default_group() {
     let topic = unique("bare");
     create_topic(&url, &topic, 1).await;
 
-    let broker = KafkaBroker::new([url.clone()]).default_group(unique("default-group"));
-    Broker::connect(&broker).await.expect("connect");
+    let broker = KafkaBroker::new([url.clone()])
+        .default_group(unique("default-group"))
+        .connect()
+        .await
+        .expect("connect");
 
     let mut subscriber = ruststream::Subscribe::subscribe(&broker, &topic)
         .await
@@ -450,7 +459,7 @@ async fn bare_name_subscribe_uses_the_default_group() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -466,11 +475,11 @@ async fn retry_topic_republishes_with_attempt_count_and_settles() {
 
     let group = unique("group");
     let mut main = broker
-        .subscribe(tracked(&topic, &group).retry(Retry::Topic(retry_topic.clone())))
+        .subscribe_with(tracked(&topic, &group).retry(Retry::Topic(retry_topic.clone())))
         .await
         .expect("subscribe main");
     let mut hop = broker
-        .subscribe(tracked(&retry_topic, &unique("hop-group")))
+        .subscribe_with(tracked(&retry_topic, &unique("hop-group")))
         .await
         .expect("subscribe retry topic");
 
@@ -493,7 +502,7 @@ async fn retry_topic_republishes_with_attempt_count_and_settles() {
     drop(main);
     publish(&broker, &topic, b"next").await;
     let mut reopened = broker
-        .subscribe(tracked(&topic, &group))
+        .subscribe_with(tracked(&topic, &group))
         .await
         .expect("re-subscribe");
     let mut stream = Box::pin(reopened.stream());
@@ -509,7 +518,7 @@ async fn retry_topic_republishes_with_attempt_count_and_settles() {
     drop(reopened);
     drop(hop_stream);
     drop(hop);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -531,9 +540,9 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
         .retry(Retry::Topic(retry_topic.clone()))
         .max_deliveries(2)
         .dead_letter(dlq.clone());
-    let mut main = broker.subscribe(def).await.expect("subscribe");
+    let mut main = broker.subscribe_with(def).await.expect("subscribe");
     let mut dead = broker
-        .subscribe(tracked(&dlq, &unique("dlq-reader")))
+        .subscribe_with(tracked(&dlq, &unique("dlq-reader")))
         .await
         .expect("subscribe dlq");
 
@@ -541,7 +550,7 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
     let mut headers = Headers::new();
     headers.insert(RETRY_COUNT_HEADER, "1");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(&topic, b"poison").with_headers(headers))
         .await
         .expect("publish");
@@ -570,7 +579,7 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
     drop(main);
     drop(dead_stream);
     drop(dead);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -588,9 +597,9 @@ async fn seek_back_redelivers_in_place_and_caps_deliveries() {
         .retry(Retry::SeekBack)
         .max_deliveries(2)
         .dead_letter(dlq.clone());
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
     let mut dead = broker
-        .subscribe(tracked(&dlq, &unique("dlq-reader")))
+        .subscribe_with(tracked(&dlq, &unique("dlq-reader")))
         .await
         .expect("subscribe dlq");
 
@@ -628,7 +637,7 @@ async fn seek_back_redelivers_in_place_and_caps_deliveries() {
     drop(subscriber);
     drop(dead_stream);
     drop(dead);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -646,7 +655,7 @@ async fn batches_preserve_order_and_settle_per_message() {
     }
 
     let source = Buffered::new(tracked(&topic, &unique("group")))
-        .max_size(5)
+        .max_size(NonZeroUsize::new(5).expect("non-zero cap"))
         .max_wait(Duration::from_millis(50));
     let mut subscriber = source.subscribe(&broker).await.expect("subscribe");
 
@@ -674,7 +683,7 @@ async fn batches_preserve_order_and_settle_per_message() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -687,7 +696,7 @@ async fn multi_topic_subscription_consumes_all_topics() {
     let broker = connected_broker(&url).await;
 
     let def = tracked(&orders, &unique("group")).and_topic(&cancels);
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
 
     publish(&broker, &orders, b"o1").await;
     publish(&broker, &cancels, b"c1").await;
@@ -710,7 +719,7 @@ async fn multi_topic_subscription_consumes_all_topics() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -727,7 +736,7 @@ async fn pattern_subscription_consumes_matching_topics() {
         .group(unique("group"))
         .start(StartOffset::Earliest)
         .commit(Commit::Tracked);
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
 
     publish(&broker, &first, b"p1").await;
     publish(&broker, &second, b"p2").await;
@@ -744,7 +753,7 @@ async fn pattern_subscription_consumes_matching_topics() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -753,7 +762,7 @@ async fn unanchored_pattern_is_rejected() {
     let broker = connected_broker(&url).await;
 
     let err = broker
-        .subscribe(KafkaTopic::pattern("no-anchor").group(unique("group")))
+        .subscribe_with(KafkaTopic::pattern("no-anchor").group(unique("group")))
         .await
         .expect_err("an unanchored pattern must be rejected");
     assert!(
@@ -761,7 +770,7 @@ async fn unanchored_pattern_is_rejected() {
         "the error must explain the anchor requirement, got: {err}",
     );
 
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -772,7 +781,7 @@ async fn cooperative_sticky_assignment_round_trips() {
     let broker = connected_broker(&url).await;
 
     let def = tracked(&topic, &unique("group")).assignment(Assignment::CooperativeSticky);
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
 
     publish(&broker, &topic, b"coop-1").await;
 
@@ -783,7 +792,7 @@ async fn cooperative_sticky_assignment_round_trips() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -796,7 +805,7 @@ async fn late_created_topic_recovers_without_stream_errors() {
     // Bound librdkafka's metadata refresh so the late topic is noticed promptly.
     let def =
         tracked(&topic, &unique("group")).config("topic.metadata.refresh.interval.ms", "1000");
-    let mut subscriber = broker.subscribe(def).await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with(def).await.expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
 
     // While the topic does not exist the stream stays silent: the pending-creation errors are
@@ -815,7 +824,7 @@ async fn late_created_topic_recovers_without_stream_errors() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -824,7 +833,7 @@ async fn missing_group_fails_subscription_clearly() {
     let broker = connected_broker(&url).await;
 
     let err = broker
-        .subscribe(KafkaTopic::new(unique("nogroup")))
+        .subscribe_with(KafkaTopic::new(unique("nogroup")))
         .await
         .expect_err("subscribing without a group must fail");
     let message = err.to_string();
@@ -833,7 +842,7 @@ async fn missing_group_fails_subscription_clearly() {
         "the error must name the missing option, got: {message}",
     );
 
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[derive(Debug, Deserialize)]
@@ -900,7 +909,7 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
         )
         .await;
     }
-    Broker::shutdown(&broker).await.expect("shutdown seeder");
+    broker.shutdown().await.expect("shutdown seeder");
 
     let state = BatchPoolState {
         prefix: run.clone(),
@@ -997,7 +1006,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
             let mut headers = Headers::new();
             headers.insert(PARTITION_KEY_HEADER, key.clone());
             broker
-                .publisher()
+                .publisher(KafkaPublish::default())
                 .publish(
                     OutgoingMessage::new(
                         "e2e-keyed-lanes",
@@ -1009,7 +1018,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
                 .expect("publish");
         }
     }
-    Broker::shutdown(&broker).await.expect("shutdown seeder");
+    broker.shutdown().await.expect("shutdown seeder");
 
     let state = KeyedLanesState {
         prefix: run.clone(),
@@ -1096,7 +1105,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
         let mut headers = Headers::new();
         headers.insert(PARTITION_KEY_HEADER, key.clone());
         broker
-            .publisher()
+            .publisher(KafkaPublish::default())
             .publish(
                 OutgoingMessage::new(
                     "e2e-partition-lanes",
@@ -1107,7 +1116,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
             .await
             .expect("publish");
     }
-    Broker::shutdown(&broker).await.expect("shutdown seeder");
+    broker.shutdown().await.expect("shutdown seeder");
 
     let state = PartitionLaneState {
         prefix: run.clone(),
@@ -1146,14 +1155,19 @@ async fn partition_scoped_transactions_run_independently() {
     let broker = connected_broker(&url).await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &unique("group")))
+        .subscribe_with(tracked(&topic, &unique("group")))
         .await
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
 
-    let publishers = TransactionalPartitions::new(broker.publisher(), unique("txp"));
-    let p0 = publishers.for_partition(0);
-    let p1 = publishers.for_partition(1);
+    let publishers = KafkaPublish::default()
+        .transactional_id(unique("txp"))
+        .per_partition()
+        .pair(&broker)
+        .await
+        .expect("pair the per-partition set");
+    let p0 = publishers.for_partition(0).await.expect("publisher p0");
+    let p1 = publishers.for_partition(1).await.expect("publisher p1");
 
     p0.begin_transaction().await.expect("begin p0");
     // One publisher runs one transaction: a second begin is an explicit error, not a silent
@@ -1162,7 +1176,14 @@ async fn partition_scoped_transactions_run_independently() {
         .begin_transaction()
         .await
         .expect_err("begin while open must fail");
-    assert!(matches!(busy, KafkaError::TransactionBusy));
+    assert!(matches!(busy, KafkaError::TransactionBusy { .. }));
+
+    // Misuse is an error, never a silent no-op: p1 has nothing open yet.
+    let idle = p1
+        .commit()
+        .await
+        .expect_err("commit without begin must fail");
+    assert!(matches!(idle, KafkaError::NoTransaction { .. }));
 
     // Another partition's publisher owns its own id and transacts independently.
     p1.begin_transaction().await.expect("begin p1");
@@ -1187,7 +1208,7 @@ async fn partition_scoped_transactions_run_independently() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1205,10 +1226,13 @@ async fn eos_pipeline_commits_offsets_with_records() {
         publish(&broker, &input, payload).await;
     }
 
-    let pipeline = EosPipeline::new(broker.publisher().transactional_id(&pipeline_id))
-        .commit_interval(Duration::from_millis(50));
+    let pipeline = KafkaEosPublish::new(&pipeline_id)
+        .commit_interval(Duration::from_millis(50))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
     let mut subscriber = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&input)
                 .group(&group)
                 .start(StartOffset::Earliest)
@@ -1232,7 +1256,7 @@ async fn eos_pipeline_commits_offsets_with_records() {
 
     // The committed window makes the records visible to a read_committed reader.
     let mut out_subscriber = broker
-        .subscribe(tracked(&output, &unique("reader")))
+        .subscribe_with(tracked(&output, &unique("reader")))
         .await
         .expect("subscribe output");
     let mut out_stream = Box::pin(out_subscriber.stream());
@@ -1250,7 +1274,7 @@ async fn eos_pipeline_commits_offsets_with_records() {
     drop(subscriber);
     publish(&broker, &input, b"d").await;
     let mut resumed = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&input)
                 .group(&group)
                 .commit(Commit::Transactional(pipeline_id.clone())),
@@ -1270,7 +1294,7 @@ async fn eos_pipeline_commits_offsets_with_records() {
     drop(resumed);
     drop(out_stream);
     drop(out_subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1288,15 +1312,14 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
 
     // A short transaction deadline keeps the stall-abort quick; the deadline also bounds
     // init/commit, so the transaction coordinator is warmed up by the earlier tests.
-    let pipeline = EosPipeline::new(
-        broker
-            .publisher()
-            .transactional_id(&pipeline_id)
-            .transaction_timeout(Duration::from_secs(5)),
-    )
-    .commit_interval(Duration::from_millis(50));
+    let pipeline = KafkaEosPublish::new(&pipeline_id)
+        .transaction_timeout(Duration::from_secs(5))
+        .commit_interval(Duration::from_millis(50))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
     let mut subscriber = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&input)
                 .group(unique("group"))
                 .start(StartOffset::Earliest)
@@ -1344,7 +1367,7 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
 
     // Exactly-once on the output: the aborted first-pass copies never became visible.
     let mut out_subscriber = broker
-        .subscribe(tracked(&output, &unique("reader")))
+        .subscribe_with(tracked(&output, &unique("reader")))
         .await
         .expect("subscribe output");
     let mut out_stream = Box::pin(out_subscriber.stream());
@@ -1371,7 +1394,7 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
     drop(out_subscriber);
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1382,7 +1405,7 @@ async fn explicit_partition_header_targets_the_partition() {
     let broker = connected_broker(&url).await;
 
     let mut subscriber = broker
-        .subscribe(tracked(&topic, &unique("group")))
+        .subscribe_with(tracked(&topic, &unique("group")))
         .await
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
@@ -1390,7 +1413,7 @@ async fn explicit_partition_header_targets_the_partition() {
     let mut headers = Headers::new();
     headers.insert(PARTITION_HEADER, "1");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(&topic, b"pinned".as_slice()).with_headers(headers))
         .await
         .expect("publish pinned");
@@ -1408,7 +1431,7 @@ async fn explicit_partition_header_targets_the_partition() {
     let mut bad = Headers::new();
     bad.insert(PARTITION_HEADER, "one");
     let err = broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new(&topic, b"nope".as_slice()).with_headers(bad))
         .await
         .expect_err("malformed partition must fail");
@@ -1416,7 +1439,7 @@ async fn explicit_partition_header_targets_the_partition() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1430,7 +1453,7 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
         let mut headers = Headers::new();
         headers.insert(PARTITION_HEADER, partition.to_string());
         broker
-            .publisher()
+            .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(&topic, payload).with_headers(headers))
             .await
             .expect("publish pinned");
@@ -1438,7 +1461,7 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
 
     // A group-less reader pinned to partition 1: it must see p1 and never p0.
     let mut subscriber = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&topic)
                 .partitions([1])
                 .start(StartOffset::Earliest),
@@ -1459,7 +1482,7 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
 
     drop(stream);
     drop(subscriber);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1473,7 +1496,7 @@ async fn manual_assignment_commits_into_a_group_without_joining() {
     publish(&broker, &topic, b"first").await;
     {
         let mut subscriber = broker
-            .subscribe(
+            .subscribe_with(
                 KafkaTopic::new(&topic)
                     .partitions([0])
                     .group(&group)
@@ -1492,7 +1515,7 @@ async fn manual_assignment_commits_into_a_group_without_joining() {
     // offsets sees only what came after.
     publish(&broker, &topic, b"second").await;
     let mut resumed = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&topic)
                 .partitions([0])
                 .group(&group)
@@ -1511,7 +1534,7 @@ async fn manual_assignment_commits_into_a_group_without_joining() {
 
     drop(stream);
     drop(resumed);
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1520,7 +1543,7 @@ async fn manual_assignment_rejects_unsupported_combinations() {
     let broker = connected_broker(&url).await;
 
     let multi = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new("orders")
                 .and_topic("cancellations")
                 .partitions([0])
@@ -1531,7 +1554,7 @@ async fn manual_assignment_rejects_unsupported_combinations() {
     assert!(matches!(multi, KafkaError::InvalidOptions(_)));
 
     let tracked = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new("orders")
                 .partitions([0])
                 .start(StartOffset::Earliest)
@@ -1542,13 +1565,13 @@ async fn manual_assignment_rejects_unsupported_combinations() {
     assert!(matches!(tracked, KafkaError::InvalidOptions(_)));
 
     let committed = broker
-        .subscribe(KafkaTopic::new("orders").partitions([0]))
+        .subscribe_with(KafkaTopic::new("orders").partitions([0]))
         .await
         .expect_err("group-less committed start must fail");
     assert!(matches!(committed, KafkaError::InvalidOptions(_)));
 
     let transactional = broker
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new("orders")
                 .partitions([0])
                 .group("g")
@@ -1558,7 +1581,7 @@ async fn manual_assignment_rejects_unsupported_combinations() {
         .expect_err("transactional manual assignment must fail");
     assert!(matches!(transactional, KafkaError::InvalidOptions(_)));
 
-    Broker::shutdown(&broker).await.expect("shutdown");
+    broker.shutdown().await.expect("shutdown");
 }
 
 #[derive(Clone)]
@@ -1613,13 +1636,13 @@ async fn manual_assignment_composes_with_partition_lanes() {
             headers.insert(PARTITION_HEADER, partition.to_string());
             let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
             broker
-                .publisher()
+                .publisher(KafkaPublish::default())
                 .publish(OutgoingMessage::new(&topic, payload.as_bytes()).with_headers(headers))
                 .await
                 .expect("publish");
         }
     }
-    Broker::shutdown(&broker).await.expect("producer shutdown");
+    broker.shutdown().await.expect("producer shutdown");
 
     let state = AssignedLaneState {
         expected: (PER_PARTITION * 2) as usize,
@@ -1655,6 +1678,379 @@ async fn manual_assignment_composes_with_partition_lanes() {
             "partition {partition} must stay ordered on its lane",
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn seeking_inside_an_eos_window_replays_without_committing_past_the_target() {
+    let Some(url) = kafka_url() else { return };
+    let input = unique("eos-seek-in");
+    let output = unique("eos-seek-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    let broker = connected_broker(&url).await;
+    let pipeline_id = unique("eos-seek");
+    let group = unique("group");
+
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        publish(&broker, &input, payload).await;
+    }
+
+    // A window long enough to still be open when the reposition lands.
+    let pipeline = KafkaEosPublish::new(&pipeline_id)
+        .commit_interval(Duration::from_millis(500))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
+    let mut subscriber = broker
+        .subscribe_with(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .start(StartOffset::Earliest)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("subscribe input");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    // First pass: two deliveries publish into the open window, then the handler repositions the
+    // subscription back to the first of them while that window is still open.
+    let mut replay_from = None;
+    for expected in [b"a".as_slice(), b"b"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), expected);
+        if replay_from.is_none() {
+            replay_from = Some(msg.position());
+        }
+        forward(&pipeline, &msg, &output).await;
+        msg.ack().await.expect("ack first pass");
+    }
+    seeker
+        .seek(replay_from.expect("a captured position"))
+        .await
+        .expect("seek back inside the window");
+
+    // The window that was open when the seek landed is discarded, so the whole input replays
+    // from the sought offset and is processed into fresh windows.
+    for expected in [b"a".as_slice(), b"b", b"c"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(
+            msg.payload(),
+            expected,
+            "the replay must start at the sought offset and keep the log order",
+        );
+        forward(&pipeline, &msg, &output).await;
+        msg.ack().await.expect("ack replay");
+    }
+
+    // Exactly-once on the output: a `read_committed` reader sees each record once - the
+    // discarded window's copies of "a" and "b" never became visible.
+    let mut out_subscriber = broker
+        .subscribe_with(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let mut out_stream = Box::pin(out_subscriber.stream());
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let msg = next_message(&mut out_stream).await;
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack output");
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        "each input must be published exactly once despite the reposition",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), out_stream.next())
+            .await
+            .is_err(),
+        "the discarded window must not have made its copies visible",
+    );
+
+    // The transactional offsets followed the seek: the group resumes right after the replayed
+    // range. Committing the pre-seek window would have carried it past the replay instead.
+    drop(stream);
+    drop(subscriber);
+    // The seeker keeps the consumer (and its group membership) alive; the rejoin below needs
+    // the partition free.
+    drop(seeker);
+    publish(&broker, &input, b"d").await;
+    let mut resumed = broker
+        .subscribe_with(
+            KafkaTopic::new(&input)
+                .group(&group)
+                .commit(Commit::Transactional(pipeline_id.clone())),
+        )
+        .await
+        .expect("resubscribe input");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"d",
+        "the committed offsets must cover the replayed range exactly, no more and no less",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    drop(out_stream);
+    drop(out_subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// Publishes a delivery's payload into the pipeline's window, paired with its source offset.
+async fn forward(pipeline: &EosPipeline, msg: &KafkaMessage, output: &str) {
+    let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+    let payload = msg.payload().to_vec();
+    pipeline
+        .publish(&source, OutgoingMessage::new(output, payload.as_slice()))
+        .await
+        .expect("pipeline publish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_seek_moves_the_tracked_watermark_with_the_read_position() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("seek-tracked");
+    let group = unique("group");
+    create_topic(&url, &topic, 1).await;
+    // A long auto-commit interval pins what the test is about: the only commit that can happen
+    // here is the one the consumer flushes when it closes, after the seek. With the default
+    // five seconds a passing run could be luck.
+    let broker = KafkaBroker::new([url.clone()])
+        .config("auto.commit.interval.ms", "60000")
+        .connect()
+        .await
+        .expect("connect");
+
+    for payload in [b"1".as_slice(), b"2", b"3"] {
+        publish(&broker, &topic, payload).await;
+    }
+
+    let mut subscriber = broker
+        .subscribe_with(tracked(&topic, &group))
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    let first = next_message(&mut stream).await;
+    let replay_from = first.position();
+    first.ack().await.expect("ack first");
+    let second = next_message(&mut stream).await;
+    second.ack().await.expect("ack second");
+
+    // Back to the first record. The watermark those two acks built describes a read position
+    // this subscription no longer has, so it must not survive the seek.
+    seeker.seek(replay_from).await.expect("seek back");
+    for expected in [b"1".as_slice(), b"2"] {
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), expected, "the whole suffix must replay");
+        // Deliberately NOT acked: nothing after the seek was handled, so nothing after the
+        // seek may be committed.
+        drop(msg);
+    }
+
+    // The seeker holds the consumer alive, so it goes before the group is rejoined; otherwise
+    // the old member keeps the partition and the new one waits out a rebalance.
+    drop(stream);
+    drop(subscriber);
+    drop(seeker);
+
+    // A fresh member of the same group must start at the seek target: had the pre-seek acks
+    // still decided the committed position, the replayed records would be skipped here.
+    let mut resumed = broker
+        .subscribe_with(tracked(&topic, &group))
+        .await
+        .expect("resubscribe");
+    let mut resumed_stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut resumed_stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"1",
+        "a commit must never advance past records the seek replayed but nobody handled",
+    );
+    msg.ack().await.expect("ack resumed");
+
+    drop(resumed_stream);
+    drop(resumed);
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positions_reach_every_assigned_partition_and_report_bad_targets() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("seek-vocab");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"first").await;
+    publish(&broker, &topic, b"second").await;
+
+    let mut subscriber = broker
+        .subscribe_with(tracked(&topic, &unique("group")))
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+
+    let msg = next_message(&mut stream).await;
+    let published_at = msg
+        .timestamp_millis()
+        .expect("the broker stamps a timestamp");
+    msg.ack().await.expect("ack");
+
+    // Stream-wide: every assigned partition goes back to the start of the log.
+    seeker
+        .seek(KafkaPosition::earliest())
+        .await
+        .expect("seek earliest");
+    let replayed = next_message(&mut stream).await;
+    assert_eq!(replayed.payload(), b"first");
+    replayed.ack().await.expect("ack replayed");
+
+    // A timestamp resolves per partition; the first record's own timestamp resolves to it.
+    seeker
+        .seek(KafkaPosition::timestamp(published_at))
+        .await
+        .expect("seek timestamp");
+    let by_time = next_message(&mut stream).await;
+    assert_eq!(by_time.payload(), b"first");
+    by_time.ack().await.expect("ack by_time");
+
+    // A partition this consumer does not hold is a clear error, not a silent no-op.
+    let err = seeker
+        .seek(KafkaPosition::offset(7, 0))
+        .await
+        .expect_err("an unassigned partition must be rejected");
+    assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err}");
+
+    // Latest parks the subscription at the end of the log: only new records arrive.
+    seeker
+        .seek(KafkaPosition::latest())
+        .await
+        .expect("seek latest");
+    publish(&broker, &topic, b"third").await;
+    let live = next_message(&mut stream).await;
+    assert_eq!(
+        live.payload(),
+        b"third",
+        "after seeking to the end only fresh records arrive",
+    );
+    live.ack().await.expect("ack live");
+
+    drop(stream);
+    drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// Records the runtime retry-count header of every delivery, so the test can tell the original
+/// from the deferred copy.
+#[derive(Clone)]
+struct DeferredRetryProbe {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+    done: Arc<Notify>,
+}
+
+// Kafka has no native delayed redelivery, so `retry_after` runs through the runtime's
+// deferred-republish fallback: the original settles, and a copy comes back through the
+// scope's retry publisher after the delay with the retry count incremented.
+#[subscriber(
+    KafkaTopic::new(std::env::var("DEFERRED_RETRY_TOPIC").expect("topic env"))
+        .group("deferred-retry-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn deferred_retry(
+    _order: &OrderPayload,
+    ctx: &mut Context<'_, (), DeferredRetryProbe>,
+) -> HandlerResult {
+    let count = ctx
+        .headers()
+        .get_str(RUNTIME_RETRY_COUNT_HEADER)
+        .map(str::to_owned);
+    let probe = ctx.state().clone();
+    probe
+        .seen
+        .lock()
+        .expect("seen mutex poisoned")
+        .push(count.clone());
+    if count.is_none() {
+        return HandlerResult::retry_after(Duration::from_millis(200));
+    }
+    probe.done.notify_one();
+    HandlerResult::Ack
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retry_after_republishes_through_the_retry_publisher() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("deferred-retry");
+    create_topic(&url, &topic, 1).await;
+    unsafe { std::env::set_var("DEFERRED_RETRY_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    publish(&broker, &topic, br#"{"partition":0,"seq":1}"#).await;
+    broker.shutdown().await.expect("shutdown seeder");
+
+    let probe = DeferredRetryProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("deferred-retry", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            // The early publisher is what makes this wiring possible before the connection
+            // exists; `retry_via` takes a live publisher, not a policy.
+            let retries = b.broker().retry_publisher();
+            b.retry_via(retries);
+            b.include(deferred_retry);
+        });
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("the deferred copy must arrive within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    assert_eq!(
+        seen,
+        vec![None, Some("1".to_owned())],
+        "the original carries no retry count and the deferred copy carries the first one",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_early_publisher_errors_after_shutdown() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("early-publisher");
+    create_topic(&url, &topic, 1).await;
+
+    let broker = KafkaBroker::new([url.clone()]);
+    let retries = broker.retry_publisher();
+    let connected = broker.connect().await.expect("connect");
+    retries
+        .publish(OutgoingMessage::new(&topic, b"live".as_slice()))
+        .await
+        .expect("the cell resolves once the broker connects");
+
+    connected.shutdown().await.expect("shutdown");
+
+    let err = retries
+        .publish(OutgoingMessage::new(&topic, b"after".as_slice()))
+        .await
+        .expect_err("publishing through a handle aliasing a closed connection must error");
+    assert!(
+        matches!(&err, KafkaError::Closed { topic: named } if named == &topic),
+        "the error must name the topic it could not reach, got: {err}",
+    );
 }
 
 #[derive(Clone)]
@@ -1702,12 +2098,12 @@ async fn ctx_extractors_inject_delivery_fields() {
     for seq in 0..COUNT {
         let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
         broker
-            .publisher()
+            .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
             .await
             .expect("publish");
     }
-    Broker::shutdown(&broker).await.expect("producer shutdown");
+    broker.shutdown().await.expect("producer shutdown");
 
     let probe = CtxDiProbe {
         expected: COUNT,
@@ -1777,28 +2173,30 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     for seq in 0..COUNT {
         let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
         producer
-            .publisher()
+            .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(&input, payload.as_bytes()))
             .await
             .expect("publish input");
     }
-    Broker::shutdown(&producer)
-        .await
-        .expect("producer shutdown");
+    producer.shutdown().await.expect("producer shutdown");
 
     // Run the app until the replies are visible to a read_committed reader: the window must
     // have committed records and offsets atomically by then.
-    let broker = KafkaBroker::new([url.clone()]);
-    let pipeline = EosPipeline::new(broker.publisher().transactional_id(&pipeline_id))
-        .commit_interval(Duration::from_millis(50));
-    let replies_wiring = pipeline.replies();
-    let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(broker, |b| {
-        b.include_publishing(eos_sugar, replies_wiring);
-    });
+    // The pipeline is pure policy here; the runtime pairs it (and its reply publisher) with the
+    // connected broker at startup.
+    let replies_wiring = KafkaEosPublish::new(&pipeline_id)
+        .commit_interval(Duration::from_millis(50))
+        .replies();
+    let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            b.include(eos_sugar).publisher(replies_wiring);
+        },
+    );
 
     let reader = connected_broker(&url).await;
     let mut out_subscriber = reader
-        .subscribe(tracked("eos-sugar-replies-placeholder", &unique("reader")))
+        .subscribe_with(tracked("eos-sugar-replies-placeholder", &unique("reader")))
         .await
         .expect("subscribe replies");
     let mut out_stream = Box::pin(out_subscriber.stream());
@@ -1831,7 +2229,7 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     // The offsets went into the transaction: the group resumes past the window.
     publish(&reader, &input, br#"{"partition":0,"seq":99}"#).await;
     let mut resumed = reader
-        .subscribe(
+        .subscribe_with(
             KafkaTopic::new(&input)
                 .group(&group)
                 .commit(Commit::Transactional(pipeline_id.clone())),
@@ -1849,5 +2247,5 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     drop(resumed_stream);
     drop(resumed);
     drop(out_subscriber);
-    Broker::shutdown(&reader).await.expect("shutdown");
+    reader.shutdown().await.expect("shutdown");
 }

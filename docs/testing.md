@@ -1,11 +1,14 @@
 # Testing
 
 The `testing` feature ships `KafkaTestBroker`, an in-process stand-in for Kafka: the same
-handlers and descriptors, no cluster. Enable it as a dev-dependency only:
+handlers and descriptors, no cluster. It follows the same ladder as the real broker
+(`new` -> `connect` -> `shutdown`) and the real `KafkaPublish` policy pairs against its
+connected form, so include sites are identical for both brokers. Enable it as a dev-dependency
+only:
 
 ```toml
 [dev-dependencies]
-ruststream-rdkafka = { version = "0.5", features = ["testing"] }
+ruststream-rdkafka = { version = "0.6", features = ["testing"] }
 ```
 
 Never enable this feature in production builds.

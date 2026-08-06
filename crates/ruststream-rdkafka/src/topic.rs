@@ -2,7 +2,7 @@
 
 use ruststream::SubscriptionSource;
 
-use crate::broker::KafkaBroker;
+use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
 use crate::retry::Retry;
 use crate::subscriber::KafkaSubscriber;
@@ -106,7 +106,7 @@ pub enum Commit {
 ///
 /// Everything except the topic name is optional; unset options fall back to the librdkafka
 /// defaults (this crate does not impose its own). The group can also come from
-/// [`KafkaBroker::default_group`]; a subscription that ends up with no group at all is a
+/// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group); a subscription that ends up with no group at all is a
 /// startup error, because Kafka cannot subscribe without one.
 ///
 /// # Examples
@@ -210,7 +210,7 @@ impl KafkaTopic {
     }
 
     /// The consumer group for this subscription, overriding
-    /// [`KafkaBroker::default_group`].
+    /// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group).
     #[must_use]
     pub fn group(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
@@ -419,20 +419,23 @@ impl KafkaTopic {
     }
 }
 
-impl SubscriptionSource<KafkaBroker> for KafkaTopic {
+impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopic {
     type Subscriber = KafkaSubscriber;
 
     fn name(&self) -> &str {
         &self.name
     }
 
-    async fn subscribe(self, broker: &KafkaBroker) -> Result<Self::Subscriber, KafkaError> {
-        broker.subscribe(self).await
+    async fn subscribe(
+        self,
+        connected: &ConnectedKafkaBroker,
+    ) -> Result<Self::Subscriber, KafkaError> {
+        connected.subscribe_with(self).await
     }
 }
 
 #[cfg(feature = "testing")]
-impl SubscriptionSource<crate::testing::KafkaTestBroker> for KafkaTopic {
+impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic {
     type Subscriber = crate::testing::KafkaTestSubscriber;
 
     fn name(&self) -> &str {
@@ -441,7 +444,7 @@ impl SubscriptionSource<crate::testing::KafkaTestBroker> for KafkaTopic {
 
     async fn subscribe(
         self,
-        broker: &crate::testing::KafkaTestBroker,
+        broker: &crate::testing::ConnectedKafkaTestBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
         if !self.partitions.is_empty() {
             return Err(KafkaError::InvalidOptions(

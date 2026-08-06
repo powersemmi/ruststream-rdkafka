@@ -22,7 +22,8 @@
 `ruststream-rdkafka` implements the RustStream broker contract on top of
 [rdkafka](https://docs.rs/rdkafka) / librdkafka: `#[subscriber]` handlers consume topics through
 consumer groups, publishers await Kafka's delivery reports, and the whole service composes with
-the synchronous `#[ruststream::app]` builder thanks to the lazy startup contract.
+the synchronous `#[ruststream::app]` builder because the broker's constructor is pure
+configuration - the runtime climbs the lifecycle ladder around it.
 
 ## Features
 
@@ -37,8 +38,17 @@ the synchronous `#[ruststream::app]` builder thanks to the lazy startup contract
 - **librdkafka delegation** - unset options mean librdkafka defaults; raw `config(key, value)`
   passthroughs on the broker, the producer, and the descriptor reach every property not
   surfaced as a typed option.
-- **Fail-fast lifecycle** - synchronous `new`, idempotent `connect` with a cluster-reachability
-  probe, and a `shutdown` that flushes in-flight publishes.
+- **Typed lifecycle** - synchronous `new` records configuration, `connect` probes the cluster and
+  hands back the connected broker, `shutdown` consumes it into a closed witness carrying the flush
+  result; subscribing before connecting or publishing after shutdown does not compile.
+- **Policies, then live publishers** - `KafkaPublish` and its transactional, per-partition, and
+  exactly-once transitions are pure declaration, written at the include site; the runtime pairs
+  each into a live publisher once the broker is connected, so a handler never sees a
+  not-connected one.
+- **Repositionable subscriptions** - the `Seekable` capability moves a live subscription over
+  the partitions this consumer holds (earliest, latest, an absolute offset, a timestamp, or a
+  delivery's own position), with the tracked watermark and the exactly-once offsets following
+  the seek; `start_at(..)` applies a position on every startup.
 - **In-process test broker** - the `testing` feature ships `KafkaTestBroker` for application
   tests with the core `TestApp` harness, no cluster required.
 
@@ -46,8 +56,8 @@ the synchronous `#[ruststream::app]` builder thanks to the lazy startup contract
 
 ```toml
 [dependencies]
-ruststream = { version = "0.5", features = ["macros", "json"] }
-ruststream-rdkafka = "0.5"
+ruststream = { version = "0.6", features = ["macros", "json"] }
+ruststream-rdkafka = "0.6"
 serde = { version = "1", features = ["derive"] }
 ```
 

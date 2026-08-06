@@ -1,33 +1,43 @@
-//! The broker handle: connection lifecycle, subscriptions, and the publisher constructor.
+//! The broker ladder: the unconnected handle, the connected form, and the terminal witness.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
-use ruststream::{Broker, DescribeServer, ServerSpec, Subscribe};
-use tokio::sync::OnceCell;
+use ruststream::{Broker, ConnectedBroker, DescribeServer, ServerSpec, Subscribe};
 use tokio::task;
 
 use crate::eos::EosSource;
 use crate::error::KafkaError;
-use crate::publisher::KafkaPublisher;
+use crate::publisher::{KafkaPublish, KafkaPublisher, KafkaRetryPublisher};
 use crate::retry::RetryContext;
 use crate::subscriber::KafkaSubscriber;
 use crate::topic::{Commit, KafkaTopic, StartOffset};
 use crate::tracker::{CommitTracker, TrackingContext};
 
-/// The live client state: the shared producer every publisher clones from, plus the resolved
-/// producer configuration so transactional publishers can derive their own producers from it.
+/// The live client state behind [`ConnectedKafkaBroker`]: the shared producer every publisher
+/// clones from, the resolved configurations subscriptions and transactional producers derive
+/// from, and the registry of exactly-once sources.
 pub(crate) struct ConnState {
     producer: FutureProducer,
     producer_config: ClientConfig,
+    base_config: ClientConfig,
+    default_group: Option<String>,
+    flush_timeout: Duration,
     /// Subscriptions in `Commit::Transactional` mode, keyed by their pipeline id (the
     /// transactional id of the `EosPipeline` that commits their offsets).
     eos_sources: Mutex<HashMap<String, Vec<EosSource>>>,
+    /// Flipped by `shutdown`. The ladder makes owner-side misuse a compile error, but handles
+    /// that alias the connection (publishers paired earlier, clones of the connected form) are
+    /// still reachable, so their liveness is the one part of the contract that stays dynamic.
+    closed: AtomicBool,
+    #[cfg(feature = "schema-registry")]
+    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
 }
 
 impl ConnState {
@@ -37,6 +47,17 @@ impl ConnState {
 
     pub(crate) fn producer_config(&self) -> &ClientConfig {
         &self.producer_config
+    }
+
+    /// Errors once the connection this handle aliases has been shut down, naming the topic the
+    /// operation could not reach.
+    pub(crate) fn ensure_open(&self, topic: &str) -> Result<(), KafkaError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::Closed {
+                topic: topic.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     fn register_eos(&self, pipeline: &str, source: EosSource) {
@@ -65,23 +86,25 @@ impl ConnState {
 
 impl fmt::Debug for ConnState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnState").finish_non_exhaustive()
+        f.debug_struct("ConnState")
+            .field("closed", &self.closed.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
     }
 }
 
-/// The connection cell shared by the broker and everything it hands out, so publishers obtained
-/// before `Broker::connect` resolve the connection on first use.
-pub(crate) type SharedConn = Arc<OnceCell<ConnState>>;
+/// The cell an unconnected broker hands to its [`KafkaRetryPublisher`], filled once
+/// [`Broker::connect`] has the live state. See that type for why this one path is cell-backed.
+pub(crate) type EarlyConn = Arc<OnceLock<Arc<ConnState>>>;
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An Apache Kafka broker backed by [`rdkafka`](https://docs.rs/rdkafka) / librdkafka.
 ///
-/// Follows the `RustStream` lazy startup contract: [`new`](Self::new) is synchronous and does no
-/// I/O; the network work happens in the idempotent async `Broker::connect`, which the runtime
-/// calls once at startup. Publishers handed out earlier share the connection cell and resolve it
-/// on first use.
+/// This is the unconnected form: [`new`](Self::new) is synchronous and does no I/O, so a service
+/// composes with the synchronous `#[ruststream::app]` builder. All network work happens in
+/// [`Broker::connect`], which consumes this handle and yields the
+/// [`ConnectedKafkaBroker`] witness - subscriptions and publishers exist only from there.
 ///
 /// Configuration philosophy: options not set here mean the librdkafka defaults - this crate does
 /// not impose its own. Anything not surfaced as a typed option is reachable through the raw
@@ -100,19 +123,21 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaBroker {
-    conn: SharedConn,
     servers: Vec<String>,
     default_group: Option<String>,
     client_config: Vec<(String, String)>,
     producer_config: Vec<(String, String)>,
     connect_timeout: Duration,
     flush_timeout: Duration,
+    /// Filled by [`Broker::connect`], read only by [`KafkaRetryPublisher`]; clones of this
+    /// broker share it, so the publisher a clone handed out still comes alive.
+    early_conn: EarlyConn,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
 }
 
 impl KafkaBroker {
-    /// Records the bootstrap servers; no I/O happens until `Broker::connect`.
+    /// Records the bootstrap servers; no I/O happens until [`Broker::connect`].
     ///
     /// Each entry is a `host` or `host:port` seed the client bootstraps from.
     #[must_use]
@@ -122,32 +147,47 @@ impl KafkaBroker {
         S: Into<String>,
     {
         Self {
-            conn: Arc::new(OnceCell::new()),
             servers: servers.into_iter().map(Into::into).collect(),
             default_group: None,
             client_config: Vec::new(),
             producer_config: Vec::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            early_conn: Arc::new(OnceLock::new()),
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
         }
     }
 
-    /// Connects eagerly: [`new`](Self::new) followed by `Broker::connect`.
+    /// A publisher for builder-time wiring that needs a live
+    /// [`Publisher`](ruststream::Publisher) before the broker is connected - today that is
+    /// [`BrokerScope::retry_via`](ruststream::runtime::BrokerScope::retry_via), the deferred
+    /// republish behind `retry_after` on a broker without native delayed redelivery, which
+    /// Kafka is.
     ///
-    /// # Errors
+    /// It exists for exactly that: a publish policy cannot be used there, because `retry_via`
+    /// takes a publisher and a publisher may not exist before its connection does. This handle
+    /// is the narrow exception, backed by a cell [`Broker::connect`] fills; the regular publish
+    /// path stays policy-first and never sees a cell. Records go out through the broker's
+    /// shared producer, on the broker's producer configuration.
     ///
-    /// Returns [`KafkaError::Connect`] when the client cannot be created or the cluster is
-    /// unreachable.
-    pub async fn connect<I, S>(servers: I) -> Result<Self, KafkaError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let broker = Self::new(servers);
-        Broker::connect(&broker).await?;
-        Ok(broker)
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ruststream::runtime::{App, AppInfo, RustStream};
+    /// use ruststream_rdkafka::KafkaBroker;
+    ///
+    /// # fn demo() -> impl App {
+    /// let broker = KafkaBroker::new(["localhost:9092"]).default_group("payments-svc");
+    /// RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
+    ///     let retries = b.broker().retry_publisher();
+    ///     b.retry_via(retries);
+    /// })
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn retry_publisher(&self) -> KafkaRetryPublisher {
+        KafkaRetryPublisher::new(Arc::clone(&self.early_conn))
     }
 
     /// The consumer group used by subscriptions that do not set one themselves
@@ -178,7 +218,7 @@ impl KafkaBroker {
         self
     }
 
-    /// How long `Broker::connect` waits for the cluster-reachability probe (a metadata fetch)
+    /// How long [`Broker::connect`] waits for the cluster-reachability probe (a metadata fetch)
     /// before failing startup. Defaults to 30 seconds. This is this crate's own fail-fast
     /// window, not a librdkafka property.
     #[must_use]
@@ -187,31 +227,12 @@ impl KafkaBroker {
         self
     }
 
-    /// How long `Broker::shutdown` waits for in-flight publishes to flush before reporting
-    /// failure. Defaults to 30 seconds.
+    /// How long [`ConnectedBroker::shutdown`] waits for in-flight publishes to flush before
+    /// reporting failure. Defaults to 30 seconds.
     #[must_use]
     pub fn flush_timeout(mut self, timeout: Duration) -> Self {
         self.flush_timeout = timeout;
         self
-    }
-
-    /// A publisher on the shared producer.
-    #[must_use]
-    pub fn publisher(&self) -> KafkaPublisher {
-        KafkaPublisher::new(Arc::clone(&self.conn))
-    }
-
-    fn connected(&self) -> Result<&ConnState, KafkaError> {
-        self.conn.get().ok_or(KafkaError::NotConnected)
-    }
-
-    fn base_config(&self) -> ClientConfig {
-        let mut config = ClientConfig::new();
-        config.set("bootstrap.servers", self.servers.join(","));
-        for (key, value) in &self.client_config {
-            config.set(key, value);
-        }
-        config
     }
 
     /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client to the
@@ -229,25 +250,170 @@ impl KafkaBroker {
         self
     }
 
+    fn base_config(&self) -> ClientConfig {
+        let mut config = ClientConfig::new();
+        config.set("bootstrap.servers", self.servers.join(","));
+        for (key, value) in &self.client_config {
+            config.set(key, value);
+        }
+        config
+    }
+}
+
+impl Broker for KafkaBroker {
+    type Error = KafkaError;
+    type Connected = ConnectedKafkaBroker;
+
+    /// Creates the shared producer and probes the cluster with a metadata fetch, so an
+    /// unreachable or misconfigured cluster fails startup instead of the first publish.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] when no bootstrap server was given and
+    /// [`KafkaError::Connect`] when the client cannot be created or the probe fails within
+    /// [`connect_timeout`](Self::connect_timeout).
+    async fn connect(self) -> Result<Self::Connected, Self::Error> {
+        if self.servers.is_empty() {
+            return Err(KafkaError::InvalidOptions(
+                "at least one bootstrap server is required".to_owned(),
+            ));
+        }
+        let base_config = self.base_config();
+        let mut producer_config = base_config.clone();
+        for (key, value) in &self.producer_config {
+            producer_config.set(key, value);
+        }
+        let producer: FutureProducer = producer_config.create().map_err(KafkaError::connect)?;
+
+        // fetch_metadata blocks, so it runs on the blocking pool.
+        let probe = producer.clone();
+        let timeout = self.connect_timeout;
+        task::spawn_blocking(move || probe.client().fetch_metadata(None, timeout))
+            .await
+            .map_err(|err| KafkaError::Connect(Box::new(err)))?
+            .map_err(KafkaError::connect)?;
+
+        let state = Arc::new(ConnState {
+            producer,
+            producer_config,
+            base_config,
+            default_group: self.default_group,
+            flush_timeout: self.flush_timeout,
+            eos_sources: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            #[cfg(feature = "schema-registry")]
+            schema_registry: self.schema_registry,
+        });
+        // Brings any early publisher handed out before this call alive. A second connect of a
+        // clone lineage leaves the first connection in the cell rather than swapping it, so an
+        // early publisher keeps publishing through the connection it was minted against.
+        let _ = self.early_conn.set(Arc::clone(&state));
+        Ok(ConnectedKafkaBroker { state })
+    }
+}
+
+impl DescribeServer for KafkaBroker {
+    fn describe_server(&self) -> ServerSpec {
+        ServerSpec::new(self.servers.join(","), "kafka")
+    }
+}
+
+/// The connected form of [`KafkaBroker`]: the typed witness that [`Broker::connect`] succeeded.
+///
+/// Everything connection-bound hangs off this handle - subscriptions
+/// ([`KafkaTopic`](crate::KafkaTopic), the [`Subscribe`] capability) and live publishers (paired
+/// from a [`KafkaPublish`] policy).
+///
+/// [`ConnectedBroker::shutdown`] consumes the handle, so publishing or subscribing afterwards is
+/// a compile error for its owner; handles that alias the connection (publishers paired earlier,
+/// subscribers still open) report [`KafkaError::Closed`] instead of succeeding against a dead
+/// connection.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream::{Broker, ConnectedBroker};
+/// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+///
+/// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+/// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+/// let publisher = connected.publisher(KafkaPublish::default());
+/// let _closed = connected.shutdown().await?;
+/// # let _ = publisher;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct ConnectedKafkaBroker {
+    state: Arc<ConnState>,
+}
+
+impl ConnectedKafkaBroker {
+    /// A live publisher on the shared producer, configured by `policy`.
+    ///
+    /// The declaration-side counterpart of `policy.pair(&connected)`; use the policy form at
+    /// include sites and `after_startup` hooks, this one when you already hold the connected
+    /// broker.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+    ///
+    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    /// let publisher = connected.publisher(KafkaPublish::default());
+    /// # let _ = publisher;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn publisher(&self, policy: KafkaPublish) -> KafkaPublisher {
+        KafkaPublisher::new(Arc::clone(&self.state), policy.queue_timeout_setting())
+    }
+
+    pub(crate) fn state(&self) -> &Arc<ConnState> {
+        &self.state
+    }
+
     /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic(s)
     /// or pattern.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::NotConnected`] before `Broker::connect`,
-    /// [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
+    /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
+    /// down, [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
     /// consumer group (or the descriptor's pattern is not `^`-anchored), and
     /// [`KafkaError::Subscribe`] when the consumer cannot be created or the subscription is
     /// rejected.
-    // Async without an await on purpose: librdkafka joins the group in the background, and the
-    // descriptor contract (`SubscriptionSource::subscribe`) is async either way.
-    #[allow(clippy::unused_async)]
-    pub async fn subscribe(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
-        self.connected()?;
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
+    ///
+    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    /// let subscriber = connected
+    ///     .subscribe_with(KafkaTopic::new("orders").group("orders-svc"))
+    ///     .await?;
+    /// # let _ = subscriber;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(
+        clippy::unused_async,
+        reason = "librdkafka joins the group in the background; the SubscriptionSource contract \
+                  is async either way"
+    )]
+    pub async fn subscribe_with(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
+        self.state.ensure_open(def.topic())?;
         def.validate()?;
         let manual = !def.assigned_partitions().is_empty();
         let group = def
-            .group_or(self.default_group.as_deref())
+            .group_or(self.state.default_group.as_deref())
             .map(str::to_owned);
         let group = match group {
             Some(group) => Some(group),
@@ -265,7 +431,7 @@ impl KafkaBroker {
             validate_manual_assignment(&def, group.as_deref())?;
         }
 
-        let mut config = self.base_config();
+        let mut config = self.state.base_config.clone();
         if let Some(group) = &group {
             config.set("group.id", group);
         } else {
@@ -321,8 +487,8 @@ impl KafkaBroker {
 
         let consumer = Arc::new(consumer);
         if let Commit::Transactional(pipeline) = def.commit_mode() {
-            let state = self.conn.get().ok_or(KafkaError::NotConnected)?;
-            state.register_eos(pipeline, EosSource::new(&tracker, &consumer));
+            self.state
+                .register_eos(pipeline, EosSource::new(&tracker, &consumer));
         }
         let retry =
             (def.retry_policy().is_some() || def.dead_letter_topic().is_some()).then(|| {
@@ -330,8 +496,9 @@ impl KafkaBroker {
                     def.retry_policy().cloned(),
                     def.max_deliveries_cap(),
                     def.dead_letter_topic().map(str::to_owned),
-                    Arc::clone(&self.conn),
+                    Arc::clone(&self.state),
                     Arc::clone(&consumer),
+                    Arc::clone(&tracker),
                 ))
             });
         let subscriber = KafkaSubscriber::new(
@@ -343,8 +510,67 @@ impl KafkaBroker {
             retry,
         );
         #[cfg(feature = "schema-registry")]
-        let subscriber = subscriber.with_schema_registry(self.schema_registry.clone());
+        let subscriber = subscriber.with_schema_registry(self.state.schema_registry.clone());
         Ok(subscriber)
+    }
+}
+
+impl ConnectedBroker for ConnectedKafkaBroker {
+    type Error = KafkaError;
+    type Closed = ClosedKafkaBroker;
+
+    /// Flushes in-flight publishes and closes the connection; consumers close when their
+    /// subscribers drop.
+    ///
+    /// Consuming `self` makes any further use of this handle a compile error. Handles that
+    /// alias the connection report [`KafkaError::Closed`] from here on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Publish`] when in-flight records were not delivered within
+    /// [`KafkaBroker::flush_timeout`].
+    async fn shutdown(self) -> Result<Self::Closed, Self::Error> {
+        // Closed before the flush: a publish racing the teardown must not enter a queue nobody
+        // will drain afterwards.
+        self.state.closed.store(true, Ordering::Release);
+        let producer = self.state.producer.clone();
+        let timeout = self.state.flush_timeout;
+        // flush blocks (it polls the producer), so it runs on the blocking pool.
+        let unflushed = task::spawn_blocking(move || {
+            producer.flush(timeout)?;
+            Ok::<_, rdkafka::error::KafkaError>(producer.in_flight_count())
+        })
+        .await
+        .map_err(|err| KafkaError::Publish(Box::new(err)))?
+        .map_err(KafkaError::publish)?;
+        Ok(ClosedKafkaBroker { unflushed })
+    }
+}
+
+/// The terminal witness returned by [`ConnectedBroker::shutdown`].
+///
+/// Has no publish or subscribe surface; it carries the teardown diagnostics as plain data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClosedKafkaBroker {
+    unflushed: i32,
+}
+
+impl ClosedKafkaBroker {
+    /// How many records librdkafka still held when the connection closed. Zero after a clean
+    /// flush; a non-zero count means the producer queue outlived the flush call.
+    #[must_use]
+    pub fn unflushed_records(&self) -> i32 {
+        self.unflushed
+    }
+}
+
+impl Subscribe for ConnectedKafkaBroker {
+    type Subscriber = KafkaSubscriber;
+
+    /// Subscribes to the topic `name` with descriptor defaults; requires
+    /// [`KafkaBroker::default_group`].
+    async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
+        self.subscribe_with(KafkaTopic::new(name)).await
     }
 }
 
@@ -397,89 +623,6 @@ fn assign_partitions(
     consumer.assign(&assignment).map_err(KafkaError::subscribe)
 }
 
-impl Broker for KafkaBroker {
-    type Error = KafkaError;
-
-    /// Creates the shared producer and probes the cluster with a metadata fetch, so an
-    /// unreachable or misconfigured cluster fails startup instead of the first publish;
-    /// idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::InvalidOptions`] when no bootstrap server was given and
-    /// [`KafkaError::Connect`] when the client cannot be created or the probe fails within
-    /// [`connect_timeout`](Self::connect_timeout).
-    async fn connect(&self) -> Result<(), Self::Error> {
-        self.conn
-            .get_or_try_init(|| async {
-                if self.servers.is_empty() {
-                    return Err(KafkaError::InvalidOptions(
-                        "at least one bootstrap server is required".to_owned(),
-                    ));
-                }
-                let mut config = self.base_config();
-                for (key, value) in &self.producer_config {
-                    config.set(key, value);
-                }
-                let producer: FutureProducer = config.create().map_err(KafkaError::connect)?;
-
-                // fetch_metadata blocks, so it runs on the blocking pool.
-                let probe = producer.clone();
-                let timeout = self.connect_timeout;
-                task::spawn_blocking(move || probe.client().fetch_metadata(None, timeout))
-                    .await
-                    .map_err(|err| KafkaError::Connect(Box::new(err)))?
-                    .map_err(KafkaError::connect)?;
-
-                Ok(ConnState {
-                    producer,
-                    producer_config: config,
-                    eos_sources: Mutex::new(HashMap::new()),
-                })
-            })
-            .await?;
-        Ok(())
-    }
-
-    /// Flushes in-flight publishes; consumers close when their subscribers drop. Idempotent.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::Publish`] when in-flight records were not delivered within
-    /// [`flush_timeout`](Self::flush_timeout).
-    async fn shutdown(&self) -> Result<(), Self::Error> {
-        if let Some(state) = self.conn.get() {
-            // flush blocks (it polls the producer), so it runs on the blocking pool.
-            let producer = state.producer.clone();
-            let timeout = self.flush_timeout;
-            task::spawn_blocking(move || producer.flush(timeout))
-                .await
-                .map_err(|err| KafkaError::Publish(Box::new(err)))?
-                .map_err(KafkaError::publish)?;
-        }
-        Ok(())
-    }
-}
-
-// `Self::subscribe` inside this impl would resolve to the trait method and recurse; the type
-// name is the only way to reach the inherent one.
-#[allow(clippy::use_self)]
-impl Subscribe for KafkaBroker {
-    type Subscriber = KafkaSubscriber;
-
-    /// Subscribes to the topic `name` with descriptor defaults; requires
-    /// [`default_group`](Self::default_group).
-    async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
-        KafkaBroker::subscribe(self, KafkaTopic::new(name)).await
-    }
-}
-
-impl DescribeServer for KafkaBroker {
-    fn describe_server(&self) -> ServerSpec {
-        ServerSpec::new(self.servers.join(","), "kafka")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ruststream::DescribeServer as _;
@@ -496,32 +639,25 @@ mod tests {
         assert_eq!(broker.describe_server().protocol, "kafka");
     }
 
-    #[tokio::test]
-    async fn operations_before_connect_report_not_connected() {
-        let broker = KafkaBroker::new(["localhost:9092"]).default_group("g");
-        let err = broker
-            .subscribe(KafkaTopic::new("orders"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, KafkaError::NotConnected));
-    }
-
-    #[tokio::test]
-    async fn missing_group_is_a_clear_startup_error() {
-        let broker = KafkaBroker::new(["localhost:9092"]);
-        // Force the connected state check to pass is not possible without I/O; the group check
-        // runs after it, so assert on the error of the not-connected path elsewhere and the
-        // group resolution logic directly here.
+    #[test]
+    fn descriptor_group_resolution_prefers_the_descriptor() {
         let def = KafkaTopic::new("orders");
         assert!(def.group_or(None).is_none());
         assert_eq!(def.group_or(Some("fallback")), Some("fallback"));
-        let _ = broker;
+        assert_eq!(
+            KafkaTopic::new("orders")
+                .group("own")
+                .group_or(Some("fallback")),
+            Some("own"),
+        );
     }
 
     #[tokio::test]
     async fn connect_with_no_servers_fails_fast() {
-        let broker = KafkaBroker::new(Vec::<String>::new());
-        let err = Broker::connect(&broker).await.unwrap_err();
+        let err = KafkaBroker::new(Vec::<String>::new())
+            .connect()
+            .await
+            .unwrap_err();
         assert!(matches!(err, KafkaError::InvalidOptions(_)));
     }
 }

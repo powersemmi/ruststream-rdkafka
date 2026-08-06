@@ -26,13 +26,14 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use ruststream::runtime::TypedPublisher;
-/// use ruststream_rdkafka::{KafkaBroker, RoundRobin};
+/// use ruststream_rdkafka::{KafkaPublish, RoundRobin};
 ///
 /// # #[cfg(feature = "json")]
-/// # fn wire(broker: &KafkaBroker) {
-/// let replies = TypedPublisher::new(broker.publisher()).transform(RoundRobin::partitions(8));
+/// # fn wire() {
+/// let replies =
+///     TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(8));
 /// # let _ = replies;
 /// # }
 /// ```

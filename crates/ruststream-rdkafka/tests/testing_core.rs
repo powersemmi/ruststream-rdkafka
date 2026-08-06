@@ -18,14 +18,20 @@ use ruststream::runtime::{AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
-    Broker, DescribeServer, Headers, IncomingMessage, OutgoingMessage, Partitioned, Publisher,
-    Subscriber,
+    Broker, ConnectedBroker, DescribeServer, Headers, IncomingMessage, OutgoingMessage,
+    Partitioned, Publisher, Subscriber,
 };
-use ruststream_rdkafka::testing::{KafkaTestBroker, KafkaTestMessage};
-use ruststream_rdkafka::{KafkaError, KafkaTopic, PARTITION_KEY_HEADER};
+use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
+use ruststream_rdkafka::{KafkaError, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER};
 use serde::{Deserialize, Serialize};
 
 const WAIT: Duration = Duration::from_secs(1);
+
+/// The in-process ladder every test starts from: synchronous construction, then the consuming
+/// `connect`, exactly like the real broker.
+async fn connected() -> ConnectedKafkaTestBroker {
+    KafkaTestBroker::new().connect().await.expect("connect")
+}
 
 async fn next_payload<S>(stream: &mut S) -> Vec<u8>
 where
@@ -43,12 +49,11 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pub_sub_round_trip_through_broker_traits() {
-    let broker = KafkaTestBroker::new();
-    broker.connect().await.expect("connect");
+    let broker = connected().await;
 
-    let mut subscriber = broker.subscribe("orders").await.expect("subscribe");
+    let mut subscriber = broker.subscribe_with("orders").await.expect("subscribe");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("orders", b"o1"))
         .await
         .expect("publish");
@@ -59,13 +64,16 @@ async fn pub_sub_round_trip_through_broker_traits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_topic_name_is_rejected() {
-    let broker = KafkaTestBroker::new();
+    let broker = connected().await;
 
-    let subscribe_err = broker.subscribe("").await.expect_err("empty subscribe");
+    let subscribe_err = broker
+        .subscribe_with("")
+        .await
+        .expect_err("empty subscribe");
     assert!(matches!(subscribe_err, KafkaError::InvalidOptions(_)));
 
     let publish_err = broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("", b"x"))
         .await
         .expect_err("empty publish");
@@ -74,12 +82,12 @@ async fn empty_topic_name_is_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topics_are_isolated() {
-    let broker = KafkaTestBroker::new();
-    let mut orders = broker.subscribe("orders").await.expect("subscribe");
-    let mut payments = broker.subscribe("payments").await.expect("subscribe");
+    let broker = connected().await;
+    let mut orders = broker.subscribe_with("orders").await.expect("subscribe");
+    let mut payments = broker.subscribe_with("payments").await.expect("subscribe");
 
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("orders", b"o1"))
         .await
         .expect("publish");
@@ -94,10 +102,10 @@ async fn topics_are_isolated() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nack_requeue_redelivers_and_drop_drops() {
-    let broker = KafkaTestBroker::new();
-    let mut subscriber = broker.subscribe("retry").await.expect("subscribe");
+    let broker = connected().await;
+    let mut subscriber = broker.subscribe_with("retry").await.expect("subscribe");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("retry", b"again"))
         .await
         .expect("publish");
@@ -124,14 +132,14 @@ async fn nack_requeue_redelivers_and_drop_drops() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn headers_and_partition_key_propagate() {
-    let broker = KafkaTestBroker::new();
-    let mut subscriber = broker.subscribe("keyed").await.expect("subscribe");
+    let broker = connected().await;
+    let mut subscriber = broker.subscribe_with("keyed").await.expect("subscribe");
 
     let mut headers = Headers::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "k-1");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("keyed", b"{}").with_headers(headers))
         .await
         .expect("publish");
@@ -155,7 +163,7 @@ async fn headers_and_partition_key_propagate() {
 
     // And a keyless message reports no partition key.
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("keyed", b"plain"))
         .await
         .expect("publish");
@@ -170,22 +178,22 @@ async fn headers_and_partition_key_propagate() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_server_reports_in_process_kafka() {
-    let broker = KafkaTestBroker::new();
-    let spec = broker.describe_server();
+    // `DescribeServer` describes the configuration, so it sits on the unconnected form.
+    let spec = KafkaTestBroker::new().describe_server();
     assert_eq!(spec.protocol, "kafka");
     assert!(spec.host.is_none(), "the in-process broker has no host");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn published_log_observes_every_publish() {
-    let broker = KafkaTestBroker::new();
+    let broker = connected().await;
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("audit", b"first"))
         .await
         .expect("publish");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("audit", b"second"))
         .await
         .expect("publish");
@@ -198,11 +206,11 @@ async fn published_log_observes_every_publish() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stream_can_be_reentered_without_losing_deliveries() {
-    let broker = KafkaTestBroker::new();
-    let mut subscriber = broker.subscribe("reenter").await.expect("subscribe");
+    let broker = connected().await;
+    let mut subscriber = broker.subscribe_with("reenter").await.expect("subscribe");
 
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("reenter", b"one"))
         .await
         .expect("publish");
@@ -212,7 +220,7 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
     }
 
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("reenter", b"two"))
         .await
         .expect("publish");
@@ -224,17 +232,17 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
 async fn multi_topic_descriptor_mounts_on_the_test_broker() {
     use ruststream::SubscriptionSource as _;
 
-    let broker = KafkaTestBroker::new();
+    let broker = connected().await;
     let def = KafkaTopic::new("orders").and_topic("cancellations");
     let mut subscriber = def.subscribe(&broker).await.expect("subscribe");
 
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("orders", b"o1"))
         .await
         .expect("publish");
     broker
-        .publisher()
+        .publisher(KafkaPublish::default())
         .publish(OutgoingMessage::new("cancellations", b"c1"))
         .await
         .expect("publish");
@@ -267,7 +275,7 @@ async fn ack_order(order: &Order) -> HandlerResult {
 }
 
 // The descriptor form must mount against the test broker through the testing-gated
-// `SubscriptionSource<KafkaTestBroker>` impl on `KafkaTopic`.
+// `SubscriptionSource<ConnectedKafkaTestBroker>` impl on `KafkaTopic`.
 #[subscriber(KafkaTopic::new("payments"))]
 async fn ack_payment(order: &Order) -> HandlerResult {
     let _ = order;
@@ -390,8 +398,8 @@ async fn round_robin_stamps_cycling_partitions() {
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             let work_items =
-                TypedPublisher::new(b.broker().publisher()).transform(RoundRobin::partitions(2));
-            b.include_publishing(plan, work_items);
+                TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(2));
+            b.include(plan).publisher(work_items);
         });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -431,10 +439,10 @@ async fn round_robin_leaves_keyed_replies_alone() {
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
-            let keyed_items = TypedPublisher::new(b.broker().publisher())
+            let keyed_items = TypedPublisher::new(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
-            b.include_publishing(plan_keyed, keyed_items);
+            b.include(plan_keyed).publisher(keyed_items);
         });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -462,8 +470,7 @@ async fn round_robin_leaves_keyed_replies_alone() {
 async fn manual_assignment_is_rejected_in_process() {
     use ruststream::SubscriptionSource as _;
 
-    let broker = KafkaTestBroker::new();
-    broker.connect().await.expect("connect");
+    let broker = connected().await;
 
     let err = KafkaTopic::new("orders")
         .partitions([0])
@@ -471,4 +478,25 @@ async fn manual_assignment_is_rejected_in_process() {
         .await
         .expect_err("partitions need a real cluster");
     assert!(matches!(err, KafkaError::InvalidOptions(_)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publisher_errors_after_shutdown() {
+    let broker = connected().await;
+    let publisher = broker.publisher(KafkaPublish::default());
+    publisher
+        .publish(OutgoingMessage::new("orders", b"before"))
+        .await
+        .expect("publish before shutdown");
+
+    broker.shutdown().await.expect("shutdown");
+
+    let err = publisher
+        .publish(OutgoingMessage::new("orders", b"after"))
+        .await
+        .expect_err("publishing through a handle aliasing a closed transport must error");
+    assert!(
+        matches!(&err, KafkaError::Closed { topic } if topic == "orders"),
+        "the error must name the topic it could not reach, got: {err}",
+    );
 }

@@ -69,8 +69,8 @@ production guidance (`auto.register.schemas` off).
 
 Publishing handlers, reply publishers, the partition-scoped transactional publishers, and the
 EOS pipeline all compose unchanged: they publish through the app's pipeline, where the layer
-sits. A raw `broker.publisher()` used outside the runtime bypasses the pipeline and publishes
-exactly what it is given.
+sits. A publisher paired straight off a connected broker outside the runtime bypasses the
+pipeline and publishes exactly what it is given.
 
 ## Formats
 

@@ -10,9 +10,9 @@
 
 use std::time::Duration;
 
-use ruststream::Buffered;
 use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
+use ruststream::{Buffered, nonzero};
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic};
 use serde::Deserialize;
 
@@ -59,7 +59,7 @@ async fn handle_page(orders: &[Order]) -> HandlerResult {
     Buffered::<KafkaTopic>::new(
         KafkaTopic::new("payments").group("payments-svc").commit(Commit::Tracked)
     )
-    .max_size(50)
+    .max_size(nonzero!(50))
     .max_wait(Duration::from_millis(20))
 ))]
 async fn reconcile_page(payments: &[Payment]) -> Vec<HandlerResult> {
@@ -84,7 +84,9 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         // Kafka has no native delayed redelivery: retry_after re-publishes a delayed copy
         // through this publisher (and settles the original, so the committed position moves).
-        let retries = b.broker().publisher();
+        // `retry_via` takes a live publisher, not a policy, so the broker mints its early
+        // publisher for it - the one handle that resolves the connection at startup.
+        let retries = b.broker().retry_publisher();
         b.retry_via(retries);
         b.include_batch(handle_page);
         b.include_batch(reconcile_page);

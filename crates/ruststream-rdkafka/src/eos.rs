@@ -23,11 +23,14 @@ use ruststream::runtime::{
     Outgoing, PublishContext, PublishTransform, PublishTransformIdentity, PublishTransformStack,
     TypedPublisher,
 };
-use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher as _};
+use ruststream::{
+    OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
+};
 use tracing::{debug, error};
 
+use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
-use crate::publisher::KafkaPublisher;
+use crate::publisher::{KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The Kafka Streams default for exactly-once commit intervals.
@@ -130,14 +133,18 @@ struct Window {
 }
 
 struct PipelineInner {
-    publisher: KafkaPublisher,
+    publisher: KafkaTransactionalPublisher,
     /// The pipeline id: the publisher's transactional id, which `Commit::Transactional`
     /// subscriptions name to register their offsets here.
-    id: Option<String>,
+    id: String,
     interval: Duration,
     window: Mutex<Window>,
     /// Woken on every phase transition; publishers waiting for admission re-check then.
     phase_changed: tokio::sync::Notify,
+    /// The sources registered under this pipeline id, refreshed whenever a window opens. The
+    /// publish path reads them to notice a reposition without touching the broker-wide registry
+    /// per message.
+    sources: Mutex<Vec<EosSource>>,
     /// Offsets committed by this pipeline per (topic, partition) ("next to consume"), the
     /// seek target when a window aborts.
     committed: Mutex<HashMap<(String, i32), i64>>,
@@ -146,20 +153,90 @@ struct PipelineInner {
     session_low: Mutex<HashMap<(String, i32), i64>>,
 }
 
-/// An exactly-once pipeline over one transactional producer.
+/// The publish policy of [`EosPipeline`]: the pipeline id (the producer's transactional id)
+/// plus the commit interval, declared anywhere and paired with the connected broker at startup.
 ///
 /// Wiring, all three naming the same id:
 ///
-/// 1. The publisher: `broker.publisher().transactional_id("pipeline-1")`.
+/// 1. The policy: `KafkaEosPublish::new("pipeline-1")`, attached at the include site
+///    (`b.include(handler).publisher(policy)`) or bound for an `after_startup` hook.
 /// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
 ///    stops committing offsets on its own and registers with the pipeline instead.
-/// 3. The pipeline: `EosPipeline::new(publisher)`, held in the application state; handlers
-///    call [`publish`](Self::publish) with the delivery's [`SourceOffset`].
+/// 3. The handler: it receives the paired [`EosPipeline`] and calls
+///    [`publish`](EosPipeline::publish) with the delivery's [`SourceOffset`].
 ///
-/// Every [`commit_interval`](Self::commit_interval) the pipeline closes the window: it waits
-/// until every delivery that published into it has settled (the shared watermark reached the
-/// enrolled offsets), adds the settled source positions and their group metadata to the
-/// transaction, and commits. On any failure - a failed publish, a settle stall (a handler
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use ruststream_rdkafka::KafkaEosPublish;
+///
+/// let policy = KafkaEosPublish::new("enrich-1").commit_interval(Duration::from_millis(50));
+/// # let _ = policy;
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaEosPublish {
+    transactional: KafkaTransactionalPublish,
+    interval: Duration,
+}
+
+impl KafkaEosPublish {
+    /// Declares a pipeline fenced by `id`, which doubles as the pipeline id that
+    /// `Commit::Transactional` subscriptions register under.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            transactional: KafkaPublish::default().transactional_id(id),
+            interval: DEFAULT_COMMIT_INTERVAL,
+        }
+    }
+
+    /// How long a window stays open before committing; defaults to 100ms (the Kafka Streams
+    /// exactly-once default). Longer intervals amortize the commit over more records at the
+    /// cost of end-to-end latency (records become visible only at the commit).
+    pub const fn commit_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// See [`KafkaTransactionalPublish::transaction_timeout`]; it doubles as the deadline a
+    /// window waits for its participants to settle.
+    pub fn transaction_timeout(mut self, timeout: Duration) -> Self {
+        self.transactional = self.transactional.transaction_timeout(timeout);
+        self
+    }
+
+    /// See [`KafkaPublish::queue_timeout`].
+    pub fn queue_timeout(mut self, timeout: Duration) -> Self {
+        self.transactional = self.transactional.queue_timeout(timeout);
+        self
+    }
+
+    /// The pipeline id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.transactional.id()
+    }
+}
+
+impl PublishPolicy<ConnectedKafkaBroker> for KafkaEosPublish {
+    type Live = EosPipeline;
+
+    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
+        let interval = self.interval;
+        let publisher = self.transactional.pair(connected).await?;
+        Ok(EosPipeline::new(publisher, interval))
+    }
+}
+
+/// An exactly-once pipeline over one transactional producer, the live form of
+/// [`KafkaEosPublish`].
+///
+/// Every [`commit_interval`](KafkaEosPublish::commit_interval) the pipeline closes the window:
+/// it waits until every delivery that published into it has settled (the shared watermark
+/// reached the enrolled offsets), adds the settled source positions and their group metadata to
+/// the transaction, and commits. On any failure - a failed publish, a settle stall (a handler
 /// hanging or `retry()`-ing past the publisher's transaction timeout), a rebalance revoking
 /// an enrolled partition, a commit error - the window aborts and the consumers seek back, so
 /// the whole window redelivers and republishes into a fresh transaction; committed output
@@ -183,41 +260,12 @@ impl std::fmt::Debug for EosPipeline {
 }
 
 impl EosPipeline {
-    /// Builds the pipeline over `publisher`, which must carry a
-    /// [`transactional_id`](KafkaPublisher::transactional_id) - it doubles as the pipeline id
-    /// that `Commit::Transactional` subscriptions register under. A publisher without one
-    /// fails the first publish with a clear error.
-    #[must_use]
-    pub fn new(publisher: KafkaPublisher) -> Self {
-        let id = publisher.transactional_id_str().map(str::to_owned);
+    fn new(publisher: KafkaTransactionalPublisher, interval: Duration) -> Self {
+        let id = publisher.id().to_owned();
         Self {
             inner: Arc::new(PipelineInner {
                 publisher,
                 id,
-                interval: DEFAULT_COMMIT_INTERVAL,
-                window: Mutex::new(Window {
-                    phase: Phase::Idle,
-                    enrolled: HashMap::new(),
-                    failed: false,
-                    epoch: 0,
-                }),
-                phase_changed: tokio::sync::Notify::new(),
-                committed: Mutex::new(HashMap::new()),
-                session_low: Mutex::new(HashMap::new()),
-            }),
-        }
-    }
-
-    /// How long a window stays open before committing; defaults to 100ms (the Kafka Streams
-    /// exactly-once default). Longer intervals amortize the commit over more records at the
-    /// cost of end-to-end latency (records become visible only at the commit). Configure
-    /// before handing the pipeline out.
-    #[must_use]
-    pub fn commit_interval(self, interval: Duration) -> Self {
-        Self {
-            inner: Arc::new(PipelineInner {
-                publisher: self.inner.publisher.clone(),
-                id: self.inner.id.clone(),
                 interval,
                 window: Mutex::new(Window {
                     phase: Phase::Idle,
@@ -226,10 +274,18 @@ impl EosPipeline {
                     epoch: 0,
                 }),
                 phase_changed: tokio::sync::Notify::new(),
+                sources: Mutex::new(Vec::new()),
                 committed: Mutex::new(HashMap::new()),
                 session_low: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// The pipeline id: the transactional id its producer is fenced by, and the id
+    /// `Commit::Transactional` subscriptions register under.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.inner.id
     }
 
     /// Publishes `msg` into the pipeline's open window on behalf of the delivery at `source`.
@@ -240,10 +296,9 @@ impl EosPipeline {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the publisher carries no transactional id,
-    /// [`KafkaError::NotConnected`] before `Broker::connect`, and [`KafkaError::Publish`] when
-    /// opening the transaction or producing the record fails - the window aborts and
-    /// redelivers, so failing the handler (`retry()`) is the right response.
+    /// Returns [`KafkaError::Closed`] once the broker has shut down and
+    /// [`KafkaError::Publish`] when opening the transaction or producing the record fails - the
+    /// window aborts and redelivers, so failing the handler (`retry()`) is the right response.
     ///
     /// # Cancel safety
     ///
@@ -280,9 +335,14 @@ impl EosPipeline {
             // The waiter is created before the phase check so a transition landing in
             // between is not missed.
             let phase_changed = self.inner.phase_changed.notified();
+            // A window whose sources were repositioned is void: its transaction is about to
+            // abort, and anything published into it would be purged with it. The replayed
+            // delivery waits for the fresh window instead.
+            let voided = self.repositioned();
             let action = {
                 let mut window = self.inner.window.lock().expect("window mutex poisoned");
                 match window.phase {
+                    _ if voided && window.phase != Phase::Idle => Admission::Wait,
                     Phase::Open => {
                         Self::enroll(&mut window, &self.inner.session_low, source);
                         Admission::Admitted(window.epoch)
@@ -321,6 +381,15 @@ impl EosPipeline {
     /// Opens the transaction as the winning publisher and spawns the window's commit task.
     /// Returns the opened window's epoch.
     async fn open_window(&self, source: &SourceOffset) -> Result<u64, KafkaError> {
+        // The registry lookup happens once per window, here, and the publish path reads the
+        // cached list. A reposition from before this window is already reflected in the
+        // sources' bookkeeping, so its flag is cleared: only a seek landing while the window is
+        // open has offsets of this window to invalidate.
+        let registered = self.inner.publisher.state().eos_sources(&self.inner.id);
+        for source in registered.iter().filter_map(EosSource::upgrade) {
+            source.tracker.take_repositioned();
+        }
+        *self.inner.sources.lock().expect("sources mutex poisoned") = registered;
         let begun = self.inner.publisher.begin_transaction().await;
         let mut window = self.inner.window.lock().expect("window mutex poisoned");
         match begun {
@@ -341,6 +410,19 @@ impl EosPipeline {
                 Err(err)
             }
         }
+    }
+
+    /// Whether any source of the open window has a pending reposition. Reads the cached source
+    /// list (refreshed once per window) and one atomic per source, so it stays cheap enough for
+    /// the publish path.
+    fn repositioned(&self) -> bool {
+        self.inner
+            .sources
+            .lock()
+            .expect("sources mutex poisoned")
+            .iter()
+            .filter_map(EosSource::upgrade)
+            .any(|source| source.tracker.is_repositioned())
     }
 
     fn enroll(
@@ -370,7 +452,7 @@ enum Admission {
 /// The per-window task: sleeps out the commit interval, closes admission, waits for the
 /// participants to settle, and commits (or aborts and seeks back).
 async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
-    tokio::time::sleep(inner.interval).await;
+    stay_open(&inner).await;
     let enrolled = {
         let mut window = inner.window.lock().expect("window mutex poisoned");
         if window.epoch != epoch || window.phase != Phase::Open {
@@ -391,10 +473,44 @@ async fn run_window(inner: Arc<PipelineInner>, epoch: u64) {
     if let Err(err) = outcome {
         error!(
             target: "ruststream_rdkafka",
-            pipeline = inner.id.as_deref().unwrap_or("<no id>"),
+            pipeline = %inner.id,
             error = %err,
             "EOS window aborted; its sources seek back and the window redelivers",
         );
+    }
+}
+
+/// Holds the window open for the commit interval, or until a source is repositioned.
+///
+/// A seek voids everything the window would commit, so waiting out the rest of the interval
+/// would only strand the replayed deliveries behind a transaction that is going to abort.
+async fn stay_open(inner: &Arc<PipelineInner>) {
+    let sources: Vec<LiveSource> = inner
+        .sources
+        .lock()
+        .expect("sources mutex poisoned")
+        .iter()
+        .filter_map(EosSource::upgrade)
+        .collect();
+    // Waiters first, flag second: a reposition landing between the two is caught by the
+    // already-registered waiters.
+    let waiters: Vec<_> = sources
+        .iter()
+        .map(|source| Box::pin(source.tracker.reposition_waiter()))
+        .collect();
+    if waiters.is_empty()
+        || sources
+            .iter()
+            .any(|source| source.tracker.is_repositioned())
+    {
+        if waiters.is_empty() {
+            tokio::time::sleep(inner.interval).await;
+        }
+        return;
+    }
+    tokio::select! {
+        () = tokio::time::sleep(inner.interval) => {}
+        (..) = select_all(waiters) => {}
     }
 }
 
@@ -404,18 +520,28 @@ async fn commit_window(
     inner: &Arc<PipelineInner>,
     enrolled: &HashMap<(String, i32), i64>,
 ) -> Result<(), KafkaError> {
-    let id = inner.id.clone().ok_or_else(|| {
-        KafkaError::InvalidOptions(
-            "an EosPipeline publisher needs `KafkaPublisher::transactional_id`".to_owned(),
-        )
-    })?;
-    let conn = inner.publisher.shared_conn();
-    let state = conn.get().ok_or(KafkaError::NotConnected)?;
-    let sources: Vec<LiveSource> = state
-        .eos_sources(&id)
+    let sources = live_sources(&inner.id, &inner.publisher);
+
+    // A seek while the window was open moved the read position out from under it: the offsets
+    // this window would attach to its transaction describe records the subscription no longer
+    // reads from, so committing them would carry the group past everything the seek replayed.
+    // The window aborts instead, and the seek-back is skipped - the consumer already sits where
+    // the seek put it.
+    // Counting rather than `any`: the flag has to be taken from every source, so a second
+    // source's reposition cannot linger into the next window.
+    let repositioned = sources
         .iter()
-        .filter_map(EosSource::upgrade)
-        .collect();
+        .filter(|source| source.tracker.take_repositioned())
+        .count()
+        > 0;
+    if repositioned {
+        abort_window(inner, &sources, enrolled, Repositioned::Yes).await;
+        return Err(KafkaError::InvalidOptions(
+            "the subscription was repositioned while this window was open; its records are \
+             discarded and the replayed deliveries are processed into a fresh window"
+                .to_owned(),
+        ));
+    }
 
     let failed = {
         let window = inner.window.lock().expect("window mutex poisoned");
@@ -435,10 +561,28 @@ async fn commit_window(
         Err(err) => Err(err),
     };
     if let Err(err) = result {
-        abort_window(inner, &sources, enrolled).await;
+        abort_window(inner, &sources, enrolled, Repositioned::No).await;
         return Err(err);
     }
     Ok(())
+}
+
+/// The pipeline's registered sources that are still alive.
+fn live_sources(id: &str, publisher: &KafkaTransactionalPublisher) -> Vec<LiveSource> {
+    publisher
+        .state()
+        .eos_sources(id)
+        .iter()
+        .filter_map(EosSource::upgrade)
+        .collect()
+}
+
+/// Whether the window is aborting because its sources were repositioned, which decides the fate
+/// of the seek-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repositioned {
+    Yes,
+    No,
 }
 
 /// Waits until every enrolled (topic, partition) has settled up to its enrolled offset, with
@@ -448,7 +592,7 @@ async fn wait_settled(
     sources: &[LiveSource],
     enrolled: &HashMap<(String, i32), i64>,
 ) -> Result<(), KafkaError> {
-    let deadline = tokio::time::Instant::now() + inner.publisher.transaction_deadline();
+    let deadline = tokio::time::Instant::now() + inner.publisher.deadline();
     loop {
         // Waiters first, condition second: an advance between the two is caught by the
         // already-registered waiters.
@@ -540,10 +684,16 @@ fn group_metadata(source: &LiveSource) -> Result<ConsumerGroupMetadata, KafkaErr
 /// The abort path: abort the transaction and seek every enrolled partition back to the last
 /// offset this pipeline committed (or the first offset it ever saw), so the whole window
 /// redelivers promptly instead of waiting for a rebalance.
+///
+/// A window aborting because it was repositioned skips the seek-back entirely: the consumer is
+/// already where the seek put it, and rewinding to this pipeline's own bookkeeping would undo
+/// the caller's reposition. That bookkeeping is dropped with it, since it describes offsets of a
+/// read position this subscription no longer has.
 async fn abort_window(
     inner: &Arc<PipelineInner>,
     sources: &[LiveSource],
     enrolled: &HashMap<(String, i32), i64>,
+    repositioned: Repositioned,
 ) {
     if let Err(err) = inner.publisher.abort().await {
         error!(
@@ -551,6 +701,24 @@ async fn abort_window(
             error = %err,
             "EOS window abort failed; the transaction resolves by its broker-side timeout",
         );
+    }
+    if repositioned == Repositioned::Yes {
+        {
+            let mut committed = inner.committed.lock().expect("committed mutex poisoned");
+            for key in enrolled.keys() {
+                committed.remove(key);
+            }
+        }
+        {
+            let mut session_low = inner
+                .session_low
+                .lock()
+                .expect("session low mutex poisoned");
+            for key in enrolled.keys() {
+                session_low.remove(key);
+            }
+        }
+        return;
     }
     let committed = inner
         .committed
@@ -618,8 +786,8 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 /// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
 /// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
 ///
-/// [`EosPipeline::replies`] wires it for you; name it directly to keep the explicit
-/// `TypedPublisher` form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+/// [`KafkaEosPublish::replies`] wires it for you; name it directly to keep the explicit
+/// `TypedPublisher` form: `TypedPublisher::new(policy).transform(EosReplies)`.
 /// Generic over the handler's context type, so bare handlers (no ctx parameter, no `Ctx`
 /// extractors) work.
 #[derive(Debug, Clone, Copy, Default)]
@@ -634,7 +802,7 @@ impl<C> PublishTransform<C> for EosReplies {
     }
 }
 
-impl EosPipeline {
+impl KafkaEosPublish {
     /// A reply publisher for `#[subscriber(.., publish("replies"))]` handlers: every reply
     /// joins the pipeline's open window paired with its delivery's consumed offset, making the
     /// publishing-handler form exactly-once end to end - the handler just returns the value.
@@ -644,38 +812,36 @@ impl EosPipeline {
     /// subscription fails with a clear error. The `retry_after` deferred-republish fallback
     /// does not apply to these replies: a delayed copy would break the offset-record pairing.
     ///
-    /// Equivalent explicit form: `TypedPublisher::new(pipeline.clone()).transform(EosReplies)`.
+    /// Equivalent explicit form: `TypedPublisher::new(policy).transform(EosReplies)`.
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use ruststream_rdkafka::{EosPipeline, KafkaBroker};
+    /// ```
+    /// use ruststream_rdkafka::KafkaEosPublish;
     ///
-    /// let broker = KafkaBroker::new(["localhost:9092"]);
-    /// let pipeline = EosPipeline::new(broker.publisher().transactional_id("enrich-1"));
-    /// let replies = pipeline.replies();
-    /// // b.include_publishing(enrich, replies);
+    /// let replies = KafkaEosPublish::new("enrich-1").replies();
+    /// // b.include(enrich).publisher(replies);
     /// # let _ = replies;
     /// ```
     #[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
     #[must_use]
     pub fn replies(
-        &self,
+        self,
     ) -> TypedPublisher<
         Self,
         DefaultCodec,
         PublishTransformStack<PublishTransformIdentity, EosReplies>,
     > {
-        TypedPublisher::new(self.clone()).transform(EosReplies)
+        TypedPublisher::new(self).transform(EosReplies)
     }
 
     /// Like [`replies`](Self::replies), with an explicit codec instead of the default one.
     #[must_use]
     pub fn replies_with<C: Codec>(
-        &self,
+        self,
         codec: C,
     ) -> TypedPublisher<Self, C, PublishTransformStack<PublishTransformIdentity, EosReplies>> {
-        TypedPublisher::with_codec(self.clone(), codec).transform(EosReplies)
+        TypedPublisher::with_codec(self, codec).transform(EosReplies)
     }
 }
 
@@ -690,7 +856,7 @@ impl Publisher for EosPipeline {
     /// Returns [`KafkaError::InvalidOptions`] when the header is missing or malformed - the
     /// originating subscription is not in `Commit::Transactional` mode for this pipeline, or
     /// the reply publisher was wired without [`EosReplies`] (use
-    /// [`replies`](EosPipeline::replies)); otherwise as
+    /// [`replies`](KafkaEosPublish::replies)); otherwise as
     /// [`EosPipeline::publish`](EosPipeline::publish).
     ///
     /// # Cancel safety
@@ -705,7 +871,7 @@ impl Publisher for EosPipeline {
             return Err(KafkaError::InvalidOptions(
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
-                 relay them (wire it with `EosPipeline::replies()` or add the `EosReplies` \
+                 relay them (wire it with `KafkaEosPublish::replies()` or add the `EosReplies` \
                  transform)"
                     .to_owned(),
             ));
@@ -719,8 +885,6 @@ impl Publisher for EosPipeline {
 
 #[cfg(test)]
 mod tests {
-    use ruststream::Headers;
-
     use super::*;
 
     #[test]
@@ -737,14 +901,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn reply_without_source_coordinates_fails_clearly() {
-        let pipeline = EosPipeline::new(KafkaPublisher::new(Arc::default()).transactional_id("p1"));
-        let err = Publisher::publish(&pipeline, OutgoingMessage::new("replies", b"x".as_slice()))
-            .await
-            .expect_err("a reply without the source header must fail");
-        assert!(matches!(err, KafkaError::InvalidOptions(_)));
-        assert!(err.to_string().contains("Commit::Transactional"));
-        let _ = Headers::new();
+    #[test]
+    fn the_policy_carries_the_pipeline_id_and_interval() {
+        let policy = KafkaEosPublish::new("enrich-1").commit_interval(Duration::from_millis(250));
+        assert_eq!(policy.id(), "enrich-1");
+        assert_eq!(policy.interval, Duration::from_millis(250));
     }
 }

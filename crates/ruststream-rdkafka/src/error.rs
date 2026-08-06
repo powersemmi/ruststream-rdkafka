@@ -27,13 +27,32 @@ pub enum KafkaError {
     #[error("kafka consume error: {0}")]
     Consume(#[source] Box<dyn StdError + Send + Sync>),
 
-    /// An operation needed the live connection before `Broker::connect` resolved it.
+    /// A [`KafkaRetryPublisher`](crate::KafkaRetryPublisher) was used before its broker
+    /// connected.
     ///
-    /// The runtime connects the broker once at startup; a publisher handed out earlier resolves
-    /// the shared connection on first use. Seeing this error means the operation ran before
-    /// `connect` completed.
-    #[error("kafka broker is not connected; `Broker::connect` must complete first")]
-    NotConnected,
+    /// Only the early publisher can report this: it is the one handle minted before
+    /// [`Broker::connect`](ruststream::Broker::connect), for builder-time wiring that needs a
+    /// live publisher (`retry_via`). Everything on the policy path pairs with the connected
+    /// broker, so "not connected" is not representable there.
+    #[error("kafka broker is not connected yet; cannot reach {topic}")]
+    NotConnected {
+        /// The topic the operation targeted.
+        topic: String,
+    },
+
+    /// A handle aliasing the connection was used after the broker shut down.
+    ///
+    /// The lifecycle ladder makes misuse through the owner's handle a compile error:
+    /// [`ConnectedBroker::shutdown`](ruststream::ConnectedBroker::shutdown) consumes the
+    /// connected broker. Publishers paired off it earlier, and subscriptions still open, keep
+    /// aliasing the closed connection, so their operations report this instead of silently
+    /// succeeding against a dead connection.
+    #[error("kafka connection is closed; cannot reach {topic}")]
+    Closed {
+        /// The topic the operation targeted, or the transactional id of a transaction control
+        /// call.
+        topic: String,
+    },
 
     /// The requested combination of options cannot be executed.
     ///
@@ -48,11 +67,21 @@ pub enum KafkaError {
     /// Concurrent transactional flows need distinct publishers - one per partition via
     /// [`TransactionalPartitions`](crate::TransactionalPartitions), or distinct explicit ids.
     #[error(
-        "a transaction is already open on this publisher; one publisher runs one transaction \
-         at a time - use distinct publishers (for example TransactionalPartitions) for \
+        "a transaction is already open on publisher {id}; one publisher runs one transaction \
+         at a time - use distinct publishers (for example the per-partition set) for \
          concurrent transactional flows"
     )]
-    TransactionBusy,
+    TransactionBusy {
+        /// The transactional id of the publisher that already has an open transaction.
+        id: String,
+    },
+
+    /// `commit` or `abort` was called with no transaction open on this publisher.
+    #[error("no transaction is open on publisher {id}; `begin_transaction` opens one")]
+    NoTransaction {
+        /// The transactional id of the publisher the call was made on.
+        id: String,
+    },
 
     /// A Schema Registry request failed: unreachable registry, rejected credentials, an
     /// unknown schema id or subject, or a schema the registry refused.
