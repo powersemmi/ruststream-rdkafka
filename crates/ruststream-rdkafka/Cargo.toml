@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "README.md"
-keywords = ["kafka", "messaging", "broker", "streaming", "faststream"]
+keywords = ["kafka", "messaging", "broker", "streaming", "ruststream"]
 categories = ["asynchronous", "network-programming"]
 
 [lints]
