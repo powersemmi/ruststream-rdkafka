@@ -88,8 +88,8 @@ fn app() -> impl App {
         // publisher for it - the one handle that resolves the connection at startup.
         let retries = b.broker().retry_publisher();
         b.retry_via(retries);
-        b.include_batch(handle_page);
-        b.include_batch(reconcile_page);
+        b.include(handle_page);
+        b.include(reconcile_page);
     })
 }
 // --8<-- [end:app]
