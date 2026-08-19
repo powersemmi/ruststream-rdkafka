@@ -1,0 +1,1159 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="The Apache Kafka broker for RustStream - consumer groups, precise tracked commits, native record keys, and an in-process test broker.">
+      
+      
+      
+        <link rel="canonical" href="https://powersemmi.github.io/ruststream-rdkafka/0.5/publishing/">
+      
+      
+        <link rel="prev" href="../topics/">
+      
+      
+        <link rel="next" href="../schema-registry/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Publishing - ruststream-rdkafka</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="red" data-md-color-accent="red">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#publishing" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="ruststream-rdkafka" class="md-header__button md-logo" aria-label="ruststream-rdkafka" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ruststream-rdkafka
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Publishing
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="red" data-md-color-accent="red"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="red" data-md-color-accent="red"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/powersemmi/ruststream-rdkafka" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    powersemmi/ruststream-rdkafka
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="ruststream-rdkafka" class="md-nav__button md-logo" aria-label="ruststream-rdkafka" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    ruststream-rdkafka
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/powersemmi/ruststream-rdkafka" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    powersemmi/ruststream-rdkafka
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../topics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Topics and groups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Publishing
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Publishing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#record-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Record keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#explicit-partitions-and-round-robin-distribution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Explicit partitions and round-robin distribution
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transactions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#transaction-scopes-and-worker-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transaction scopes and worker pools
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#exactly-once-pipelines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exactly-once pipelines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#back-pressure-and-shutdown" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Back-pressure and shutdown
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../schema-registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Registry
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://powersemmi.github.io/ruststream/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RustStream docs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.rs/ruststream-rdkafka" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#record-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Record keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#explicit-partitions-and-round-robin-distribution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Explicit partitions and round-robin distribution
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#delivery-guarantees" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Delivery guarantees
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#transactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transactions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Transactions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#transaction-scopes-and-worker-pools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transaction scopes and worker pools
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#exactly-once-pipelines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exactly-once pipelines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#back-pressure-and-shutdown" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Back-pressure and shutdown
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/powersemmi/ruststream-rdkafka/edit/main/docs/publishing.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="publishing">Publishing<a class="headerlink" href="#publishing" title="Permanent link">&para;</a></h1>
+<p>The outgoing message name is the destination topic: <code>KafkaBroker::publisher()</code> hands out one
+shared producer handle, and each publish awaits the cluster's delivery report, so an <code>Ok</code> means
+Kafka accepted the record.</p>
+<h2 id="record-keys">Record keys<a class="headerlink" href="#record-keys" title="Permanent link">&para;</a></h2>
+<p>The partition-key header becomes the record's native key on publish (and is not duplicated as a
+wire header); consuming through this crate surfaces it back under the same name. Kafka routes
+every message for one key to one partition, which is what keeps per-key ordering:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_producer.rs">crates/ruststream-rdkafka/examples/kafka_producer.rs</a></span><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">use</span><span class="w"> </span><span class="n">ruststream</span><span class="p">::{</span><span class="n">Headers</span><span class="p">,</span><span class="w"> </span><span class="n">OutgoingMessage</span><span class="p">,</span><span class="w"> </span><span class="n">Publisher</span><span class="p">};</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">use</span><span class="w"> </span><span class="n">ruststream_rdkafka</span><span class="p">::{</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="n">KafkaBroker</span><span class="p">,</span><span class="w"> </span><span class="n">KafkaError</span><span class="p">,</span><span class="w"> </span><span class="n">KafkaPublisher</span><span class="p">,</span><span class="w"> </span><span class="n">PARTITION_HEADER</span><span class="p">,</span><span class="w"> </span><span class="n">PARTITION_KEY_HEADER</span><span class="p">,</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="p">};</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="c1">// The partition-key header becomes the record&#39;s native key on publish, so Kafka itself routes</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1">// every message for one tenant to one partition (and therefore to one consumer, in order).</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">publish_keyed</span><span class="p">(</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="n">publisher</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">KafkaPublisher</span><span class="p">,</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="n">tenant</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="kt">str</span><span class="p">,</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">KafkaError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Headers</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="n">headers</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">PARTITION_KEY_HEADER</span><span class="p">,</span><span class="w"> </span><span class="n">tenant</span><span class="p">.</span><span class="n">to_owned</span><span class="p">());</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">format!</span><span class="p">(</span><span class="s">r#&quot;{{&quot;id&quot;:{id},&quot;tenant&quot;:&quot;{tenant}&quot;}}&quot;#</span><span class="p">);</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">    </span><span class="n">publisher</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">        </span><span class="p">.</span><span class="n">publish</span><span class="p">(</span><span class="n">OutgoingMessage</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="s">&quot;orders&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">.</span><span class="n">as_bytes</span><span class="p">()).</span><span class="n">with_headers</span><span class="p">(</span><span class="n">headers</span><span class="p">))</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">        </span><span class="p">.</span><span class="k">await</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="p">}</span>
+</code></pre></div>
+<p>Without the header, the configured partitioner picks a partition (the librdkafka default is a
+hash for keyed records and round-robin-ish distribution for keyless ones).</p>
+<h2 id="explicit-partitions-and-round-robin-distribution">Explicit partitions and round-robin distribution<a class="headerlink" href="#explicit-partitions-and-round-robin-distribution" title="Permanent link">&para;</a></h2>
+<p>The partition header (<code>kafka-partition</code>, an ASCII decimal) pins a record to an exact
+partition: the publisher consumes the header (it never hits the wire) and sets the record's
+partition explicitly. Precedence on publish: an explicit partition wins over the record key,
+which wins over the configured partitioner. A malformed value fails the publish with a clear
+error, and a partition that does not exist fails delivery - no silent fallback either way:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_producer.rs">crates/ruststream-rdkafka/examples/kafka_producer.rs</a></span><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">// The partition header pins the record to an exact partition: the publisher consumes the</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1">// header (it never hits the wire) and targets the partition explicitly, winning over the</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1">// partitioner and the record key. The partition must exist, or the publish fails.</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">publish_pinned</span><span class="p">(</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="n">publisher</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">KafkaPublisher</span><span class="p">,</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="n">id</span><span class="p">:</span><span class="w"> </span><span class="kt">u64</span><span class="p">,</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">    </span><span class="n">partition</span><span class="p">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">,</span>
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">KafkaError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">headers</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Headers</span><span class="p">::</span><span class="n">new</span><span class="p">();</span>
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="n">headers</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">PARTITION_HEADER</span><span class="p">,</span><span class="w"> </span><span class="n">partition</span><span class="p">.</span><span class="n">to_string</span><span class="p">());</span>
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="fm">format!</span><span class="p">(</span><span class="s">r#&quot;{{&quot;id&quot;:{id},&quot;tenant&quot;:&quot;pinned&quot;}}&quot;#</span><span class="p">);</span>
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">    </span><span class="n">publisher</span>
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">        </span><span class="p">.</span><span class="n">publish</span><span class="p">(</span><span class="n">OutgoingMessage</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="s">&quot;orders&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">.</span><span class="n">as_bytes</span><span class="p">()).</span><span class="n">with_headers</span><span class="p">(</span><span class="n">headers</span><span class="p">))</span>
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">        </span><span class="p">.</span><span class="k">await</span>
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="p">}</span>
+</code></pre></div>
+<p>On top of it, <code>RoundRobin</code> distributes publishing-handler replies evenly: librdkafka has no
+round-robin partitioner (only the random/consistent/hash families), and keyless distribution
+may batch-stick to one partition, which turns long, near-constant per-message processing into
+one hot consumer and idle peers. The transform stamps every keyless, unpinned reply with the
+next partition of the cycle:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_distribution.rs">crates/ruststream-rdkafka/examples/kafka_distribution.rs</a></span><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">// Every reply targets the next partition of the cycle (0, 1, ..., 7, 0, ...), one</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="c1">// message each. Replies that already carry an explicit partition or a record key are</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1">// left alone - keys exist for ordering, and the transform must not break placement</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="c1">// the handler chose. The count is explicit and must match the destination topic.</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="kd">let</span><span class="w"> </span><span class="n">work_items</span><span class="w"> </span><span class="o">=</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="n">TypedPublisher</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="n">b</span><span class="p">.</span><span class="n">broker</span><span class="p">().</span><span class="n">publisher</span><span class="p">()).</span><span class="n">transform</span><span class="p">(</span><span class="n">RoundRobin</span><span class="p">::</span><span class="n">partitions</span><span class="p">(</span><span class="mi">8</span><span class="p">));</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="n">b</span><span class="p">.</span><span class="n">include_publishing</span><span class="p">(</span><span class="n">plan</span><span class="p">,</span><span class="w"> </span><span class="n">work_items</span><span class="p">);</span>
+</code></pre></div>
+<p>The count is explicit and must match the destination topic: a smaller count just leaves the
+tail partitions idle, a larger one fails publishes to the missing partitions. The header
+mechanism also serves any other placement policy through a user-written <code>PublishTransform</code>.</p>
+<h2 id="delivery-guarantees">Delivery guarantees<a class="headerlink" href="#delivery-guarantees" title="Permanent link">&para;</a></h2>
+<p>Durability is the producer's <code>acks</code> setting, and everything else librdkafka offers
+(<code>enable.idempotence</code>, <code>message.timeout.ms</code>, compression, ...) is one <code>producer_config</code> away:</p>
+<ul>
+<li><code>KafkaBroker::producer_config(key, value)</code> - producer-only properties.</li>
+<li><code>KafkaBroker::config(key, value)</code> - client-wide properties (consumers and the producer).</li>
+</ul>
+<p>For at-least-once end to end, pair an idempotent producer
+(<code>producer_config("enable.idempotence", "true")</code>) with <code>Commit::Tracked</code> on the consuming side
+(see <a href="../topics/">Topics and groups</a>).</p>
+<h2 id="transactions">Transactions<a class="headerlink" href="#transactions" title="Permanent link">&para;</a></h2>
+<p><code>broker.publisher().transactional_id("orders-svc-1")</code> upgrades the handle to the core
+<code>TransactionalPublisher</code> capability: publishes between <code>begin_transaction</code> and <code>commit</code> become
+visible atomically (readers on Kafka's default <code>read_committed</code> isolation see all of them or
+none), and <code>abort</code> discards them broker-side. The id fences zombies, so it must be stable and
+unique per concurrent producer - create several publishers with distinct ids for concurrent
+transactional flows. Outside an open transaction the handle publishes like a plain one, and
+calling the transaction methods without an id is a clear error. The transactional producer is
+created and initialized on first use from the broker's resolved producer configuration;
+<code>transaction_timeout</code> bounds the control calls, while Kafka's own <code>transaction.timeout.ms</code> is
+one <code>producer_config</code> away. Tying consumed offsets into the producer transaction (full
+consume-transform-produce exactly-once) is the
+<a href="#exactly-once-pipelines">exactly-once pipeline</a> below.</p>
+<p>The usual shape is a use-case object in the application state that owns the transactional
+publisher and runs one atomic fan-out per call:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">// The application state wires the use-case object once at startup; `#[derive(FromRef)]` makes</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="c1">// each field injectable into handlers as `State&lt;FieldType&gt;`.</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="cp">#[derive(Clone, FromRef)]</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="k">struct</span><span class="w"> </span><span class="nc">AppState</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="n">shipments</span><span class="p">:</span><span class="w"> </span><span class="nc">Shipments</span><span class="p">,</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="n">invoices</span><span class="p">:</span><span class="w"> </span><span class="nc">Invoices</span><span class="p">,</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="p">}</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="cp">#[derive(Clone)]</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="k">struct</span><span class="w"> </span><span class="nc">Shipments</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="n">publisher</span><span class="p">:</span><span class="w"> </span><span class="nc">KafkaPublisher</span><span class="p">,</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="p">}</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="k">impl</span><span class="w"> </span><span class="n">Shipments</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">    </span><span class="sd">/// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">    </span><span class="sd">/// visible atomically to `read_committed` readers, and any failure aborts so shipments are</span>
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">    </span><span class="sd">/// never half-visible.</span>
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">dispatch</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">order</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Order</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">KafkaError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">publisher</span><span class="p">.</span><span class="n">begin_transaction</span><span class="p">().</span><span class="k">await</span><span class="o">?</span><span class="p">;</span>
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="o">&amp;</span><span class="n">order</span><span class="p">.</span><span class="n">items</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">command</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ItemShipment</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a><span class="w">                </span><span class="n">order_id</span><span class="p">:</span><span class="w"> </span><span class="nc">order</span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a><span class="w">                </span><span class="n">item</span><span class="p">:</span><span class="w"> </span><span class="nc">item</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span>
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a><span class="w">            </span><span class="p">};</span>
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JsonCodec</span><span class="p">.</span><span class="n">encode</span><span class="p">(</span><span class="o">&amp;</span><span class="n">command</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;serializable&quot;</span><span class="p">);</span>
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OutgoingMessage</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="s">&quot;shipments&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">.</span><span class="n">as_ref</span><span class="p">());</span>
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a><span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">publisher</span><span class="p">.</span><span class="n">publish</span><span class="p">(</span><span class="n">outgoing</span><span class="p">).</span><span class="k">await</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a><span class="w">                </span><span class="bp">self</span><span class="p">.</span><span class="n">publisher</span><span class="p">.</span><span class="n">abort</span><span class="p">().</span><span class="k">await</span><span class="p">.</span><span class="n">ok</span><span class="p">();</span>
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a><span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a><span class="w">            </span><span class="p">}</span>
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a><span class="w">        </span><span class="p">}</span>
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a><span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">publisher</span><span class="p">.</span><span class="n">commit</span><span class="p">().</span><span class="k">await</span>
+<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a><span class="p">}</span>
+</code></pre></div>
+<p>Handlers receive it through <code>State</code> and settle by the outcome - an abort left nothing visible,
+so a retry redelivers and reruns the whole fan-out:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="cp">#[subscriber(</span><span class="s">&quot;orders&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">ship</span><span class="p">(</span><span class="n">order</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Order</span><span class="p">,</span><span class="w"> </span><span class="n">State</span><span class="p">(</span><span class="n">shipments</span><span class="p">):</span><span class="w"> </span><span class="nc">State</span><span class="o">&lt;</span><span class="n">Shipments</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">HandlerResult</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">shipments</span><span class="p">.</span><span class="n">dispatch</span><span class="p">(</span><span class="n">order</span><span class="p">).</span><span class="k">await</span><span class="p">.</span><span class="n">is_err</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">        </span><span class="c1">// Nothing became visible; ask for redelivery and try the whole fan-out again.</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">HandlerResult</span><span class="p">::</span><span class="n">retry</span><span class="p">();</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="n">HandlerResult</span><span class="p">::</span><span class="n">Ack</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="p">}</span>
+</code></pre></div>
+<p>The id is picked where the publisher is created, one per concurrent producer:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">// The transactional id must be stable and unique per concurrent producer: it is what</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1">// fences a zombie instance. One id per service replica (pod ordinal, instance id) is the</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="c1">// usual scheme.</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="kd">let</span><span class="w"> </span><span class="n">shipments</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Shipments</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">    </span><span class="n">publisher</span><span class="p">:</span><span class="w"> </span><span class="nc">broker</span><span class="p">.</span><span class="n">publisher</span><span class="p">().</span><span class="n">transactional_id</span><span class="p">(</span><span class="s">&quot;shipments-svc-1&quot;</span><span class="p">),</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="p">};</span>
+</code></pre></div>
+<h3 id="transaction-scopes-and-worker-pools">Transaction scopes and worker pools<a class="headerlink" href="#transaction-scopes-and-worker-pools" title="Permanent link">&para;</a></h3>
+<p>Two Kafka facts shape everything here: one producer runs one transaction at a time, and one
+transactional id belongs to one live producer (initializing a second fences the first). A
+<code>workers(n, by_key)</code> pool therefore cannot share a single transactional publisher - a second
+<code>begin_transaction</code> while one is open is a <code>TransactionBusy</code> error, deliberately: silently
+merging two lanes' messages into one transaction would commit one flow's records with the
+other's.</p>
+<p>The scope that composes with a worker pool is the source partition. Under the default
+<code>LaneKey::Partition</code> lanes a partition's deliveries process serially on one lane, so
+<code>TransactionalPartitions</code> - a publisher per partition, ids <code>"{base}-p{partition}"</code> - gives
+every lane an independent transaction with no coordination. The id set follows the topic's
+partitions rather than the worker count, so changing <code>workers(n)</code> neither changes the ids nor
+weakens zombie fencing (the same scheme Kafka Streams uses for its per-task producers):</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">// Concurrent transactional handlers: one producer runs one transaction at a time, so a worker</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1">// pool cannot share one publisher (a second `begin_transaction` is a `TransactionBusy` error,</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1">// not a silent merge). Under the default partition lanes a partition processes serially on</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="c1">// one lane, so a publisher per source partition gives every lane its own independent</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="c1">// transaction - and the id set follows the topic&#39;s partitions, not the worker count, so</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="c1">// zombie fencing survives `workers(n)` changes.</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="cp">#[derive(Clone)]</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="k">struct</span><span class="w"> </span><span class="nc">Invoices</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">    </span><span class="n">publishers</span><span class="p">:</span><span class="w"> </span><span class="nc">TransactionalPartitions</span><span class="p">,</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="p">}</span>
+<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>
+<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="k">impl</span><span class="w"> </span><span class="n">Invoices</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">    </span><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">issue</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">order</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Order</span><span class="p">,</span><span class="w"> </span><span class="n">partition</span><span class="p">:</span><span class="w"> </span><span class="kt">i32</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nb">Result</span><span class="o">&lt;</span><span class="p">(),</span><span class="w"> </span><span class="n">KafkaError</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a><span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">publisher</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">publishers</span><span class="p">.</span><span class="n">for_partition</span><span class="p">(</span><span class="n">partition</span><span class="p">);</span>
+<a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a><span class="w">        </span><span class="n">publisher</span><span class="p">.</span><span class="n">begin_transaction</span><span class="p">().</span><span class="k">await</span><span class="o">?</span><span class="p">;</span>
+<a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a><span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="o">&amp;</span><span class="n">order</span><span class="p">.</span><span class="n">items</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">line</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ItemShipment</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a><span class="w">                </span><span class="n">order_id</span><span class="p">:</span><span class="w"> </span><span class="nc">order</span><span class="p">.</span><span class="n">id</span><span class="p">,</span>
+<a id="__codelineno-6-19" name="__codelineno-6-19" href="#__codelineno-6-19"></a><span class="w">                </span><span class="n">item</span><span class="p">:</span><span class="w"> </span><span class="nc">item</span><span class="p">.</span><span class="n">clone</span><span class="p">(),</span>
+<a id="__codelineno-6-20" name="__codelineno-6-20" href="#__codelineno-6-20"></a><span class="w">            </span><span class="p">};</span>
+<a id="__codelineno-6-21" name="__codelineno-6-21" href="#__codelineno-6-21"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">payload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">JsonCodec</span><span class="p">.</span><span class="n">encode</span><span class="p">(</span><span class="o">&amp;</span><span class="n">line</span><span class="p">).</span><span class="n">expect</span><span class="p">(</span><span class="s">&quot;serializable&quot;</span><span class="p">);</span>
+<a id="__codelineno-6-22" name="__codelineno-6-22" href="#__codelineno-6-22"></a><span class="w">            </span><span class="kd">let</span><span class="w"> </span><span class="n">outgoing</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">OutgoingMessage</span><span class="p">::</span><span class="n">new</span><span class="p">(</span><span class="s">&quot;invoice-lines&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">payload</span><span class="p">.</span><span class="n">as_ref</span><span class="p">());</span>
+<a id="__codelineno-6-23" name="__codelineno-6-23" href="#__codelineno-6-23"></a><span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">err</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">publisher</span><span class="p">.</span><span class="n">publish</span><span class="p">(</span><span class="n">outgoing</span><span class="p">).</span><span class="k">await</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-24" name="__codelineno-6-24" href="#__codelineno-6-24"></a><span class="w">                </span><span class="n">publisher</span><span class="p">.</span><span class="n">abort</span><span class="p">().</span><span class="k">await</span><span class="p">.</span><span class="n">ok</span><span class="p">();</span>
+<a id="__codelineno-6-25" name="__codelineno-6-25" href="#__codelineno-6-25"></a><span class="w">                </span><span class="k">return</span><span class="w"> </span><span class="nb">Err</span><span class="p">(</span><span class="n">err</span><span class="p">);</span>
+<a id="__codelineno-6-26" name="__codelineno-6-26" href="#__codelineno-6-26"></a><span class="w">            </span><span class="p">}</span>
+<a id="__codelineno-6-27" name="__codelineno-6-27" href="#__codelineno-6-27"></a><span class="w">        </span><span class="p">}</span>
+<a id="__codelineno-6-28" name="__codelineno-6-28" href="#__codelineno-6-28"></a><span class="w">        </span><span class="n">publisher</span><span class="p">.</span><span class="n">commit</span><span class="p">().</span><span class="k">await</span>
+<a id="__codelineno-6-29" name="__codelineno-6-29" href="#__codelineno-6-29"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-6-30" name="__codelineno-6-30" href="#__codelineno-6-30"></a><span class="p">}</span>
+<a id="__codelineno-6-31" name="__codelineno-6-31" href="#__codelineno-6-31"></a>
+<a id="__codelineno-6-32" name="__codelineno-6-32" href="#__codelineno-6-32"></a><span class="cp">#[subscriber(</span>
+<a id="__codelineno-6-33" name="__codelineno-6-33" href="#__codelineno-6-33"></a><span class="cp">    KafkaTopic::new(</span><span class="s">&quot;billing&quot;</span><span class="cp">).group(</span><span class="s">&quot;billing-svc&quot;</span><span class="cp">).commit(Commit::Tracked),</span>
+<a id="__codelineno-6-34" name="__codelineno-6-34" href="#__codelineno-6-34"></a><span class="cp">    workers(4, by_key)</span>
+<a id="__codelineno-6-35" name="__codelineno-6-35" href="#__codelineno-6-35"></a><span class="cp">)]</span>
+<a id="__codelineno-6-36" name="__codelineno-6-36" href="#__codelineno-6-36"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">bill</span><span class="p">(</span>
+<a id="__codelineno-6-37" name="__codelineno-6-37" href="#__codelineno-6-37"></a><span class="w">    </span><span class="n">order</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Order</span><span class="p">,</span>
+<a id="__codelineno-6-38" name="__codelineno-6-38" href="#__codelineno-6-38"></a><span class="w">    </span><span class="c1">// The delivery&#39;s source partition picks the lane&#39;s publisher; the key injects it as a</span>
+<a id="__codelineno-6-39" name="__codelineno-6-39" href="#__codelineno-6-39"></a><span class="w">    </span><span class="c1">// plain argument (the DI form of `ctx.context(keys::Partition)`).</span>
+<a id="__codelineno-6-40" name="__codelineno-6-40" href="#__codelineno-6-40"></a><span class="w">    </span><span class="n">Ctx</span><span class="p">(</span><span class="n">partition</span><span class="p">):</span><span class="w"> </span><span class="nc">Ctx</span><span class="o">&lt;</span><span class="n">Partition</span><span class="o">&gt;</span><span class="p">,</span>
+<a id="__codelineno-6-41" name="__codelineno-6-41" href="#__codelineno-6-41"></a><span class="w">    </span><span class="n">State</span><span class="p">(</span><span class="n">invoices</span><span class="p">):</span><span class="w"> </span><span class="nc">State</span><span class="o">&lt;</span><span class="n">Invoices</span><span class="o">&gt;</span><span class="p">,</span>
+<a id="__codelineno-6-42" name="__codelineno-6-42" href="#__codelineno-6-42"></a><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">HandlerResult</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-43" name="__codelineno-6-43" href="#__codelineno-6-43"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">invoices</span><span class="p">.</span><span class="n">issue</span><span class="p">(</span><span class="n">order</span><span class="p">,</span><span class="w"> </span><span class="n">partition</span><span class="p">).</span><span class="k">await</span><span class="p">.</span><span class="n">is_err</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-44" name="__codelineno-6-44" href="#__codelineno-6-44"></a><span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">HandlerResult</span><span class="p">::</span><span class="n">retry</span><span class="p">();</span>
+<a id="__codelineno-6-45" name="__codelineno-6-45" href="#__codelineno-6-45"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-6-46" name="__codelineno-6-46" href="#__codelineno-6-46"></a><span class="w">    </span><span class="n">HandlerResult</span><span class="p">::</span><span class="n">Ack</span>
+<a id="__codelineno-6-47" name="__codelineno-6-47" href="#__codelineno-6-47"></a><span class="p">}</span>
+</code></pre></div>
+<p>This deliberately does not compose with <code>LaneKey::RecordKey</code> pools: record-key lanes spread
+one partition across lanes, two lanes would collide on its publisher, and a per-lane id scheme
+would tie fencing identity to a runtime knob (<code>n</code>) instead of a Kafka-native unit. Sharing one
+id across a pool is the exactly-once pipeline below.</p>
+<h3 id="exactly-once-pipelines">Exactly-once pipelines<a class="headerlink" href="#exactly-once-pipelines" title="Permanent link">&para;</a></h3>
+<p><code>EosPipeline</code> is the full consume-transform-produce shape (KIP-447): one transactional
+producer shared by every lane, committing the consumed offsets inside the transaction
+(<code>send_offsets_to_transaction</code>), so source positions move atomically with the published
+records. A crash or an aborted window rewinds both - handlers reprocess (at-least-once on the
+handler side, as always), but the output topic never sees a duplicate.</p>
+<p>Three places name one id:</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">// Exactly-once: every lane publishes into one shared EosPipeline, and the pipeline commits</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="c1">// the consumed offsets inside the producer transaction (send_offsets_to_transaction), so</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="c1">// source positions move atomically with the published records. A crash or an aborted window</span>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1">// rewinds both - the output topic never sees a duplicate. The subscription&#39;s</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="c1">// `Commit::Transactional` names the pipeline id; the consumer stops committing on its own.</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="c1">//</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="c1">// A publishing handler just returns the value: the runtime encodes it, and the pipeline&#39;s</span>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="c1">// reply publisher (wired below) pairs it with this delivery&#39;s consumed offset automatically.</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="cp">#[subscriber(</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="cp">    KafkaTopic::new(</span><span class="s">&quot;raw-orders&quot;</span><span class="cp">)</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="cp">        .group(</span><span class="s">&quot;enrich-svc&quot;</span><span class="cp">)</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="cp">        .commit(Commit::Transactional(</span><span class="s">&quot;enrich-svc-1&quot;</span><span class="cp">.into())),</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="cp">    publish(</span><span class="s">&quot;enriched-orders&quot;</span><span class="cp">),</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="cp">    workers(4, by_key)</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="cp">)]</span>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="k">async</span><span class="w"> </span><span class="k">fn</span><span class="w"> </span><span class="nf">enrich</span><span class="p">(</span><span class="n">order</span><span class="p">:</span><span class="w"> </span><span class="kp">&amp;</span><span class="nc">Order</span><span class="p">)</span><span class="w"> </span><span class="p">-&gt;</span><span class="w"> </span><span class="nc">Order</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="w">    </span><span class="n">order</span><span class="p">.</span><span class="n">clone</span><span class="p">()</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="p">}</span>
+</code></pre></div>
+<p>A publishing handler needs no manual pairing at all: mount it with the pipeline's reply
+publisher, and every reply joins the window paired with its delivery's consumed offset -</p>
+<div class="highlight"><span class="filename"><a href="https://github.com/powersemmi/ruststream-rdkafka/blob/main/crates/ruststream-rdkafka/examples/kafka_transactions.rs">crates/ruststream-rdkafka/examples/kafka_transactions.rs</a></span><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">// Every reply of `enrich` rides the pipeline&#39;s window, paired with its offset.</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">b</span><span class="p">.</span><span class="n">include_publishing</span><span class="p">(</span><span class="n">enrich</span><span class="p">,</span><span class="w"> </span><span class="n">pipeline</span><span class="p">.</span><span class="n">replies</span><span class="p">());</span>
+</code></pre></div>
+<p><code>pipeline.replies()</code> is a plain <code>TypedPublisher</code> under the hood (the explicit spelling is
+<code>TypedPublisher::new(pipeline.clone()).transform(EosReplies)</code>), so codecs and further
+transforms compose as usual; <code>replies_with(codec)</code> names a non-default codec. For manual
+publishes from a plain handler, <code>EosPipeline::publish</code> takes the delivery's coordinates
+explicitly - as a <code>Ctx&lt;Source&gt;</code> extractor parameter, like every other <code>KafkaContext</code> field key.</p>
+<p>The subscription's <code>Commit::Transactional("enrich-svc-1")</code> switches its consumer's own
+committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;
+<code>EosPipeline::new(broker.publisher().transactional_id("enrich-svc-1"))</code> wires the producer
+side. Publishes join the pipeline's open window; every <code>commit_interval</code> (100ms by default,
+the Kafka Streams EOS default) the window closes: the pipeline waits for its participants to
+settle, adds the settled positions and the consumer's group metadata to the transaction, and
+commits. The group metadata is what fences a stale consumer server-side, so a rebalance
+mid-window makes the commit fail instead of committing offsets the consumer no longer owns.</p>
+<p>On any failure - a failed publish, a commit error, or a settle stall (a handler hanging or
+<code>retry()</code>-ing past the publisher's transaction timeout) - the window aborts and the consumers
+seek back to the last committed offsets, so the whole window redelivers promptly and
+republishes into a fresh transaction. Records published into an aborted window were never
+visible to <code>read_committed</code> readers (librdkafka's default here).</p>
+<p>Practical notes:</p>
+<ul>
+<li>One pipeline id per service instance, exactly like any transactional id: it is the fencing
+  unit. Kafka Streams' EOSv2 uses the same one-producer-per-process scheme.</li>
+<li>End-to-end latency is at least the commit interval: records become visible at the window
+  commit, not at publish.</li>
+<li><code>retry()</code> from a participant stalls its window until the transaction deadline, then aborts
+  it; prefer <code>drop()</code>/dead-lettering for poison messages in EOS handlers.</li>
+<li>The <code>retry_after</code>/<code>retry_via</code> deferred-republish fallback does not apply to EOS replies: a
+  delayed copy would break the offset-record pairing.</li>
+<li>The reply publisher pairs only with <code>Commit::Transactional</code> subscriptions naming this
+  pipeline's id; a reply from any other subscription fails with a clear error instead of
+  silently downgrading the guarantee.</li>
+<li>Works best over the default <code>LaneKey::Partition</code> lanes, where each partition settles in
+  order behind its lane head.</li>
+</ul>
+<h2 id="back-pressure-and-shutdown">Back-pressure and shutdown<a class="headerlink" href="#back-pressure-and-shutdown" title="Permanent link">&para;</a></h2>
+<p>A publish waits indefinitely for space when librdkafka's local queue is full - the natural
+back-pressure behavior. <code>KafkaPublisher::queue_timeout</code> bounds that wait instead, failing the
+publish with a queue-full error.</p>
+<p><code>Broker::shutdown</code> flushes in-flight publishes and reports an error when they do not make it
+out within <code>KafkaBroker::flush_timeout</code> (30 seconds unless configured).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Apache-2.0
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/powersemmi/ruststream-rdkafka" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.top", "navigation.tracking", "navigation.indexes", "content.code.copy", "content.code.annotate", "content.action.edit", "search.suggest", "search.highlight", "toc.follow"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+  
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+  <script src="https://context7.com/widget.js" data-library="/powersemmi/ruststream-rdkafka"></script>
+
+  </body>
+</html>
