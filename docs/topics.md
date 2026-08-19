@@ -250,7 +250,7 @@ no crate-imposed knobs. Page size is bounded by librdkafka's own fetch-queue lim
 
 For an explicit page window, the core `Buffered` adapter wraps any source and closes a page at
 `max_size` deliveries or `max_wait` after the first one (see the second handler in the example
-below). Batch handlers mount with `include_batch`:
+below). Batch handlers mount with `include`, like every other handler:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"

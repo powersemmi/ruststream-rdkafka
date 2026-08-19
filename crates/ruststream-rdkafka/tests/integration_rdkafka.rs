@@ -921,7 +921,7 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include_batch(pool_page);
+            b.include(pool_page);
         });
 
     let done = Arc::clone(&state.done);
