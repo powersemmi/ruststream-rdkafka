@@ -209,6 +209,10 @@ jobs:
             mkdir -p "$dest"
             cargo generate --path "templates/$tpl" \
               --name smoke --destination "$dest" --vcs none
+            # The scaffold manifest is checked in as `Cargo.toml.liquid` so that cargo's git-source
+            # package discovery never parses its placeholder name. Assert that cargo-generate did
+            # drop the suffix, otherwise the append below would quietly write a manifest of its own.
+            test -f "$dest/smoke/Cargo.toml"
             {
               echo ""
               echo "[patch.crates-io]"
