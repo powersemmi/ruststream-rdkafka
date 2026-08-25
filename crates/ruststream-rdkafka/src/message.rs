@@ -2,6 +2,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -280,8 +281,8 @@ impl IncomingMessage for KafkaMessage {
     ///
     /// Cancel safe: the watermark update is synchronous, so the future either completed or did
     /// nothing.
-    async fn ack(self) -> Result<(), AckError> {
-        self.settle()
+    fn ack(self) -> impl Future<Output = Result<(), AckError>> {
+        ready(self.settle())
     }
 
     /// Settles negatively. With a [`Retry`] policy configured on the subscription,

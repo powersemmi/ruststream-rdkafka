@@ -1,6 +1,7 @@
 //! The in-process subscriber and its delivery type.
 
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::Arc;
 
 use futures::Stream;
@@ -198,9 +199,9 @@ impl IncomingMessage for KafkaTestMessage {
     /// # Errors
     ///
     /// Never fails; the in-process transport has no position to store.
-    async fn ack(mut self) -> Result<(), AckError> {
+    fn ack(mut self) -> impl Future<Output = Result<(), AckError>> {
         drop(self.take());
-        Ok(())
+        ready(Ok(()))
     }
 
     /// Re-enqueues to the same subscription (`requeue = true`) or drops (`requeue = false`).
@@ -208,7 +209,7 @@ impl IncomingMessage for KafkaTestMessage {
     /// # Errors
     ///
     /// Never fails; the in-process transport has no position to store.
-    async fn nack(mut self, requeue: bool) -> Result<(), AckError> {
+    fn nack(mut self, requeue: bool) -> impl Future<Output = Result<(), AckError>> {
         let delivery = self.take();
         if requeue && self.sender.send(delivery).is_ok() {
             // This bypasses the router fanout, so account for the new in-flight delivery here.
@@ -216,7 +217,7 @@ impl IncomingMessage for KafkaTestMessage {
                 coordinator.enqueued();
             }
         }
-        Ok(())
+        ready(Ok(()))
     }
 }
 

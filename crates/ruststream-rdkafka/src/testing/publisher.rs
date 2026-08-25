@@ -1,5 +1,6 @@
 //! The in-process publisher.
 
+use std::future::{Future, ready};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -29,8 +30,11 @@ impl KafkaTestPublisher {
 impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaPublish {
     type Live = KafkaTestPublisher;
 
-    async fn pair(self, connected: &ConnectedKafkaTestBroker) -> Result<Self::Live, PairError> {
-        Ok(connected.publisher(self))
+    fn pair(
+        self,
+        connected: &ConnectedKafkaTestBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        ready(Ok(connected.publisher(self)))
     }
 }
 
@@ -47,21 +51,23 @@ impl Publisher for KafkaTestPublisher {
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty, and
     /// [`KafkaError::Closed`] once the transport this handle aliases has been shut down.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+    fn publish(&self, msg: OutgoingMessage<'_>) -> impl Future<Output = Result<(), Self::Error>> {
         if msg.name().is_empty() {
-            return Err(KafkaError::InvalidOptions(
+            return ready(Err(KafkaError::InvalidOptions(
                 "topic name must not be empty; the outgoing message name is the destination \
                  topic"
                     .to_owned(),
-            ));
+            )));
         }
-        self.state.ensure_open(msg.name())?;
+        if let Err(err) = self.state.ensure_open(msg.name()) {
+            return ready(Err(err));
+        }
         self.state.router.publish(
             msg.name(),
             &Bytes::copy_from_slice(msg.payload()),
             msg.headers(),
             self.state.coordinator().as_ref(),
         );
-        Ok(())
+        ready(Ok(()))
     }
 }

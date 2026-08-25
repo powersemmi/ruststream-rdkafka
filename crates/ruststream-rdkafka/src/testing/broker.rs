@@ -1,6 +1,7 @@
 //! The in-process broker ladder: core trait impls plus the `TestableBroker` registration.
 
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -103,8 +104,8 @@ impl Broker for KafkaTestBroker {
     type Connected = ConnectedKafkaTestBroker;
 
     /// Connecting an in-process transport is free; the ladder shape is what matters.
-    async fn connect(self) -> Result<Self::Connected, Self::Error> {
-        Ok(ConnectedKafkaTestBroker { state: self.state })
+    fn connect(self) -> impl Future<Output = Result<Self::Connected, Self::Error>> {
+        ready(Ok(ConnectedKafkaTestBroker { state: self.state }))
     }
 }
 
@@ -129,18 +130,14 @@ impl ConnectedKafkaTestBroker {
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] when `topic` is empty or a `^` pattern.
-    // Async without an await on purpose: call-site parity with the real broker, so application
-    // code and tests compile unchanged against either.
-    #[allow(
-        clippy::unused_async,
-        reason = "call-site parity with ConnectedKafkaBroker::subscribe_with"
-    )]
-    pub async fn subscribe_with(
+    // Returns a future without awaiting on purpose: call-site parity with the real broker, so
+    // application code and tests compile unchanged against either.
+    pub fn subscribe_with(
         &self,
         topic: impl Into<String>,
-    ) -> Result<KafkaTestSubscriber, KafkaError> {
-        self.subscribe_topics(std::slice::from_ref(&topic.into()))
-            .await
+    ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
+        let topics = [topic.into()];
+        ready(self.open_subscription(&topics))
     }
 
     /// Subscribes to several topics as one subscription, mirroring
@@ -151,14 +148,16 @@ impl ConnectedKafkaTestBroker {
     /// Returns [`KafkaError::InvalidOptions`] when a name is empty, or when a name is a `^`
     /// pattern: the in-process broker routes by exact topic name, so pattern subscriptions
     /// need a real cluster.
-    #[allow(
-        clippy::unused_async,
-        reason = "call-site parity with ConnectedKafkaBroker::subscribe_with"
-    )]
-    pub async fn subscribe_topics(
+    pub fn subscribe_topics(
         &self,
         topics: &[String],
-    ) -> Result<KafkaTestSubscriber, KafkaError> {
+    ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
+        ready(self.open_subscription(topics))
+    }
+
+    /// The synchronous body behind both subscribe entry points, kept apart so the validation
+    /// errors stay `?` rather than a chain of early `ready(Err(..))` returns.
+    fn open_subscription(&self, topics: &[String]) -> Result<KafkaTestSubscriber, KafkaError> {
         for topic in topics {
             if topic.is_empty() {
                 return Err(KafkaError::InvalidOptions(
@@ -196,10 +195,10 @@ impl ConnectedBroker for ConnectedKafkaTestBroker {
 
     /// Drops every subscription and marks the transport closed, so publishers aliasing it
     /// error afterwards exactly as they do against a real cluster.
-    async fn shutdown(self) -> Result<Self::Closed, Self::Error> {
+    fn shutdown(self) -> impl Future<Output = Result<Self::Closed, Self::Error>> {
         self.state.closed.store(true, Ordering::Release);
         self.state.router.clear();
-        Ok(())
+        ready(Ok(()))
     }
 }
 
