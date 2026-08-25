@@ -9,13 +9,12 @@
 //! cargo run --example kafka_transactions -- run
 //! ```
 
+// The fan-out below encodes and addresses its own records, so this file names the codec and the
+// message type on top of the prelude; the error type is named where it is handled.
+use ruststream::OutgoingMessage;
 use ruststream::codec::{Codec, JsonCodec};
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, Out, RustStream};
-use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
-use ruststream_rdkafka::context::keys::Partition;
-use ruststream_rdkafka::{
-    Commit, KafkaBroker, KafkaEosPublish, KafkaError, KafkaPublish, KafkaTopic, PartitionLanes,
-};
+use ruststream_rdkafka::KafkaError;
+use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
