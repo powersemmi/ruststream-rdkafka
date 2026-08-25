@@ -726,8 +726,8 @@ impl TransactionalPartitions {
 ///
 /// A handler that drives per-partition transactions names this in its `Out` slot
 /// (`Out(lanes): Out<impl PartitionLanes>`) instead of a publisher type: the concrete value is
-/// [`TransactionalPartitions`], inferred from the [`KafkaPublish::per_partition`] policy
-/// attached at the include site. The core's slot vocabulary describes publishers, and a
+/// [`TransactionalPartitions`], inferred from the [`KafkaTransactionalPublish::per_partition`]
+/// policy attached at the include site. The core's slot vocabulary describes publishers, and a
 /// producer cache is not one, so the capability is declared here and grafted onto the slot
 /// wrapper below - the extension point [`SlotPublisher::inner`] exists for.
 ///
