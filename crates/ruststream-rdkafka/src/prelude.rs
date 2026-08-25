@@ -6,15 +6,18 @@
 //! broker, the subscription descriptor and its options, the publish policies in every mode, the
 //! reply transform, and the per-delivery context keys a Kafka handler reads.
 //!
-//! It is also this broker's capability manifest, in the sense a service can use: the core's
-//! capability traits are re-exported here when a service writes one in a bound, or calls its
-//! methods on a value the runtime hands it. So the glob puts a capability in scope only where
-//! the broker can honour it, and what is missing from the list is missing from the broker.
-//! [`RequestReply`](ruststream::RequestReply) is the visible absence - Kafka has no
-//! request-reply primitive, so it is not implemented and does not appear. A service on two
-//! brokers globs both preludes safely: the capability traits are the same core items, so the
-//! overlap resolves to one item rather than a conflict, and only the crate-specific names
-//! differ.
+//! It is also this broker's capability manifest, drawn where a service can use it: a core
+//! capability trait is re-exported when a service writes it in a bound, or calls its methods on
+//! a value the runtime hands it. So a capability the broker cannot honour is never in scope -
+//! [`RequestReply`](ruststream::RequestReply) is the visible absence, since Kafka has no
+//! request-reply primitive. The reverse does not follow: a trait the broker implements can still
+//! be missing here, either because only the runtime's plumbing consumes it or because the core
+//! already surfaces its method elsewhere. Each such case is named in the comments below, so the
+//! list stays a statement about what a service writes rather than about what the crate impls.
+//!
+//! A service on two brokers globs both preludes safely: the capability traits are the same core
+//! items, so the overlap resolves to one item rather than a conflict, and only the
+//! crate-specific names differ.
 //!
 //! It deliberately stops there. The optional integration modules (`schema_registry`, `avro`,
 //! `protobuf`) stay explicit imports, exactly as the core keeps its own feature modules out of
@@ -43,13 +46,13 @@
 pub use ruststream::prelude::*;
 
 // The capability manifest: the core capabilities Kafka honours that a service actually names -
-// `TransactionalPublisher` in a bound on a handler's publisher, and `Seeker`, `Positioned` and
-// `Partitioned` for the methods a handler calls on what it is handed (`seeker.seek(..)` on an
-// injected `Seek<..>`, `message.position()`, `message.partition_key()`). Kafka runs no
-// request-reply protocol and hands out no owned transaction scopes, so `RequestReply` and
-// `OwnedTransactions` are absent - a handler that reaches for one gets "not in scope" here
-// rather than a runtime failure on a broker that cannot do it.
-pub use ruststream::{Partitioned, Positioned, Seeker, TransactionalPublisher};
+// `TransactionalPublisher` in a bound on a handler's publisher, and `Seeker` and `Positioned`
+// for the methods a handler calls on what it is handed (`seeker.seek(..)` on an injected
+// `Seek<..>`, `message.position()`). Kafka runs no request-reply protocol and hands out no owned
+// transaction scopes, so `RequestReply` and `OwnedTransactions` are absent - a handler that
+// reaches for one gets "not in scope" here rather than a runtime failure on a broker that cannot
+// do it.
+pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
 // The two context keys the per-partition paths name (`Ctx<Partition>` on a lane-scoped handler,
 // `Ctx<Source>` for an exactly-once publish). The rest of the delivery's fields stay behind
@@ -66,6 +69,9 @@ pub use crate::{
 
 // Deliberately absent:
 //
+// - `Partitioned`, implemented here, but the core surfaces `partition_key` through
+//   `IncomingMessage`'s defaulted method - re-exporting the trait would make the natural call
+//   ambiguous (E0034) on a concrete delivery and force every caller into UFCS.
 // - `Seekable` and `BatchSubscriber`, both implemented here: they sit on the subscriber, which
 //   the runtime's plumbing consumes. A service names the seeker type (`KafkaSeeker`) and
 //   declares the batch form in the subscriber attribute, never these traits.
