@@ -8,7 +8,7 @@ only:
 
 ```toml
 [dev-dependencies]
-ruststream-rdkafka = { version = "0.6", features = ["testing"] }
+ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 ```
 
 Never enable this feature in production builds.
