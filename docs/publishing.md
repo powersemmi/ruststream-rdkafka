@@ -27,6 +27,31 @@ it has no native delayed redelivery (see
 at startup; used before `connect` it reports `KafkaError::NotConnected`, and after the broker
 shuts down `KafkaError::Closed` - never a silent success.
 
+## The publish builder
+
+Core 0.7 unified publishing behind one builder. Every publisher starts a publish the same way,
+through the blanket `PublishExt`: `message(value)` for a typed value, `raw(bytes)` for an
+already-encoded payload, then `to(..)` for the destination, `with_headers(..)` for the headers
+and `with_codec(..)` for a non-default codec, and `publish()` sends it. A handler's `Out`
+parameter, a publisher held in application state and a handle taken straight off the connected
+broker all publish through those calls; what differs is only which codec the surface brings to
+`message(..)`.
+
+This crate's per-message arguments ride that path as headers, which the publisher turns into
+native record fields rather than wire headers: the record key and the explicit partition below
+are named in the publish's headers position and reach the record itself. Keeping them there is
+the design rather than a gap in it - the same header names carry the key back on the consuming
+side, so one vocabulary describes both directions, and the crate adds no per-message publish
+step of its own. A placement rule that is not per-message belongs on the publisher instead, as a
+`PublishTransform` (`RoundRobin` below is this crate's own).
+
+What this crate does extend in 0.7 is the slot vocabulary. An `Out` parameter names a capability
+rather than a publisher type, and brokers may declare their own: `PartitionLanes` is the
+capability of handing out one transactional publisher per source partition, so a handler writes
+`Out(lanes): Out<impl PartitionLanes>` and never names the concrete `TransactionalPartitions`
+that the `per_partition()` policy pairs into (see
+[transaction scopes and worker pools](#transaction-scopes-and-worker-pools)).
+
 ## Record keys
 
 The partition-key header becomes the record's native key on publish (and is not duplicated as a
