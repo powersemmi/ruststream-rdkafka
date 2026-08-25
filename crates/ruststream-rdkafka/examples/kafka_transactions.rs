@@ -14,8 +14,7 @@ use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, Out, RustStream};
 use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
 use ruststream_rdkafka::context::keys::Partition;
 use ruststream_rdkafka::{
-    Commit, KafkaBroker, KafkaEosPublish, KafkaError, KafkaPublish, KafkaTopic,
-    KafkaTransactionalPublisher, TransactionalPartitions,
+    Commit, KafkaBroker, KafkaEosPublish, KafkaError, KafkaPublish, KafkaTopic, PartitionLanes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +34,7 @@ struct ItemShipment {
 /// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch
 /// visible atomically to `read_committed` readers, and any failure aborts so shipments are
 /// never half-visible.
-async fn dispatch(
-    publisher: &KafkaTransactionalPublisher,
-    order: &Order,
-) -> Result<(), KafkaError> {
+async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Result<(), P::Error> {
     publisher.begin_transaction().await?;
     for item in &order.items {
         let command = ItemShipment {
@@ -61,7 +57,7 @@ async fn dispatch(
 // at the include site once the subscription opens, before the first delivery, so the handler
 // holds a live, already-fenced producer by construction.
 #[subscriber("orders")]
-async fn ship(order: &Order, Out(shipments): Out<KafkaTransactionalPublisher>) -> HandlerResult {
+async fn ship(order: &Order, Out(shipments): Out<impl TransactionalPublisher>) -> HandlerResult {
     if dispatch(shipments, order).await.is_err() {
         // Nothing became visible; ask for redelivery and try the whole fan-out again.
         return HandlerResult::retry();
@@ -77,8 +73,8 @@ async fn ship(order: &Order, Out(shipments): Out<KafkaTransactionalPublisher>) -
 // lane, so a publisher per source partition gives every lane its own independent transaction -
 // and the id set follows the topic's partitions, not the worker count, so zombie fencing
 // survives `workers(n)` changes.
-async fn issue(
-    publishers: &TransactionalPartitions,
+async fn issue<L: PartitionLanes>(
+    publishers: &L,
     order: &Order,
     partition: i32,
 ) -> Result<(), KafkaError> {
@@ -108,7 +104,7 @@ async fn bill(
     // The delivery's source partition picks the lane's publisher; the key injects it as a
     // plain argument (the DI form of `ctx.context(keys::Partition)`).
     Ctx(partition): Ctx<Partition>,
-    Out(invoices): Out<TransactionalPartitions>,
+    Out(invoices): Out<impl PartitionLanes>,
 ) -> HandlerResult {
     if issue(invoices, order, partition).await.is_err() {
         return HandlerResult::retry();

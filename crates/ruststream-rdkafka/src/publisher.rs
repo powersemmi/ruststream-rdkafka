@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
+use ruststream::runtime::{OutSlot, SlotPublisher, TypedSlot};
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
@@ -717,6 +719,79 @@ impl TransactionalPartitions {
         cell.get_or_try_init(|| open_transactional(&self.inner.state, &policy))
             .await
             .cloned()
+    }
+}
+
+/// The capability of handing out one transactional publisher per source partition.
+///
+/// A handler that drives per-partition transactions names this in its `Out` slot
+/// (`Out(lanes): Out<impl PartitionLanes>`) instead of a publisher type: the concrete value is
+/// [`TransactionalPartitions`], inferred from the [`KafkaPublish::per_partition`] policy
+/// attached at the include site. The core's slot vocabulary describes publishers, and a
+/// producer cache is not one, so the capability is declared here and grafted onto the slot
+/// wrapper below - the extension point [`SlotPublisher::inner`] exists for.
+///
+/// # Examples
+///
+/// ```
+/// use ruststream::TransactionalPublisher;
+/// use ruststream_rdkafka::{KafkaError, PartitionLanes};
+///
+/// async fn ping<L: PartitionLanes>(lanes: &L, partition: i32) -> Result<(), KafkaError> {
+///     let publisher = lanes.for_partition(partition).await?;
+///     publisher.begin_transaction().await
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not hand out per-partition transactional publishers",
+    note = "for an `Out<impl PartitionLanes, _>` slot, attach a \
+            `KafkaPublish::default().transactional_id(..).per_partition()` policy"
+)]
+pub trait PartitionLanes: Send + Sync {
+    /// The publisher owning `partition`'s transactional id.
+    ///
+    /// # Errors
+    ///
+    /// See [`TransactionalPartitions::for_partition`].
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send;
+}
+
+impl PartitionLanes for TransactionalPartitions {
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+        Self::for_partition(self, partition)
+    }
+}
+
+// Grafted once, for every slot marker: what lets a handler bound its slot with the capability
+// rather than with the wrapper the runtime injects.
+impl<L: PartitionLanes, M: OutSlot> PartitionLanes for SlotPublisher<L, M> {
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+        self.inner().for_partition(partition)
+    }
+}
+
+// Mirrors how the core vocabulary is delegated on the same wrapper: reaching the capability
+// only through `Deref` would keep an injected slot out of generic positions demanding it
+// (`fn f(lanes: &impl PartitionLanes)`).
+impl<L, Body, M, EncodeCodec> PartitionLanes for TypedSlot<L, Body, M, EncodeCodec>
+where
+    L: PartitionLanes,
+    EncodeCodec: Send + Sync,
+{
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+        (**self).for_partition(partition)
     }
 }
 

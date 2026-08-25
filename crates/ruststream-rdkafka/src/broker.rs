@@ -625,8 +625,6 @@ fn assign_partitions(
 
 #[cfg(test)]
 mod tests {
-    use ruststream::DescribeServer as _;
-
     use super::*;
 
     #[test]

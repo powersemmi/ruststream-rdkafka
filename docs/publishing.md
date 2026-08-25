@@ -169,10 +169,12 @@ publisher, and every reply joins the window paired with its delivery's consumed 
 
 `KafkaEosPublish::replies()` is a plain `TypedPublisher` over the policy (the explicit spelling
 is `TypedPublisher::new(policy).transform(EosReplies)`), so codecs and further transforms
-compose as usual; `replies_with(codec)` names a non-default codec. For manual publishes from a
-plain handler, take the pipeline as an `Out<EosPipeline>` parameter: `EosPipeline::publish`
-takes the delivery's coordinates explicitly - as a `Ctx<Source>` extractor parameter, like
-every other `KafkaContext` field key.
+compose as usual; `replies_with(codec)` names a non-default codec. For manual publishes,
+`EosPipeline::publish` takes the delivery's coordinates explicitly instead of reading them off
+the relay header, and a handler gets its own from a `Ctx<Source>` extractor parameter, like
+every other `KafkaContext` field key. Reaching the pipeline through an `Out` slot is not a
+route yet: an `Out` parameter names a capability, never a publisher type, and this crate
+declares no capability for the pipeline's explicit form.
 
 The subscription's `Commit::Transactional("enrich-svc-1")` switches its consumer's own
 committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;

@@ -84,7 +84,8 @@ pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use publisher::{
     KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaRetryPublisher,
-    KafkaTransactionalPublish, KafkaTransactionalPublisher, TransactionalPartitions,
+    KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
+    TransactionalPartitions,
 };
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
