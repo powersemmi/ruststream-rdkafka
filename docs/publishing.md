@@ -8,6 +8,11 @@ never holds a publisher that is not connected yet. A plain live publisher rides 
 shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
 the cluster's delivery report, so an `Ok` means Kafka accepted the record.
 
+The prelude exports the policies under their concept names, with the broker prefix stripped:
+`Publish`, `TransactionalPublish`, `PartitionedPublish`, `EosPublish`. That is what the examples
+on this page write, and it is what makes an include site read the same on every broker. This page
+names the prefixed types where it is describing this crate's own API; the two are the same types.
+
 Where a policy is named:
 
 - `b.include(handler)` alone - a `publish("dest")` handler replies through the broker's default
@@ -161,7 +166,7 @@ Streams uses for its per-task producers):
 ```
 
 The include site names the base id:
-`.publisher(KafkaPublish::default().transactional_id("billing-svc-1").per_partition())`. Each
+`.publisher(Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 

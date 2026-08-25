@@ -66,7 +66,7 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         // `confirm` replies through the broker's default publish policy, so the include site
         // names no publisher; the explicit spelling is
-        // `.publisher(TypedPublisher::new(KafkaPublish::default()))`.
+        // `.publisher(TypedPublisher::new(Publish::default()))`.
         b.include(confirm);
         b.include(audit_partition_zero);
     })

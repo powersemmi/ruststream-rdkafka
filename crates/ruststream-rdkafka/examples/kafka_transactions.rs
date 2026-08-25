@@ -144,12 +144,12 @@ fn app() -> impl App {
         // it is what fences a zombie instance. One id per service replica (pod ordinal,
         // instance id) is the usual scheme.
         b.include(ship)
-            .publisher(KafkaPublish::default().transactional_id("shipments-svc-1"));
+            .publisher(Publish::default().transactional_id("shipments-svc-1"));
         // --8<-- [end:id]
         // `per_partition` makes the id the base of one id per source partition
         // ("billing-svc-1-p{partition}"), pairing into `TransactionalPartitions`.
         b.include(bill).publisher(
-            KafkaPublish::default()
+            Publish::default()
                 .transactional_id("billing-svc-1")
                 .per_partition(),
         );
@@ -158,7 +158,7 @@ fn app() -> impl App {
         // pipeline id doubles as the producer's transactional id, and the `enrich`
         // subscription names the same id in its `Commit::Transactional` mode.
         b.include(enrich)
-            .publisher(KafkaEosPublish::new("enrich-svc-1").replies());
+            .publisher(EosPublish::new("enrich-svc-1").replies());
         // --8<-- [end:eos_wiring]
     })
 }
