@@ -3,8 +3,10 @@
 //! Keeping registration in its own module lets the handlers stay broker-agnostic - the router binds
 //! to a concrete broker only when `main` mounts it.
 
-use ruststream::runtime::{Router, RouterDef, TypedPublisher};
-use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+// `RouterDef` is the one name this file needs that the prelude does not carry: it names the
+// return type of a router builder, not anything a service body writes.
+use ruststream::runtime::RouterDef;
+use ruststream_rdkafka::prelude::*;
 
 use crate::orders;
 

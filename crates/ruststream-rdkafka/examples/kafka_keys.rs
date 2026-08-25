@@ -8,9 +8,7 @@
 //! cargo run --example kafka_keys -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::{KafkaBroker, KafkaTopic, LaneKey};
+use ruststream_rdkafka::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

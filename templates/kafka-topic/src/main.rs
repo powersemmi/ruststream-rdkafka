@@ -15,8 +15,7 @@
 mod orders;
 mod routes;
 
-use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream_rdkafka::KafkaBroker;
+use ruststream_rdkafka::prelude::*;
 
 /// Builds the service: one Kafka broker with the orders router mounted.
 ///

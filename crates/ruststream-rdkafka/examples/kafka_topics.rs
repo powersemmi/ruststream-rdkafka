@@ -6,9 +6,7 @@
 //! cargo run --example kafka_topics -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::{Assignment, Commit, KafkaBroker, KafkaTopic, StartOffset};
+use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]

@@ -9,9 +9,7 @@
 //! `default_group` with librdkafka defaults. For transactional publishing and exactly-once
 //! pipelines, see the publishing guide.
 
-use ruststream::runtime::HandlerResult;
-use ruststream::subscriber;
-use ruststream_rdkafka::{Commit, KafkaTopic, Retry};
+use ruststream_rdkafka::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

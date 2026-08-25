@@ -8,9 +8,7 @@
 //! cargo run --example kafka_distribution -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
-use ruststream::subscriber;
-use ruststream_rdkafka::{KafkaBroker, KafkaPublish, RoundRobin};
+use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]

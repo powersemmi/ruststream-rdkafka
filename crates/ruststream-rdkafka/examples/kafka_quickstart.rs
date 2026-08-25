@@ -21,9 +21,7 @@
 //! ```
 
 // --8<-- [start:handler]
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::KafkaBroker;
+use ruststream_rdkafka::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
