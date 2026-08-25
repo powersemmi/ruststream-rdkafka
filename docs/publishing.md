@@ -8,10 +8,9 @@ never holds a publisher that is not connected yet. A plain live publisher rides 
 shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
 the cluster's delivery report, so an `Ok` means Kafka accepted the record.
 
-The prelude exports the policies under their concept names, with the broker prefix stripped:
-`Publish`, `TransactionalPublish`, `PartitionedPublish`, `EosPublish`. That is what the examples
-on this page write, and it is what makes an include site read the same on every broker. This page
-names the prefixed types where it is describing this crate's own API; the two are the same types.
+The prelude exports the same policies under their concept names - `Publish`,
+`TransactionalPublish`, `PartitionedPublish`, `EosPublish` - which is what the examples on this
+page write.
 
 Where a policy is named:
 
@@ -34,27 +33,22 @@ shuts down `KafkaError::Closed` - never a silent success.
 
 ## The publish builder
 
-Core 0.7 unified publishing behind one builder. Every publisher starts a publish the same way,
-through the blanket `PublishExt`: `message(value)` for a typed value, `raw(bytes)` for an
-already-encoded payload, then `to(..)` for the destination, `with_headers(..)` for the headers
-and `with_codec(..)` for a non-default codec, and `publish()` sends it. A handler's `Out`
-parameter, a publisher held in application state and a handle taken straight off the connected
-broker all publish through those calls; what differs is only which codec the surface brings to
-`message(..)`.
+Every publisher starts a publish the same way, through the blanket `PublishExt`:
+`message(value)` for a typed value or `raw(bytes)` for an already-encoded payload, then `to(..)`
+for the destination, `with_headers(..)` for the headers, `with_codec(..)` for a non-default
+codec, and `publish()` to send. A handler's `Out` parameter, a publisher held in application
+state and a handle taken off the connected broker all publish through those calls; only the codec
+`message(..)` uses differs.
 
-This crate's per-message arguments ride that path as headers, which the publisher turns into
-native record fields rather than wire headers: the record key and the explicit partition below
-are named in the publish's headers position and reach the record itself. Keeping them there is
-the design rather than a gap in it - the same header names carry the key back on the consuming
-side, so one vocabulary describes both directions, and the crate adds no per-message publish
-step of its own. A placement rule that is not per-message belongs on the publisher instead, as a
-`PublishTransform` (`RoundRobin` below is this crate's own).
+This crate's per-message arguments travel in the publish's headers position, and the publisher
+turns them into native record fields rather than wire headers: the record key and the explicit
+partition below. A placement rule that is not per-message goes on the publisher instead, as a
+`PublishTransform` (`RoundRobin` below).
 
-What this crate does extend in 0.7 is the slot vocabulary. An `Out` parameter names a capability
-rather than a publisher type, and brokers may declare their own: `PartitionLanes` is the
-capability of handing out one transactional publisher per source partition, so a handler writes
-`Out(lanes): Out<impl PartitionLanes>` and never names the concrete `TransactionalPartitions`
-that the `per_partition()` policy pairs into (see
+An `Out` parameter names a capability rather than a publisher type, and this crate declares
+`PartitionLanes`, the capability of handing out one transactional publisher per source partition.
+A handler writes `Out(lanes): Out<impl PartitionLanes>` instead of naming the concrete
+`TransactionalPartitions` that the `per_partition()` policy pairs into (see
 [transaction scopes and worker pools](#transaction-scopes-and-worker-pools)).
 
 ## Record keys

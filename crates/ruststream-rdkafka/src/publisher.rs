@@ -727,9 +727,7 @@ impl TransactionalPartitions {
 /// A handler that drives per-partition transactions names this in its `Out` slot
 /// (`Out(lanes): Out<impl PartitionLanes>`) instead of a publisher type: the concrete value is
 /// [`TransactionalPartitions`], inferred from the [`KafkaTransactionalPublish::per_partition`]
-/// policy attached at the include site. The core's slot vocabulary describes publishers, and a
-/// producer cache is not one, so the capability is declared here and grafted onto the slot
-/// wrapper below - the extension point [`SlotPublisher::inner`] exists for.
+/// policy attached at the include site.
 ///
 /// # Examples
 ///
@@ -768,8 +766,7 @@ impl PartitionLanes for TransactionalPartitions {
     }
 }
 
-// Grafted once, for every slot marker: what lets a handler bound its slot with the capability
-// rather than with the wrapper the runtime injects.
+// Keep: without it a handler cannot bound its slot with the capability, only with the wrapper.
 impl<L: PartitionLanes, M: OutSlot> PartitionLanes for SlotPublisher<L, M> {
     fn for_partition(
         &self,
@@ -779,9 +776,7 @@ impl<L: PartitionLanes, M: OutSlot> PartitionLanes for SlotPublisher<L, M> {
     }
 }
 
-// Mirrors how the core vocabulary is delegated on the same wrapper: reaching the capability
-// only through `Deref` would keep an injected slot out of generic positions demanding it
-// (`fn f(lanes: &impl PartitionLanes)`).
+// Keep despite `Deref`: only this impl puts an injected slot into `&impl PartitionLanes`.
 impl<L, Body, M, EncodeCodec> PartitionLanes for TypedSlot<L, Body, M, EncodeCodec>
 where
     L: PartitionLanes,
