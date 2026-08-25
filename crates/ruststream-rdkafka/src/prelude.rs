@@ -6,10 +6,11 @@
 //! broker, the subscription descriptor and its options, the publish policies in every mode, the
 //! reply transform, and the per-delivery context keys a Kafka handler reads.
 //!
-//! It is also this broker's capability manifest. The core's optional capability traits are
-//! re-exported here in exactly the set Kafka implements, so the glob puts a capability in scope
-//! only where the broker can honour it: what is missing from this list is missing from the
-//! broker. [`RequestReply`](ruststream::RequestReply) is the visible absence - Kafka has no
+//! It is also this broker's capability manifest, in the sense a service can use: the core's
+//! capability traits are re-exported here when a service writes one in a bound, or calls its
+//! methods on a value the runtime hands it. So the glob puts a capability in scope only where
+//! the broker can honour it, and what is missing from the list is missing from the broker.
+//! [`RequestReply`](ruststream::RequestReply) is the visible absence - Kafka has no
 //! request-reply primitive, so it is not implemented and does not appear. A service on two
 //! brokers globs both preludes safely: the capability traits are the same core items, so the
 //! overlap resolves to one item rather than a conflict, and only the crate-specific names
@@ -41,13 +42,14 @@
 // import line serves a whole service file.
 pub use ruststream::prelude::*;
 
-// The capability manifest: every optional core capability this broker's live forms implement,
-// and nothing else. `TransactionalPublisher` on the transactional publisher, `Seekable` and
-// `BatchSubscriber` on the subscriber, `Positioned` and `Partitioned` on the delivery. Kafka
-// runs no request-reply protocol and hands out no owned transaction scopes, so `RequestReply`
-// and `OwnedTransactions` are absent - a handler that reaches for one gets "not in scope" here
+// The capability manifest: the core capabilities Kafka honours that a service actually names -
+// `TransactionalPublisher` in a bound on a handler's publisher, and `Seeker`, `Positioned` and
+// `Partitioned` for the methods a handler calls on what it is handed (`seeker.seek(..)` on an
+// injected `Seek<..>`, `message.position()`, `message.partition_key()`). Kafka runs no
+// request-reply protocol and hands out no owned transaction scopes, so `RequestReply` and
+// `OwnedTransactions` are absent - a handler that reaches for one gets "not in scope" here
 // rather than a runtime failure on a broker that cannot do it.
-pub use ruststream::{BatchSubscriber, Partitioned, Positioned, Seekable, TransactionalPublisher};
+pub use ruststream::{Partitioned, Positioned, Seeker, TransactionalPublisher};
 
 // The two context keys the per-partition paths name (`Ctx<Partition>` on a lane-scoped handler,
 // `Ctx<Source>` for an exactly-once publish). The rest of the delivery's fields stay behind
@@ -62,8 +64,13 @@ pub use crate::{
     Retry, RoundRobin, StartOffset,
 };
 
-// Three groups are deliberately absent:
+// Deliberately absent:
 //
+// - `Seekable` and `BatchSubscriber`, both implemented here: they sit on the subscriber, which
+//   the runtime's plumbing consumes. A service names the seeker type (`KafkaSeeker`) and
+//   declares the batch form in the subscriber attribute, never these traits.
+// - `Subscribe`, `DefaultPublish` and `DescribeServer`: contract machinery the runtime calls,
+//   not vocabulary a service writes.
 // - The `testing` module: broker-author and test tooling behind its own feature, not the API a
 //   service writes against, so it is imported where a test needs it.
 // - The record-level machinery - the header constants, the live publisher and subscriber types,

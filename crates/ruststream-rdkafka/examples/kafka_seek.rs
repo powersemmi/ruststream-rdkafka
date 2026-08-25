@@ -15,10 +15,7 @@
 //! cargo run --example kafka_seek -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, RustStream, Seek};
-use ruststream::{Seeker, subscriber};
-use ruststream_rdkafka::context::keys::Partition;
-use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPosition, KafkaSeeker, KafkaTopic};
+use ruststream_rdkafka::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
