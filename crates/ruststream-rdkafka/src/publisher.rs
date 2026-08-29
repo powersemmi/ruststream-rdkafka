@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, ready};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -91,8 +91,11 @@ impl KafkaPublish {
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPublish {
     type Live = KafkaPublisher;
 
-    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
-        Ok(connected.publisher(self))
+    fn pair(
+        self,
+        connected: &ConnectedKafkaBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        ready(Ok(connected.publisher(self)))
     }
 }
 
@@ -541,26 +544,28 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
     /// and [`KafkaError::Publish`] when the begin call fails.
     // The guard intentionally spans the begin call: check-and-begin must be atomic so two
     // concurrent begins cannot both pass the check.
-    #[allow(clippy::significant_drop_tightening)]
-    async fn begin_transaction(&self) -> Result<(), Self::Error> {
-        self.inner.state.ensure_open(&self.inner.id)?;
-        let mut open = self
-            .inner
-            .open
-            .lock()
-            .expect("transaction state mutex poisoned");
-        if *open {
-            return Err(KafkaError::TransactionBusy {
-                id: self.inner.id.clone(),
-            });
+    fn begin_transaction(&self) -> impl Future<Output = Result<(), Self::Error>> {
+        if let Err(err) = self.inner.state.ensure_open(&self.inner.id) {
+            return ready(Err(err));
         }
-        // A rejected begin leaves the open transaction untouched, per the trait contract.
-        self.inner
-            .producer
-            .begin_transaction()
-            .map_err(KafkaError::publish)?;
-        *open = true;
-        Ok(())
+        {
+            let mut open = self
+                .inner
+                .open
+                .lock()
+                .expect("transaction state mutex poisoned");
+            if *open {
+                return ready(Err(KafkaError::TransactionBusy {
+                    id: self.inner.id.clone(),
+                }));
+            }
+            // A rejected begin leaves the open transaction untouched, per the trait contract.
+            if let Err(err) = self.inner.producer.begin_transaction() {
+                return ready(Err(KafkaError::publish(err)));
+            }
+            *open = true;
+        }
+        ready(Ok(()))
     }
 
     /// Commits the open transaction, making its records visible atomically.
@@ -633,14 +638,17 @@ pub struct KafkaPartitionedPublish {
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
     type Live = TransactionalPartitions;
 
-    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
-        Ok(TransactionalPartitions {
+    fn pair(
+        self,
+        connected: &ConnectedKafkaBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        ready(Ok(TransactionalPartitions {
             inner: Arc::new(PartitionsInner {
                 state: Arc::clone(connected.state()),
                 template: self.template,
                 publishers: Mutex::new(HashMap::new()),
             }),
-        })
+        }))
     }
 }
 
