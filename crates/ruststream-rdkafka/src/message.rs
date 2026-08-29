@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
-use ruststream::{AckError, Headers, IncomingMessage, Partitioned, Positioned};
+use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned};
 
 use crate::retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
@@ -80,7 +80,7 @@ pub(crate) enum Settlement {
 #[derive(Debug)]
 pub struct KafkaMessage {
     payload: Bytes,
-    headers: Headers,
+    headers: HeaderMap,
     topic: String,
     partition: i32,
     offset: i64,
@@ -108,7 +108,7 @@ impl KafkaMessage {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         payload: Bytes,
-        headers: Headers,
+        headers: HeaderMap,
         topic: String,
         partition: i32,
         offset: i64,
@@ -264,7 +264,7 @@ impl IncomingMessage for KafkaMessage {
         &self.payload
     }
 
-    fn headers(&self) -> &Headers {
+    fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 

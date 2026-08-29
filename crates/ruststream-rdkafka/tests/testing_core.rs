@@ -18,7 +18,7 @@ use ruststream::runtime::{AppInfo, HandlerResult, RustStream};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, Headers, IncomingMessage, OutgoingMessage,
+    Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutgoingMessage,
     Partitioned, Publisher, Subscriber,
 };
 use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
@@ -135,7 +135,7 @@ async fn headers_and_partition_key_propagate() {
     let broker = connected().await;
     let mut subscriber = broker.subscribe_with("keyed").await.expect("subscribe");
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "k-1");
     broker

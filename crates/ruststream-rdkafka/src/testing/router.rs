@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use ruststream::testing::Coordinator;
-use ruststream::{Headers, RawMessage};
+use ruststream::{HeaderMap, RawMessage};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,7 +17,7 @@ pub(crate) struct SubscriptionId(u64);
 #[derive(Debug, Clone)]
 pub(crate) struct TestDelivery {
     pub(crate) payload: Bytes,
-    pub(crate) headers: Headers,
+    pub(crate) headers: HeaderMap,
 }
 
 pub(crate) type DeliverySender = mpsc::UnboundedSender<TestDelivery>;
@@ -81,7 +81,7 @@ impl KeyRouter {
         &self,
         topic: &str,
         payload: &Bytes,
-        headers: &Headers,
+        headers: &HeaderMap,
         coordinator: Option<&Coordinator>,
     ) {
         let senders: Vec<DeliverySender> = {

@@ -30,7 +30,7 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, Positioned,
+    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, OutgoingMessage, Positioned,
     PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
 };
 use ruststream_rdkafka::context::keys;
@@ -153,7 +153,7 @@ async fn round_trip_with_headers_and_key() {
         .await
         .expect("subscribe");
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "order-1");
     broker
@@ -392,7 +392,7 @@ async fn shared_key_lands_on_one_partition() {
         .expect("subscribe");
 
     for i in 0..COUNT {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_KEY_HEADER, "same-key");
         broker
             .publisher(KafkaPublish::default())
@@ -547,7 +547,7 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
         .expect("subscribe dlq");
 
     // Simulate the second delivery of a message: one retry hop already behind it.
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(RETRY_COUNT_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
@@ -1003,7 +1003,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
     for seq in 0..PER_KEY {
         for k in 0..KEYS {
             let key = format!("{run}-k{k}");
-            let mut headers = Headers::new();
+            let mut headers = HeaderMap::new();
             headers.insert(PARTITION_KEY_HEADER, key.clone());
             broker
                 .publisher(KafkaPublish::default())
@@ -1102,7 +1102,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
         // Alternating record keys: under record-key lanes these could interleave, but the
         // partition lane must keep the single partition's global order.
         let key = format!("{run}-{}", if seq % 2 == 0 { "even" } else { "odd" });
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_KEY_HEADER, key.clone());
         broker
             .publisher(KafkaPublish::default())
@@ -1410,7 +1410,7 @@ async fn explicit_partition_header_targets_the_partition() {
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(PARTITION_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
@@ -1428,7 +1428,7 @@ async fn explicit_partition_header_targets_the_partition() {
     msg.ack().await.expect("ack");
 
     // A malformed partition value fails the publish clearly instead of falling back.
-    let mut bad = Headers::new();
+    let mut bad = HeaderMap::new();
     bad.insert(PARTITION_HEADER, "one");
     let err = broker
         .publisher(KafkaPublish::default())
@@ -1450,7 +1450,7 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
     let broker = connected_broker(&url).await;
 
     for (payload, partition) in [(b"p0".as_slice(), 0), (b"p1", 1)] {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_HEADER, partition.to_string());
         broker
             .publisher(KafkaPublish::default())
@@ -1632,7 +1632,7 @@ async fn manual_assignment_composes_with_partition_lanes() {
     let broker = connected_broker(&url).await;
     for seq in 0..PER_PARTITION {
         for partition in [0, 1] {
-            let mut headers = Headers::new();
+            let mut headers = HeaderMap::new();
             headers.insert(PARTITION_HEADER, partition.to_string());
             let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
             broker
