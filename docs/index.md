@@ -77,7 +77,7 @@ The framework's optional capability traits, and which of them this broker implem
 | `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows use [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
 | `RequestReply` | no | The protocol has no reply correlation; request/reply on Kafka is an application-level reply topic plus a correlation header. |
 | `Partitioned` | yes | The partition key of a delivery is the record's native Kafka key: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
-| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, reached from a handler through the `SeekHandle` context key next to the delivery's own `Position`: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
+| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, reached from a handler through the `SeekHandle` context key next to the delivery's own `Position`; the in-process test broker mints the same seeker over its retained log, so a service that replays is testable without a cluster: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
 | `DescribeServer` | yes | The broker reports its bootstrap servers under the `kafka` protocol for generated AsyncAPI documents. |
 
 ## Scaffold a service

@@ -182,6 +182,12 @@ The scope and the bookkeeping:
   never carries the group past the replayed range, and the replayed deliveries are processed
   into a fresh window.
 
+A service that repositions is testable without a cluster: the in-process test broker retains what
+it routes and mints the same seeker over that log, so the handlers above mount on it unchanged
+and their replay settles inside the harness. See
+[repositioning in-process](testing.md#repositioning-in-process) for what it resolves and what it
+refuses.
+
 ## Keyed worker lanes
 
 Kafka partitions by the native record key, and this crate surfaces it through
