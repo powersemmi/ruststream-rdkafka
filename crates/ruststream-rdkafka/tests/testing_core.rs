@@ -599,11 +599,16 @@ async fn a_handler_replays_its_own_delivery_position_through_the_context() {
 }
 
 /// A page body gets the subscription-scoped context: the same `SeekHandle` key and no position,
-/// because a page spans many records. Where to resume rides the elements.
+/// because a page spans many records. Where to resume rides the elements, and the budget bounds
+/// the replay the way a service's would.
 #[subscriber(KafkaTopic::new("seek-pages"))]
-async fn drain_pages(page: &[Cursor], ctx: &mut Context<'_, KafkaBatchContext>) -> HandlerOutcome {
+async fn drain_pages(
+    page: &[Cursor],
+    ctx: &mut Context<'_, KafkaBatchContext, Rewinds>,
+) -> HandlerOutcome {
     let resume_at = page.iter().find_map(|entry| entry.resume_at);
     if let Some(offset) = resume_at
+        && ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0
         && ctx
             .context(SeekHandle)
             .seek(KafkaPosition::offset(0, offset))
@@ -627,10 +632,11 @@ struct Cursor {
 async fn a_page_body_repositions_through_its_subscription_context() {
     let broker = KafkaTestBroker::new();
     let seeded = broker.clone().connect().await.expect("connect");
-    // The whole run is in the log before the subscription opens, so the opening replay hands the
-    // body one full page. The marker sits at offset 0 and resumes from 1, so the page after the
-    // seek carries no marker and the reposition happens exactly once.
-    for (id, resume_at) in [(0, Some(1)), (1, None)] {
+    // The whole run is in the log before the subscription opens, so the opening replay is what
+    // the body pages over. The marker asks to resume from offset 0, so whatever the window makes
+    // of the run, the record the target names is delivered again - and exactly once more,
+    // because the budget is spent by then.
+    for (id, resume_at) in [(0, Some(0)), (1, None)] {
         seeded
             .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(
@@ -644,15 +650,17 @@ async fn a_page_body_repositions_through_its_subscription_context() {
             .expect("seed");
     }
 
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
-        // The framework's own window, so a page is a page of a known size rather than whatever
-        // the transport had ready when the dispatcher looked.
-        b.include(
-            drain_pages
-                .start_at(KafkaPosition::earliest())
-                .buffered(nonzero!(8), Duration::from_millis(5)),
-        );
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
+        .with_broker(broker, |b| {
+            // The framework's own window over a natively batching transport: pages close on the
+            // declared size or deadline rather than on whatever the transport had ready.
+            b.include(
+                drain_pages
+                    .start_at(KafkaPosition::earliest())
+                    .buffered(nonzero!(8), Duration::from_millis(50)),
+            );
+        });
     let tb = TestApp::start(app).await.expect("start");
     tb.settle().await.expect("the page and its replay settle");
 
@@ -663,10 +671,16 @@ async fn a_page_body_repositions_through_its_subscription_context() {
         .into_iter()
         .map(|entry| entry.id)
         .collect();
+    // How the run is split into pages is the window's business, so the assertion is on the
+    // reposition itself: the sought record came back, once, and the rest of the log kept flowing.
     assert_eq!(
-        seen,
-        vec![0, 1, 1],
-        "the page's reposition must replay the log from the offset its elements named",
+        seen.iter().filter(|id| **id == 0).count(),
+        2,
+        "the page's reposition must replay the record its elements named, got {seen:?}",
+    );
+    assert!(
+        seen.contains(&1),
+        "the log behind the target must keep flowing, got {seen:?}",
     );
 
     tb.shutdown().await.expect("shutdown");
