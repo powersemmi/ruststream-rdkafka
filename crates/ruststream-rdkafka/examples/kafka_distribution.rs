@@ -39,7 +39,7 @@ fn app() -> impl App {
         // The transform stacks on the publish policy; the runtime pairs it into the live
         // publisher once the broker is connected.
         let work_items =
-            TypedPublisher::new(Publish::default()).transform(RoundRobin::partitions(8));
+            TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(8));
         b.include(plan).publisher(work_items);
         // --8<-- [end:round_robin]
     })

@@ -6,17 +6,14 @@
 //!
 //! # Policy names
 //!
-//! Publish policies are exported under their concept names:
-//!
-//! | Prelude name | Type |
-//! | --- | --- |
-//! | [`Publish`] | [`KafkaPublish`](crate::KafkaPublish) |
-//! | [`TransactionalPublish`] | [`KafkaTransactionalPublish`](crate::KafkaTransactionalPublish) |
-//! | [`PartitionedPublish`] | [`KafkaPartitionedPublish`](crate::KafkaPartitionedPublish) |
-//! | [`EosPublish`] | [`KafkaEosPublish`](crate::KafkaEosPublish) |
-//!
-//! Globbing two broker preludes conflicts on these names where one is used (E0659); the prefixed
-//! types above are the disambiguation.
+//! Publish policies keep their `Kafka` prefix here - [`KafkaPublish`](crate::KafkaPublish),
+//! [`KafkaTransactionalPublish`](crate::KafkaTransactionalPublish),
+//! [`KafkaPartitionedPublish`](crate::KafkaPartitionedPublish),
+//! [`KafkaEosPublish`](crate::KafkaEosPublish). The unprefixed concept names belong to the core:
+//! `Publish` is its slot capability trait, and an alias here would shadow it silently (an
+//! explicit re-export wins over the glob above), turning `fn f<T: Publish>()` in a service into
+//! `E0404: expected trait, found struct`. The prefix also means two broker preludes can be
+//! globbed side by side without an E0659 ambiguity on a policy name.
 //!
 //! # Examples
 //!
@@ -31,10 +28,10 @@
 //!     .commit(Commit::Tracked)
 //!     .start(StartOffset::Earliest);
 //!
-//! let replies = Publish::default();
-//! let shipments: TransactionalPublish = Publish::default().transactional_id("shipments-svc-1");
-//! let lanes: PartitionedPublish = shipments.clone().per_partition();
-//! let pipeline = EosPublish::new("enrich-svc-1");
+//! let replies = KafkaPublish::default();
+//! let shipments = KafkaPublish::default().transactional_id("shipments-svc-1");
+//! let lanes: KafkaPartitionedPublish = shipments.clone().per_partition();
+//! let pipeline = KafkaEosPublish::new("enrich-svc-1");
 //! # let _ = (broker, orders, replies, shipments, lanes, pipeline);
 //! ```
 
@@ -44,10 +41,9 @@ pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
 pub use crate::context::keys::{Partition, Position, SeekHandle, Source};
 pub use crate::{
-    Assignment, Commit, KafkaBroker, KafkaEosPublish as EosPublish,
-    KafkaPartitionedPublish as PartitionedPublish, KafkaPosition, KafkaPublish as Publish,
-    KafkaSeeker, KafkaTopic, KafkaTransactionalPublish as TransactionalPublish, LaneKey,
-    PartitionLanes, Retry, RoundRobin, StartOffset,
+    Assignment, Commit, KafkaBroker, KafkaEosPublish, KafkaPartitionedPublish, KafkaPosition,
+    KafkaPublish, KafkaSeeker, KafkaTopic, KafkaTransactionalPublish, LaneKey, PartitionLanes,
+    Retry, RoundRobin, StartOffset,
 };
 
 // `Partitioned` stays out: the core's defaulted `IncomingMessage::partition_key` is already in
