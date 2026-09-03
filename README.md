@@ -45,10 +45,10 @@ configuration - the runtime climbs the lifecycle ladder around it.
   exactly-once transitions are pure declaration, written at the include site; the runtime pairs
   each into a live publisher once the broker is connected, so a handler never sees a
   not-connected one.
-- **Repositionable subscriptions** - the `Seekable` capability moves a live subscription over
-  the partitions this consumer holds (earliest, latest, an absolute offset, a timestamp, or a
-  delivery's own position), with the tracked watermark and the exactly-once offsets following
-  the seek; `start_at(..)` applies a position on every startup.
+- **Repositionable subscriptions** - a handler moves its own subscription over the partitions
+  this consumer holds (earliest, latest, an absolute offset, a timestamp, or the delivery's own
+  position) by reading the `SeekHandle` key off its context, with the tracked watermark and the
+  exactly-once offsets following the seek; `start_at(..)` applies a position on every startup.
 - **In-process test broker** - the `testing` feature ships `KafkaTestBroker` for application
   tests with the core `TestApp` harness, no cluster required.
 

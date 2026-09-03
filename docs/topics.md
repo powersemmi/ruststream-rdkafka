@@ -143,12 +143,22 @@ applies when the group has no committed offset for the partition:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:start_at"
 ```
 
-A `Seek(seeker): Seek<KafkaSeeker>` handler parameter moves the subscription while it runs. The
-runtime mints the seeker off this subscription's own subscriber at startup, so it is live by
-construction:
+A running subscription moves through its own per-delivery context. The subscription mints the
+seeker when it opens and every delivery carries it, so the `SeekHandle` key hands the handler a
+live handle by construction - as a `Ctx(seeker): Ctx<SeekHandle>` parameter, or off a declared
+`Context<'_, KafkaContext>` with `ctx.context(SeekHandle)`. Its sibling key `Position` reports
+where the delivery being handled sits, which is what "replay this record" takes:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:handler"
+```
+
+A batch handler gets `KafkaBatchContext` instead - the same `SeekHandle` key, and nothing
+per-delivery, because a page spans many records and no single position describes it. Where to
+seek then rides the elements:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:batch"
 ```
 
 The scope and the bookkeeping:
@@ -239,18 +249,23 @@ origin of the failed delivery:
 
 ## Batches
 
-Batching is native: the subscriber implements the core `BatchSubscriber` capability directly,
-and a page is one delivery plus everything librdkafka has already fetched - no added waiting,
-no crate-imposed knobs. Page size is bounded by librdkafka's own fetch-queue limits
-(`queued.max.messages.kbytes` and friends, reachable through the raw config passthrough):
+A handler that takes a slice consumes whole pages; nothing in the attribute says so, the
+signature does. Batching is native here: the subscriber implements the core `BatchSubscriber`
+capability directly, and a page is one delivery plus everything librdkafka has already fetched -
+no added waiting, no crate-imposed knobs:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
 ```
 
-For an explicit page window, the core `Buffered` adapter wraps any source and closes a page at
-`max_size` deliveries or `max_wait` after the first one (see the second handler in the example
-below). Batch handlers mount with `include`, like every other handler:
+Page size is bounded by librdkafka's own fetch-queue limits, reached through the descriptor's
+config passthrough:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:size"
+```
+
+Batch handlers mount with `include`, like every other handler:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"
@@ -258,8 +273,8 @@ below). Batch handlers mount with `include`, like every other handler:
 
 ### How batch settlement maps onto Kafka
 
-A batch handler settles its page either uniformly (one `HandlerResult` for every element) or
-per element (`Vec<HandlerResult>` / `Vec<Settle>`, entry `i` settling element `i`):
+A batch handler settles its page either uniformly (one `HandlerOutcome` for every element) or
+per element (`Vec<HandlerOutcome>`, entry `i` settling element `i`):
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:selective"
@@ -297,8 +312,8 @@ batches - a keyed policy behaves like a plain pool of the same size. Per-key ord
 single-message-handler feature (`workers(n, by_key)`, see the keyed lanes example), where it
 composes with Kafka's native record-key partitioning end to end.
 
-The in-process test broker batches natively the same way (a page drains what is enqueued),
-and the `Buffered` wrapper works over both brokers.
+The in-process test broker batches natively the same way (a page drains what is enqueued), so a
+batch handler mounts on either without changing.
 
 ## Consume errors
 

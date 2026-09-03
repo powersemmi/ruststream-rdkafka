@@ -32,6 +32,13 @@ groups, partitions, committed positions, start offsets, rebalancing, and retenti
 transport behavior. `nack(true)` redelivers immediately in-process, while the
 real transport redelivers from the committed position on the next fetch.
 
+The per-delivery context follows from that. Its fields are the record's coordinates and the
+subscription's reposition handle, and the in-process transport has neither, so a handler that
+names `KafkaContext` (a `Ctx<Partition>` parameter, a `Ctx<SeekHandle>` one, a declared
+`Context<'_, KafkaContext>`) does not mount on the test broker - a compile error rather than a
+fabricated offset. Test such a handler against a live cluster, and keep the in-process suites
+for the routing and settlement behavior around it.
+
 Exercise the real semantics against a live cluster:
 
 ```text

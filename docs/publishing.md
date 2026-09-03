@@ -8,9 +8,10 @@ never holds a publisher that is not connected yet. A plain live publisher rides 
 shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
 the cluster's delivery report, so an `Ok` means Kafka accepted the record.
 
-The prelude exports the same policies under their concept names - `Publish`,
-`TransactionalPublish`, `PartitionedPublish`, `EosPublish` - which is what the examples on this
-page write.
+The prelude exports the policies under their own names - `KafkaPublish`,
+`KafkaTransactionalPublish`, `KafkaPartitionedPublish`, `KafkaEosPublish`. The unprefixed concept
+names belong to the core (`Publish` is its slot capability trait), and two broker preludes can be
+globbed side by side without a name clash.
 
 Where a policy is named:
 
@@ -34,11 +35,12 @@ shuts down `KafkaError::Closed` - never a silent success.
 ## The publish builder
 
 Every publisher starts a publish the same way, through the blanket `PublishExt`:
-`message(value)` for a typed value or `raw(bytes)` for an already-encoded payload, then `to(..)`
-for the destination, `with_headers(..)` for the headers, `with_codec(..)` for a non-default
-codec, and `publish()` to send. A handler's `Out` parameter, a publisher held in application
-state and a handle taken off the connected broker all publish through those calls; only the codec
-`message(..)` uses differs.
+`message(&value)`, then `to(..)` for the destination, `with_headers(..)` for the headers,
+`with_codec(..)` for a non-default codec, and `publish()` to send. A handler's `Out` parameter, a
+publisher held in application state and a handle taken off the connected broker all publish
+through those calls; only the codec `message(..)` uses differs. There is no bytes entry point:
+an already-encoded payload is a `#[derive(Outgoing, Serialized)]` newtype, which carries its
+bytes through the same call with no codec in the way.
 
 This crate's per-message arguments travel in the publish's headers position, and the publisher
 turns them into native record fields rather than wire headers: the record key and the explicit
@@ -50,6 +52,12 @@ An `Out` parameter names a capability rather than a publisher type, and this cra
 A handler writes `Out(lanes): Out<impl PartitionLanes>` instead of naming the concrete
 `TransactionalPartitions` that the `per_partition()` policy pairs into (see
 [transaction scopes and worker pools](#transaction-scopes-and-worker-pools)).
+
+That capability is a router, not a publisher: it hands out a publisher rather than sending a
+message, so what a lane publishes leaves through that publisher and lands in the broker's publish
+log rather than in the slot's test record (`tb.out::<Marker>()`) - the same boundary a settled
+owned transaction's buffer has. In tests, assert on the publish log for lane traffic; the slot
+record covers handlers that publish through the slot itself.
 
 ## Record keys
 
@@ -160,7 +168,7 @@ Streams uses for its per-task producers):
 ```
 
 The include site names the base id:
-`.publisher(Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
+`.publisher(KafkaPublish::default().transactional_id("billing-svc-1").per_partition())`. Each
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 
