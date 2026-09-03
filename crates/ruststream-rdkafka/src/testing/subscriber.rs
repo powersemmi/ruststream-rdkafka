@@ -3,14 +3,21 @@
 use std::fmt;
 use std::future::{Future, ready};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Poll, ready as poll_ready};
 
 use futures::Stream;
 use ruststream::testing::Coordinator;
-use ruststream::{AckError, BatchSubscriber, HeaderMap, IncomingMessage, Partitioned, Subscriber};
+use ruststream::{
+    AckError, BatchSubscriber, HeaderMap, IncomingMessage, Partitioned, Positioned, Seekable,
+    Subscriber,
+};
 
 use super::broker::TestBrokerState;
 use super::router::{DeliveryReceiver, DeliverySender, SubscriptionId, TestDelivery};
+use super::seek::InProcessSeek;
 use crate::error::KafkaError;
+use crate::seek::{KafkaPosition, KafkaSeeker};
 
 /// In-process subscriber on one topic name.
 ///
@@ -18,6 +25,16 @@ use crate::error::KafkaError;
 /// re-enqueues to this same subscription, `nack(false)` drops. The real transport's
 /// committed-position semantics (holes, watermarks, redelivery on rebalance) are deliberately
 /// not simulated.
+///
+/// # Repositioning
+///
+/// The transport retains every published message, so this subscription is seekable over that
+/// log: [`Seekable::seeker`] mints a [`KafkaSeeker`] whose reposition re-enqueues the log suffix
+/// from the target on. A delivery's offset is its message's index in its topic's log, every topic
+/// has one partition numbered zero, and [`KafkaPosition::Earliest`], [`KafkaPosition::Latest`]
+/// and [`KafkaPosition::Offset`] resolve against that log. [`KafkaPosition::Timestamp`] does not:
+/// the transport stamps no record timestamps, so it reports
+/// [`KafkaError::InvalidOptions`] rather than resolving to something invented.
 pub struct KafkaTestSubscriber {
     state: Arc<TestBrokerState>,
     ids: Vec<SubscriptionId>,
@@ -25,12 +42,20 @@ pub struct KafkaTestSubscriber {
     sender: DeliverySender,
     receiver: DeliveryReceiver,
     coordinator: Option<Coordinator>,
+    /// The read position this subscription is on. A reposition bumps it, so deliveries queued
+    /// under an earlier one are dropped instead of settling into a position that replaced them.
+    generation: Arc<AtomicU64>,
+    /// Minted once, when the subscription opens: every delivery carries a clone, so a handler's
+    /// context hands out the reposition handle for one reference-count bump.
+    seeker: Arc<KafkaSeeker>,
 }
 
 impl KafkaTestSubscriber {
     pub(crate) fn open_many(state: &Arc<TestBrokerState>, topics: &[String]) -> Self {
-        let (ids, sender, receiver) = state.router.subscribe_many(topics);
+        let generation = Arc::new(AtomicU64::new(0));
+        let (ids, sender, receiver) = state.router.subscribe_many(topics, &generation);
         let coordinator = state.coordinator();
+        let control = InProcessSeek::new(state, topics, sender.clone(), &generation);
         Self {
             state: Arc::clone(state),
             ids,
@@ -38,6 +63,8 @@ impl KafkaTestSubscriber {
             sender,
             receiver,
             coordinator,
+            generation,
+            seeker: Arc::new(KafkaSeeker::in_process(Arc::new(control))),
         }
     }
 
@@ -45,6 +72,30 @@ impl KafkaTestSubscriber {
     #[must_use]
     pub fn topic(&self) -> &str {
         &self.topic
+    }
+
+    /// Builds the delivery, or reports it as belonging to a read position this subscription no
+    /// longer has. A stale delivery is accounted as consumed here: it was counted in flight when
+    /// it was enqueued, and nothing else will settle it.
+    fn accept(
+        delivery: TestDelivery,
+        sender: &DeliverySender,
+        coordinator: Option<&Coordinator>,
+        generation: &AtomicU64,
+        seeker: &Arc<KafkaSeeker>,
+    ) -> Option<KafkaTestMessage> {
+        if delivery.generation < generation.load(Ordering::Acquire) {
+            if let Some(coordinator) = coordinator {
+                coordinator.consumed();
+            }
+            return None;
+        }
+        Some(KafkaTestMessage {
+            delivery: Some(delivery),
+            sender: sender.clone(),
+            coordinator: coordinator.cloned(),
+            seeker: Arc::clone(seeker),
+        })
     }
 }
 
@@ -79,19 +130,36 @@ impl Subscriber for KafkaTestSubscriber {
             receiver,
             sender,
             coordinator,
+            generation,
+            seeker,
             ..
         } = self;
         futures::stream::poll_fn(move |cx| {
-            receiver.poll_recv(cx).map(|delivery| {
-                delivery.map(|delivery| {
-                    Ok(KafkaTestMessage {
-                        delivery: Some(delivery),
-                        sender: sender.clone(),
-                        coordinator: coordinator.clone(),
-                    })
-                })
-            })
+            loop {
+                match poll_ready!(receiver.poll_recv(cx)) {
+                    // A delivery from before a reposition: drop it and take the next one, which
+                    // is what makes the replay the only thing the handler sees.
+                    Some(delivery) => {
+                        if let Some(message) =
+                            Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
+                        {
+                            return Poll::Ready(Some(Ok(message)));
+                        }
+                    }
+                    None => return Poll::Ready(None),
+                }
+            }
         })
+    }
+}
+
+impl Seekable for KafkaTestSubscriber {
+    type Seeker = KafkaSeeker;
+
+    /// Hands out a handle repositioning this subscription over the transport's retained log; see
+    /// the type-level documentation for which positions it resolves.
+    fn seeker(&self) -> Self::Seeker {
+        KafkaSeeker::clone(&self.seeker)
     }
 }
 
@@ -112,26 +180,32 @@ impl BatchSubscriber for KafkaTestSubscriber {
             receiver,
             sender,
             coordinator,
+            generation,
+            seeker,
             ..
         } = self;
         futures::stream::poll_fn(move |cx| {
-            receiver.poll_recv(cx).map(|delivery| {
-                delivery.map(|first| {
-                    let mut batch = vec![KafkaTestMessage {
-                        delivery: Some(first),
-                        sender: sender.clone(),
-                        coordinator: coordinator.clone(),
-                    }];
-                    while let Ok(delivery) = receiver.try_recv() {
-                        batch.push(KafkaTestMessage {
-                            delivery: Some(delivery),
-                            sender: sender.clone(),
-                            coordinator: coordinator.clone(),
-                        });
+            let first = loop {
+                match poll_ready!(receiver.poll_recv(cx)) {
+                    Some(delivery) => {
+                        if let Some(message) =
+                            Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
+                        {
+                            break message;
+                        }
                     }
-                    Ok(batch)
-                })
-            })
+                    None => return Poll::Ready(None),
+                }
+            };
+            let mut batch = vec![first];
+            while let Ok(delivery) = receiver.try_recv() {
+                if let Some(message) =
+                    Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
+                {
+                    batch.push(message);
+                }
+            }
+            Poll::Ready(Some(Ok(batch)))
         })
     }
 }
@@ -141,6 +215,7 @@ pub struct KafkaTestMessage {
     delivery: Option<TestDelivery>,
     sender: DeliverySender,
     coordinator: Option<Coordinator>,
+    seeker: Arc<KafkaSeeker>,
 }
 
 impl KafkaTestMessage {
@@ -150,6 +225,35 @@ impl KafkaTestMessage {
         self.delivery
             .take()
             .expect("KafkaTestMessage settled twice")
+    }
+
+    fn queued(&self) -> &TestDelivery {
+        self.delivery
+            .as_ref()
+            .expect("message accessed after settlement")
+    }
+
+    /// The topic this delivery came from.
+    #[must_use]
+    pub fn topic(&self) -> &str {
+        &self.queued().topic
+    }
+
+    /// The delivery's offset: its message's zero-based index in the topic's retained log.
+    #[must_use]
+    pub fn offset(&self) -> i64 {
+        i64::try_from(self.queued().seq).unwrap_or(i64::MAX)
+    }
+
+    /// The record key, read from the partition-key header like the real delivery does.
+    #[must_use]
+    pub fn key(&self) -> Option<&[u8]> {
+        self.queued().headers.get(crate::PARTITION_KEY_HEADER)
+    }
+
+    /// The subscription's reposition handle, for the context built off this delivery.
+    pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
+        Arc::clone(&self.seeker)
     }
 }
 
@@ -173,19 +277,11 @@ impl fmt::Debug for KafkaTestMessage {
 
 impl IncomingMessage for KafkaTestMessage {
     fn payload(&self) -> &[u8] {
-        &self
-            .delivery
-            .as_ref()
-            .expect("message accessed after settlement")
-            .payload
+        &self.queued().payload
     }
 
     fn headers(&self) -> &HeaderMap {
-        &self
-            .delivery
-            .as_ref()
-            .expect("message accessed after settlement")
-            .headers
+        &self.queued().headers
     }
 
     /// The partition key from the `PARTITION_KEY_HEADER`, mirroring the real message so keyed
@@ -206,6 +302,9 @@ impl IncomingMessage for KafkaTestMessage {
 
     /// Re-enqueues to the same subscription (`requeue = true`) or drops (`requeue = false`).
     ///
+    /// A requeued delivery keeps the read-position generation it arrived under, so a reposition
+    /// landing in between discards it: the replay already covers everything from the target on.
+    ///
     /// # Errors
     ///
     /// Never fails; the in-process transport has no position to store.
@@ -225,5 +324,16 @@ impl Partitioned for KafkaTestMessage {
     /// The partition key from the `PARTITION_KEY_HEADER`, mirroring the real message.
     fn partition_key(&self) -> Option<&[u8]> {
         self.headers().get(crate::PARTITION_KEY_HEADER)
+    }
+}
+
+impl Positioned for KafkaTestMessage {
+    type Position = KafkaPosition;
+
+    /// This delivery's own coordinates in the retained log: seeking to them redelivers exactly
+    /// this record and the ordered suffix behind it - the pinned contract the real delivery
+    /// carries, over the log this transport keeps.
+    fn position(&self) -> Self::Position {
+        KafkaPosition::topic_offset(self.topic(), 0, self.offset())
     }
 }
