@@ -25,9 +25,9 @@ struct Order {
     KafkaTopic::new("orders").group("orders-workers").lane_key(LaneKey::RecordKey),
     workers(8, by_key)
 )]
-async fn on_order(order: &Order) -> HandlerResult {
+async fn on_order(order: &Order) -> HandlerOutcome {
     println!("order {} for tenant {}", order.id, order.tenant);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:consumer]
 
@@ -35,9 +35,9 @@ async fn on_order(order: &Order) -> HandlerResult {
 // The default lanes by the source partition, Kafka's own ordering unit: everything one
 // partition delivers (keyless audit events included) processes in order on one lane.
 #[subscriber(KafkaTopic::new("audit").group("audit-workers"), workers(8, by_key))]
-async fn on_audit(order: &Order) -> HandlerResult {
+async fn on_audit(order: &Order) -> HandlerOutcome {
     println!("audit entry {} for tenant {}", order.id, order.tenant);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:partition_lanes]
 

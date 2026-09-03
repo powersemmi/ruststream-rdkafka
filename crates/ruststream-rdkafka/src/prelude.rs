@@ -15,8 +15,6 @@
 //! | [`PartitionedPublish`] | [`KafkaPartitionedPublish`](crate::KafkaPartitionedPublish) |
 //! | [`EosPublish`] | [`KafkaEosPublish`](crate::KafkaEosPublish) |
 //!
-//! [`Publish`] is a publish policy, not the core's `runtime::Publish` builder.
-//!
 //! Globbing two broker preludes conflicts on these names where one is used (E0659); the prefixed
 //! types above are the disambiguation.
 //!
@@ -44,7 +42,7 @@ pub use ruststream::prelude::*;
 
 pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
-pub use crate::context::keys::{Partition, Source};
+pub use crate::context::keys::{Partition, Position, SeekHandle, Source};
 pub use crate::{
     Assignment, Commit, KafkaBroker, KafkaEosPublish as EosPublish,
     KafkaPartitionedPublish as PartitionedPublish, KafkaPosition, KafkaPublish as Publish,

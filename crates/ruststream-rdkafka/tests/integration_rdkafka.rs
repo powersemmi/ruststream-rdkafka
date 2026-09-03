@@ -25,19 +25,19 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::runtime::{
-    App, AppInfo, Ctx, HandlerResult, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, RustStream,
-    State,
+    App, AppInfo, Ctx, HandlerOutcome, Out, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER,
+    RustStream, State,
 };
 use ruststream::subscriber;
 use ruststream::{
     Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, OutgoingMessage, Positioned,
     PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
 };
-use ruststream_rdkafka::context::keys;
+use ruststream_rdkafka::context::{KafkaBatchContext, keys};
 use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
     KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
-    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
+    PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -875,22 +875,20 @@ impl BatchPoolState {
 // Pages from a fixed topic, up to four in flight at once; the state filters by the run's
 // prefix so reruns against a long-lived cluster stay isolated.
 #[subscriber(
-    // Native batches: a page is one delivery plus whatever librdkafka already fetched. A
-    // fixed group keeps reruns idempotent (only this run's fresh publishes arrive), and the
-    // state filters by the run prefix.
-    batch(
-        KafkaTopic::new("e2e-batch-pool")
-            .group("e2e-batch-pool-group")
-            .start(StartOffset::Earliest)
-            .commit(Commit::Tracked)
-    ),
+    // Native batches: a page is one delivery plus whatever librdkafka already fetched, and the
+    // slice parameter below is what asks for one. A fixed group keeps reruns idempotent (only
+    // this run's fresh publishes arrive), and the state filters by the run prefix.
+    KafkaTopic::new("e2e-batch-pool")
+        .group("e2e-batch-pool-group")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked),
     workers(4)
 )]
-async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerResult {
+async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerOutcome {
     for item in items {
         ctx.state().record(&item.tag);
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -986,9 +984,9 @@ impl KeyedLanesState {
 async fn keyed_lane(
     event: &KeyedEvent,
     ctx: &mut Context<'_, (), KeyedLanesState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     ctx.state().record(&event.key, event.seq);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1085,9 +1083,9 @@ impl PartitionLaneState {
 async fn partition_lane(
     event: &KeyedEvent,
     ctx: &mut Context<'_, (), PartitionLaneState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     ctx.state().record(&event.key, event.seq);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1600,17 +1598,17 @@ struct AssignedLaneState {
 async fn assigned_lane(
     payload: &OrderPayload,
     ctx: &mut ruststream::runtime::Context<'_, (), AssignedLaneState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     let state = ctx.state().clone();
     {
         let mut seen = state.seen.lock().expect("seen mutex poisoned");
         seen.push((payload.partition, payload.seq));
         if seen.len() < state.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     state.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
@@ -1967,7 +1965,7 @@ struct DeferredRetryProbe {
 async fn deferred_retry(
     _order: &OrderPayload,
     ctx: &mut Context<'_, (), DeferredRetryProbe>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     let count = ctx
         .headers()
         .get_str(RUNTIME_RETRY_COUNT_HEADER)
@@ -1979,10 +1977,10 @@ async fn deferred_retry(
         .expect("seen mutex poisoned")
         .push(count.clone());
     if count.is_none() {
-        return HandlerResult::retry_after(Duration::from_millis(200));
+        return HandlerOutcome::retry_after(Duration::from_millis(200));
     }
     probe.done.notify_one();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2073,16 +2071,16 @@ async fn ctx_di(
     Ctx(partition): Ctx<keys::Partition>,
     Ctx(offset): Ctx<keys::Offset>,
     State(probe): State<CtxDiProbe>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     {
         let mut seen = probe.seen.lock().expect("seen mutex poisoned");
         seen.push((partition, offset));
         if seen.len() < probe.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     probe.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2133,6 +2131,320 @@ async fn ctx_extractors_inject_delivery_fields() {
     assert_eq!(
         seen, expected,
         "the extractor-injected partition and offset must match the deliveries",
+    );
+}
+
+/// Publishes one record inside the lane's own transaction. Generic over the capability rather
+/// than over a publisher type: an `Out` slot entry has to satisfy the bound, not merely resolve
+/// the method, which is what the arena wiring must keep true.
+async fn forward_through_lane<L: PartitionLanes>(
+    lanes: &L,
+    partition: i32,
+    order: &OrderPayload,
+) -> Result<(), KafkaError> {
+    let publisher = lanes.for_partition(partition).await?;
+    publisher.begin_transaction().await?;
+    let topic = std::env::var("LANES_OUT_TOPIC").expect("out topic env");
+    let payload = format!(r#"{{"partition":{},"seq":{}}}"#, order.partition, order.seq);
+    if let Err(err) = publisher
+        .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+        .await
+    {
+        publisher.abort().await.ok();
+        return Err(err);
+    }
+    publisher.commit().await
+}
+
+// A broker-defined capability through the `Out` arena: the handler names `PartitionLanes` and
+// never the concrete `TransactionalPartitions` the `per_partition()` policy pairs into.
+#[subscriber(
+    KafkaTopic::new(std::env::var("LANES_IN_TOPIC").expect("topic env"))
+        .group("lanes-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn lane_forward(
+    order: &OrderPayload,
+    Ctx(partition): Ctx<keys::Partition>,
+    Out(lanes): Out<impl PartitionLanes>,
+) -> HandlerOutcome {
+    if forward_through_lane(lanes, partition, order).await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lanes_slot_publishes_through_its_partition_transaction() {
+    const COUNT: usize = 2;
+
+    let Some(url) = kafka_url() else { return };
+    let input = unique("lanes-in");
+    let output = unique("lanes-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    unsafe {
+        std::env::set_var("LANES_IN_TOPIC", &input);
+        std::env::set_var("LANES_OUT_TOPIC", &output);
+    }
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(&input, payload.as_bytes()))
+            .await
+            .expect("publish input");
+    }
+
+    let app = RustStream::new(AppInfo::new("lanes", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            b.include(lane_forward).publisher(
+                KafkaPublish::default()
+                    .transactional_id(unique("lanes-txn"))
+                    .per_partition(),
+            );
+        },
+    );
+
+    // The lane's transaction commits before a `read_committed` reader sees anything, so waiting
+    // for the output records is the wire-effect assertion.
+    let mut out_subscriber = broker
+        .subscribe_with(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let consume = async move {
+        let mut stream = Box::pin(out_subscriber.stream());
+        for _ in 0..COUNT {
+            let msg = next_message(&mut stream).await;
+            let payload = String::from_utf8(msg.payload().to_vec()).expect("utf8");
+            sink.lock().expect("seen mutex poisoned").push(payload);
+            msg.ack().await.expect("ack output");
+        }
+    };
+    App::run_until(app, consume).await.expect("run");
+
+    let mut seen = seen.lock().expect("seen mutex poisoned").clone();
+    seen.sort();
+    let expected: Vec<String> = (0..COUNT)
+        .map(|seq| format!(r#"{{"partition":0,"seq":{seq}}}"#))
+        .collect();
+    assert_eq!(
+        seen, expected,
+        "every delivery must be forwarded through its partition's transactional publisher",
+    );
+
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// Collects handled sequence numbers and replays the marker record exactly once.
+#[derive(Clone)]
+struct SeekProbe {
+    expected: usize,
+    replayed: Arc<Mutex<bool>>,
+    seen: Arc<Mutex<Vec<u32>>>,
+    done: Arc<Notify>,
+}
+
+impl SeekProbe {
+    fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            replayed: Arc::new(Mutex::new(false)),
+            seen: Arc::new(Mutex::new(Vec::new())),
+            done: Arc::new(Notify::new()),
+        }
+    }
+
+    fn record(&self, seq: u32) {
+        let mut seen = self.seen.lock().expect("seen mutex poisoned");
+        seen.push(seq);
+        if seen.len() >= self.expected {
+            self.done.notify_waiters();
+        }
+    }
+
+    /// Whether this delivery is the one that repositions; true for the first caller only.
+    fn claim_replay(&self) -> bool {
+        let mut replayed = self.replayed.lock().expect("replay mutex poisoned");
+        let first = !*replayed;
+        *replayed = true;
+        first
+    }
+}
+
+// The per-delivery seek contract: `Position` reports where this record sits and `SeekHandle`
+// hands out the subscription's reposition handle, both off the same context the runtime builds
+// per delivery. Seeking to a delivery's own position redelivers exactly that record.
+#[subscriber(
+    KafkaTopic::new(std::env::var("CTX_SEEK_TOPIC").expect("topic env"))
+        .group("ctx-seek-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn ctx_seek(
+    order: &OrderPayload,
+    Ctx(here): Ctx<keys::Position>,
+    Ctx(seeker): Ctx<keys::SeekHandle>,
+    State(probe): State<SeekProbe>,
+) -> HandlerOutcome {
+    probe.record(order.seq);
+    if order.seq == 1 && probe.claim_replay() && seeker.seek(here).await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[derive(FromRef)]
+struct SeekApp {
+    probe: SeekProbe,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_context_seek_handle_replays_a_delivery_position() {
+    const COUNT: u32 = 3;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("ctx-seek");
+    create_topic(&url, &topic, 1).await;
+    unsafe { std::env::set_var("CTX_SEEK_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+            .await
+            .expect("publish");
+    }
+    broker.shutdown().await.expect("producer shutdown");
+
+    // Three records plus the replayed pair behind the marker: 0, 1, then 1 and 2 again.
+    let probe = SeekProbe::new(COUNT as usize + 1);
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("ctx-seek", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(SeekApp { probe: app_probe }))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(ctx_seek);
+        });
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("the replayed deliveries must arrive within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    assert_eq!(
+        seen,
+        vec![0, 1, 1, 2],
+        "seeking to a delivery's own position must redeliver it and the suffix behind it",
+    );
+}
+
+/// Collects the sequence numbers of every page and repositions the subscription once.
+#[derive(Clone)]
+struct PageSeekProbe {
+    replayed: Arc<Mutex<bool>>,
+    seen: Arc<Mutex<Vec<u32>>>,
+    done: Arc<Notify>,
+}
+
+impl PageSeekProbe {
+    fn record(&self, page: &[OrderPayload]) {
+        let mut seen = self.seen.lock().expect("seen mutex poisoned");
+        seen.extend(page.iter().map(|order| order.seq));
+        if seen.iter().filter(|seq| **seq == 0).count() >= 2 {
+            self.done.notify_waiters();
+        }
+    }
+
+    fn claim_replay(&self) -> bool {
+        let mut replayed = self.replayed.lock().expect("replay mutex poisoned");
+        let first = !*replayed;
+        *replayed = true;
+        first
+    }
+}
+
+// A page spans many deliveries, so it gets the subscription-scoped context instead of the
+// per-delivery one: the same `SeekHandle` key, and no position (no single record to name).
+#[subscriber(
+    KafkaTopic::new(std::env::var("PAGE_SEEK_TOPIC").expect("topic env"))
+        .group("page-seek-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn page_seek(
+    page: &[OrderPayload],
+    ctx: &mut Context<'_, KafkaBatchContext, PageSeekProbe>,
+) -> HandlerOutcome {
+    ctx.state().record(page);
+    let replay = ctx.state().claim_replay();
+    if replay
+        && ctx
+            .context(keys::SeekHandle)
+            .seek(KafkaPosition::offset(0, 0))
+            .await
+            .is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_body_repositions_through_its_subscription_context() {
+    const COUNT: u32 = 2;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("page-seek");
+    create_topic(&url, &topic, 1).await;
+    unsafe { std::env::set_var("PAGE_SEEK_TOPIC", &topic) };
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+            .await
+            .expect("publish");
+    }
+    broker.shutdown().await.expect("producer shutdown");
+
+    let probe = PageSeekProbe {
+        replayed: Arc::new(Mutex::new(false)),
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("page-seek", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(page_seek);
+        });
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("the replayed page must arrive within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    assert!(
+        seen.iter().filter(|seq| **seq == 0).count() >= 2,
+        "the page's reposition must replay the log from the start, got {seen:?}",
     );
 }
 

@@ -56,12 +56,12 @@ async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Re
 // at the include site once the subscription opens, before the first delivery, so the handler
 // holds a live, already-fenced producer by construction.
 #[subscriber("orders")]
-async fn ship(order: &Order, Out(shipments): Out<impl TransactionalPublisher>) -> HandlerResult {
+async fn ship(order: &Order, Out(shipments): Out<impl TransactionalPublisher>) -> HandlerOutcome {
     if dispatch(shipments, order).await.is_err() {
         // Nothing became visible; ask for redelivery and try the whole fan-out again.
-        return HandlerResult::retry();
+        return HandlerOutcome::retry();
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:handler]
 
@@ -104,11 +104,11 @@ async fn bill(
     // plain argument (the DI form of `ctx.context(keys::Partition)`).
     Ctx(partition): Ctx<Partition>,
     Out(invoices): Out<impl PartitionLanes>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     if issue(invoices, order, partition).await.is_err() {
-        return HandlerResult::retry();
+        return HandlerOutcome::retry();
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:partitions]
 

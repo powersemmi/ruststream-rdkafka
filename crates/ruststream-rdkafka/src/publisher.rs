@@ -10,7 +10,7 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
-use ruststream::runtime::{OutSlot, SlotPublisher, TypedSlot};
+use ruststream::runtime::Slot;
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
@@ -737,6 +737,14 @@ impl TransactionalPartitions {
 /// [`TransactionalPartitions`], inferred from the [`KafkaTransactionalPublish::per_partition`]
 /// policy attached at the include site.
 ///
+/// # Test capture
+///
+/// This is a router, not a publisher: it hands out a publisher of its own rather than sending a
+/// message. What a lane then publishes leaves through that publisher, so it lands in the
+/// broker's publish log and not in the slot's test record - the same boundary a settled owned
+/// transaction's buffer has. Assert on the publish log for lane traffic, and keep the slot
+/// record for handlers that publish through the slot itself.
+///
 /// # Examples
 ///
 /// ```
@@ -774,18 +782,13 @@ impl PartitionLanes for TransactionalPartitions {
     }
 }
 
-// Keep: without it a handler cannot bound its slot with the capability, only with the wrapper.
-impl<L: PartitionLanes, M: OutSlot> PartitionLanes for SlotPublisher<L, M> {
-    fn for_partition(
-        &self,
-        partition: i32,
-    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
-        self.inner().for_partition(partition)
-    }
-}
-
-// Keep despite `Deref`: only this impl puts an injected slot into `&impl PartitionLanes`.
-impl<L, Body, M, EncodeCodec> PartitionLanes for TypedSlot<L, Body, M, EncodeCodec>
+// The arena entry a handler's `Out` parameter binds. `Slot`'s `Deref` already routes method
+// calls to the wired value, but only this impl lets a body hand the entry to a function generic
+// over the capability (`fn issue<L: PartitionLanes>(lanes: &L, ..)`), which is the whole point of
+// bounding the slot with a trait instead of a concrete type. Both paths reach the same unwrapped
+// value, which is what puts a lane's publishes outside the slot's test capture (see the trait's
+// documentation).
+impl<M, L, EncodeCodec, Body> PartitionLanes for Slot<M, L, EncodeCodec, Body>
 where
     L: PartitionLanes,
     EncodeCodec: Send + Sync,

@@ -52,6 +52,9 @@ pub struct KafkaSubscriber {
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
     retry: Option<Arc<RetryContext>>,
+    /// Minted once, when the subscription opens: every delivery carries a clone so a handler's
+    /// context can hand out the reposition handle for one reference-count bump.
+    seeker: Arc<KafkaSeeker>,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
@@ -68,6 +71,10 @@ impl KafkaSubscriber {
         lane_key: LaneKey,
         retry: Option<Arc<RetryContext>>,
     ) -> Self {
+        let seeker = Arc::new(KafkaSeeker::new(
+            Arc::clone(&consumer),
+            Arc::clone(&tracker),
+        ));
         Self {
             consumer,
             topic,
@@ -75,6 +82,7 @@ impl KafkaSubscriber {
             tracker,
             lane_key,
             retry,
+            seeker,
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
             in_transient_episode: false,
@@ -200,6 +208,7 @@ impl KafkaSubscriber {
             settlement,
             lane,
             self.retry.clone(),
+            Arc::clone(&self.seeker),
         )
     }
 }
@@ -257,10 +266,10 @@ impl Subscriber for KafkaSubscriber {
 impl Seekable for KafkaSubscriber {
     type Seeker = KafkaSeeker;
 
-    /// Mints a handle for repositioning this subscription; see [`KafkaSeeker`] for the scope of
-    /// a seek and what a rebalance does to it.
+    /// Hands out a handle for repositioning this subscription; see [`KafkaSeeker`] for the
+    /// scope of a seek and what a rebalance does to it.
     fn seeker(&self) -> Self::Seeker {
-        KafkaSeeker::new(Arc::clone(&self.consumer), Arc::clone(&self.tracker))
+        KafkaSeeker::clone(&self.seeker)
     }
 }
 

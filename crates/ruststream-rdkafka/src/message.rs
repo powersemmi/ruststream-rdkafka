@@ -13,7 +13,7 @@ use crate::retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
     RETRY_COUNT_HEADER, Retry, RetryContext,
 };
-use crate::seek::KafkaPosition;
+use crate::seek::{KafkaPosition, KafkaSeeker};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
@@ -91,6 +91,9 @@ pub struct KafkaMessage {
     /// `LaneKey::RecordKey`.
     lane: Option<Bytes>,
     retry: Option<Arc<RetryContext>>,
+    /// The subscription's own reposition handle, minted when it opened: this is what lets a
+    /// per-delivery context be built from the delivery alone.
+    seeker: Arc<KafkaSeeker>,
 }
 
 impl fmt::Debug for Settlement {
@@ -117,6 +120,7 @@ impl KafkaMessage {
         settlement: Settlement,
         lane: Option<Bytes>,
         retry: Option<Arc<RetryContext>>,
+        seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
             payload,
@@ -128,7 +132,13 @@ impl KafkaMessage {
             settlement,
             lane,
             retry,
+            seeker,
         }
+    }
+
+    /// The subscription's reposition handle, for the context built off this delivery.
+    pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
+        Arc::clone(&self.seeker)
     }
 
     /// The topic this record was consumed from.

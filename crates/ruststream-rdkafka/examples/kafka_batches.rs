@@ -1,7 +1,6 @@
-//! Batch consumption through the core `Buffered` window: the handler receives a whole decoded
-//! page per invocation. librdkafka already fetches batches on the wire and hands them over
-//! without waiting, so the client-side window drains what is ready and only `max_wait` bounds
-//! the tail latency of an under-filled page.
+//! Batch consumption: the handler receives a whole decoded page per invocation. librdkafka
+//! already fetches batches on the wire and hands them over without waiting, so a page is one
+//! delivery plus everything already fetched, and the mount caps how large a page the body sees.
 //!
 //! ```text
 //! just brokers-up
@@ -10,9 +9,8 @@
 
 use std::time::Duration;
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream};
 use ruststream::subscriber;
-use ruststream::{Buffered, nonzero};
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic};
 use serde::Deserialize;
 
@@ -28,23 +26,23 @@ struct Payment {
 }
 
 // --8<-- [start:handler]
-// The `batch(..)` marker wraps the usual source: batching is native - a page is one delivery
-// plus everything librdkafka has already fetched, bounded by librdkafka's own fetch-queue
-// limits. Returning one HandlerResult settles the whole page uniformly. `workers(4)` keeps up
-// to four pages in flight at once; `by_key` does not apply to batches (a keyed policy here
-// behaves like a plain pool - per-key lanes exist for single-message handlers, see the keyed
-// lanes example).
+// The slice parameter is what says "a page at a time"; nothing in the attribute repeats it.
+// Batching is native here - a page is one delivery plus everything librdkafka has already
+// fetched, bounded by librdkafka's own fetch-queue limits. Returning one HandlerOutcome settles
+// the whole page uniformly. `workers(4)` keeps up to four pages in flight at once; `by_key` does
+// not apply to batches (a keyed policy here behaves like a plain pool - per-key lanes exist for
+// single-message handlers, see the keyed lanes example).
 #[subscriber(
-    batch(KafkaTopic::new("orders").group("orders-svc").commit(Commit::Tracked)),
+    KafkaTopic::new("orders").group("orders-svc").commit(Commit::Tracked),
     workers(4)
 )]
-async fn handle_page(orders: &[Order]) -> HandlerResult {
+async fn handle_page(orders: &[Order]) -> HandlerOutcome {
     let first = orders.first().map(|order| order.id);
     println!(
         "processing a page of {} orders, first id {first:?}",
         orders.len()
     );
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:handler]
 
@@ -53,24 +51,25 @@ async fn handle_page(orders: &[Order]) -> HandlerResult {
 // how it maps onto Kafka's one-position-per-partition commits: under `Commit::Tracked` the
 // committed position only advances up to the first non-acked element, and `retry_after` runs
 // through the runtime's deferred-republish fallback (`retry_via` below), not a native delay.
-// Wrapping the source in the core `Buffered` adapter is the opt-in for an explicit
-// size/deadline page window on top of the native batching.
-#[subscriber(batch(
-    Buffered::<KafkaTopic>::new(
-        KafkaTopic::new("payments").group("payments-svc").commit(Commit::Tracked)
-    )
-    .max_size(nonzero!(50))
-    .max_wait(Duration::from_millis(20))
-))]
-async fn reconcile_page(payments: &[Payment]) -> Vec<HandlerResult> {
+// --8<-- [start:size]
+// A page is bounded by librdkafka's own fetch queue, so the size lives in the descriptor's
+// config passthrough rather than in a framework window.
+#[subscriber(
+    KafkaTopic::new("payments")
+        .group("payments-svc")
+        .commit(Commit::Tracked)
+        .config("queued.max.messages.kbytes", "1024")
+)]
+// --8<-- [end:size]
+async fn reconcile_page(payments: &[Payment]) -> Vec<HandlerOutcome> {
     payments
         .iter()
         .map(|payment| {
             if payment.settled {
-                HandlerResult::Ack
+                HandlerOutcome::ack()
             } else {
                 println!("payment {} not settled yet; retrying later", payment.id);
-                HandlerResult::retry_after(Duration::from_secs(30))
+                HandlerOutcome::retry_after(Duration::from_secs(30))
             }
         })
         .collect()

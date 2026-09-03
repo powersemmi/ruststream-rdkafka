@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use ruststream::runtime::{AppInfo, HandlerResult, RustStream};
+use ruststream::runtime::{AppInfo, HandlerOutcome, Out, RustStream};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutgoingMessage,
-    Partitioned, Publisher, Subscriber,
+    Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutSlot, Outgoing,
+    OutgoingMessage, Partitioned, Publisher, Subscriber,
 };
 use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
 use ruststream_rdkafka::{KafkaError, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER};
@@ -269,17 +269,17 @@ struct Order {
 }
 
 #[subscriber("orders")]
-async fn ack_order(order: &Order) -> HandlerResult {
+async fn ack_order(order: &Order) -> HandlerOutcome {
     let _ = order;
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 // The descriptor form must mount against the test broker through the testing-gated
 // `SubscriptionSource<ConnectedKafkaTestBroker>` impl on `KafkaTopic`.
 #[subscriber(KafkaTopic::new("payments"))]
-async fn ack_payment(order: &Order) -> HandlerResult {
+async fn ack_payment(order: &Order) -> HandlerOutcome {
     let _ = order;
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 /// Counts how many times the retry handler ran, so the test can wire it as typed app state.
@@ -287,14 +287,14 @@ async fn ack_payment(order: &Order) -> HandlerResult {
 struct Attempts(Arc<AtomicUsize>);
 
 #[subscriber(KafkaTopic::new("retry"))]
-async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerResult {
+async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerOutcome {
     let _ = order;
     // Requeue once, then acknowledge: exercises the `nack(requeue = true)` -> `enqueued`
     // re-count balanced against the delivery's `Drop` -> `consumed` decrement.
     if ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0 {
-        HandlerResult::retry()
+        HandlerOutcome::retry()
     } else {
-        HandlerResult::Ack
+        HandlerOutcome::ack()
     }
 }
 
@@ -323,12 +323,12 @@ async fn test_app_drives_kafka_test_broker_to_quiescence() {
         .subscriber("orders")
         .assert_called_once()
         .with(&Order { id: 1 })
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
     tb.broker::<KafkaTestBroker>()
         .subscriber("payments")
         .assert_called_once()
         .with(&Order { id: 2 })
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
 }
@@ -352,7 +352,7 @@ async fn test_app_requeue_stays_balanced() {
     tb.broker::<KafkaTestBroker>()
         .subscriber("retry")
         .assert_called(2)
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
 }
@@ -464,6 +464,60 @@ async fn round_robin_leaves_keyed_replies_alone() {
         messages[0].headers().get(PARTITION_HEADER).is_none(),
         "a keyed reply keeps its key-implied placement",
     );
+}
+
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "slot-work-items")]
+struct SlotItem {
+    order_id: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(SlotItem)]
+struct Work;
+
+// A publisher-shaped slot: the handler sends through the slot entry itself, so the harness
+// attributes the publish to the marker. This is the near side of the capture boundary that
+// `PartitionLanes` sits on the far side of - a lane hands out a publisher of its own, and what
+// that publisher sends reaches the broker's publish log without a slot record.
+#[subscriber("slot-orders")]
+async fn plan_through_slot(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher, Work>,
+) -> HandlerOutcome {
+    if out
+        .message(&SlotItem { order_id: order.id })
+        .publish()
+        .await
+        .is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(plan_through_slot)
+                .out(Work, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("slot-orders", &PlanOrder { id: 5 })
+        .await
+        .expect("publish");
+
+    // Through the slot: recorded against the marker, and visible on the wire.
+    tb.out::<Work>().assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<SlotItem>("slot-work-items")
+        .assert_called_once();
+
+    tb.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

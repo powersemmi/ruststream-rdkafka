@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, State, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State, TypedPublisher};
 use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
@@ -60,20 +60,20 @@ async fn proto_relay(order: &Order) -> Order {
         .group(std::env::var("PROTO_MW_GROUP").expect("group env"))
         .start(StartOffset::Earliest)
 )]
-async fn proto_mw(order: &Order, State(probe): State<ProtoProbe>) -> HandlerResult {
+async fn proto_mw(order: &Order, State(probe): State<ProtoProbe>) -> HandlerOutcome {
     let marker_range = probe.base..probe.base + i64::try_from(probe.expected).expect("small");
     if !marker_range.contains(&order.id) {
-        return HandlerResult::Ack; // an earlier run's message on the shared topic
+        return HandlerOutcome::ack(); // an earlier run's message on the shared topic
     }
     {
         let mut seen = probe.seen.lock().expect("seen mutex poisoned");
         seen.push(order.clone());
         if seen.len() < probe.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     probe.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

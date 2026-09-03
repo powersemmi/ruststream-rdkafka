@@ -51,9 +51,9 @@ async fn confirm(order: &Order) -> Confirmation {
         .partitions([0])
         .start(StartOffset::Earliest)
 )]
-async fn audit_partition_zero(order: &Order) -> HandlerResult {
+async fn audit_partition_zero(order: &Order) -> HandlerOutcome {
     println!("partition 0 saw order {}", order.id);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:assign]
 
