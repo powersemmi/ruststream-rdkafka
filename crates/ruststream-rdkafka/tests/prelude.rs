@@ -1,22 +1,23 @@
 //! What the crate prelude puts in scope, checked at compile time.
 //!
-//! The one glob a Kafka service writes brings in the core prelude plus this crate's broker
-//! vocabulary. Nothing here runs; the file exists so the name resolution below is a build gate.
+//! The glob a mount site writes brings in the core prelude plus this crate's broker vocabulary.
+//! Nothing here runs; the file exists so the name resolution below is a build gate.
 
 use ruststream_rdkafka::prelude::*;
 
-/// The core's slot capability trait must survive the glob: this crate exports its policies under
-/// their prefixed names (`KafkaPublish`, ...) precisely so an alias cannot shadow it, and a
-/// shadowing re-export would fail here with `E0404: expected trait, found struct`.
-fn _publish_is_the_core_trait<T: Publish>() {}
+/// A handler bounds its injected slot with a capability trait, never a policy type, and the
+/// traits reach a file through the glob as well.
+fn _slots_are_bound_by_capability<T: Publisher>() {}
 
-/// The policies keep their prefix, and the transitions between them stay reachable through the
-/// glob alone.
-fn _policies_are_prefixed() {
-    let plain = KafkaPublish::default();
-    let transactional: KafkaTransactionalPublish = plain.transactional_id("svc-1");
-    let _partitioned: KafkaPartitionedPublish = transactional.per_partition();
-    let _pipeline = KafkaEosPublish::new("svc-1");
+/// The policies arrive under their concept names, which is what lets an include site read the
+/// same on every broker. These are the mount-site half of the vocabulary; a name here resolving
+/// to anything but the policy - something of the same name arriving through the core glob above -
+/// would fail this build rather than a service's.
+fn _policies_carry_the_concept_names() {
+    let plain: Publish = Publish::default();
+    let transactional: TransactionalPublish = plain.transactional_id("svc-1");
+    let _partitioned: PartitionedPublish = transactional.per_partition();
+    let _pipeline = EosPublish::new("svc-1");
 }
 
 /// The seek vocabulary a handler names: the position type, the handle key, and the trait whose

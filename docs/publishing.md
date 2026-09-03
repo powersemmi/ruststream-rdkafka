@@ -8,10 +8,14 @@ never holds a publisher that is not connected yet. A plain live publisher rides 
 shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
 the cluster's delivery report, so an `Ok` means Kafka accepted the record.
 
-The prelude exports the policies under their own names - `KafkaPublish`,
-`KafkaTransactionalPublish`, `KafkaPartitionedPublish`, `KafkaEosPublish`. The unprefixed concept
-names belong to the core (`Publish` is its slot capability trait), and two broker preludes can be
-globbed side by side without a name clash.
+Two vocabularies, and they belong in different files. A handler body imports
+`ruststream::prelude` and bounds its injected slot with the **capability** it needs
+(`Out<impl Publisher>`, `Out<impl TransactionalPublisher>`), so it names no broker type at all. A
+mount site imports `ruststream_rdkafka::prelude`, which carries the core one plus the
+**policies** under their concept names - `Publish`, `TransactionalPublish`, `PartitionedPublish`,
+`EosPublish` - which is what the include sites on this page write. An include site therefore
+reads the same on every broker, and moving a service between brokers touches the descriptor
+rather than the wiring.
 
 Where a policy is named:
 
@@ -168,7 +172,7 @@ Streams uses for its per-task producers):
 ```
 
 The include site names the base id:
-`.publisher(KafkaPublish::default().transactional_id("billing-svc-1").per_partition())`. Each
+`.publisher(Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 
