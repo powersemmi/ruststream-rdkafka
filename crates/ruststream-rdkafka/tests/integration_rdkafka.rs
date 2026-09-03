@@ -33,7 +33,7 @@ use ruststream::{
     Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, OutgoingMessage, Positioned,
     PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
 };
-use ruststream_rdkafka::context::{KafkaBatchContext, keys};
+use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
     KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
@@ -71,22 +71,42 @@ async fn recreate_topic(url: &str, topic: &str, partitions: i32) {
         .delete_topics(&[topic], &AdminOptions::new())
         .await
         .expect("delete_topics call");
-    // Deletion completes asynchronously; poll creation until the name is free again.
-    for _ in 0..50 {
-        let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
-        let results = admin
-            .create_topics([&new_topic], &AdminOptions::new())
-            .await
-            .expect("create_topics call");
-        match &results[0] {
-            Ok(_) => return,
-            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err((name, code)) => panic!("recreate {name}: {code}"),
+    // Deletion completes asynchronously. Waiting on the cluster's own answer is what makes this
+    // deterministic: a metadata fetch blocks until the broker replies, so the loop is paced by
+    // the condition it is waiting for rather than by a guessed delay.
+    await_topic_absent(&admin, topic);
+    let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
+    let results = admin
+        .create_topics([&new_topic], &AdminOptions::new())
+        .await
+        .expect("create_topics call");
+    match &results[0] {
+        Ok(_) | Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
+        Err((name, code)) => panic!("recreate {name}: {code}"),
+    }
+}
+
+/// Polls cluster metadata until `topic` is gone, bounded by [`WAIT`].
+///
+/// Each fetch is a round trip to the broker with its own timeout, so the loop advances only when
+/// the cluster has answered.
+fn await_topic_absent(admin: &AdminClient<DefaultClientContext>, topic: &str) {
+    let probe = Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + WAIT;
+    while std::time::Instant::now() < deadline {
+        let metadata = admin
+            .inner()
+            .fetch_metadata(Some(topic), probe)
+            .expect("fetch_metadata call");
+        let present = metadata
+            .topics()
+            .iter()
+            .any(|known| known.name() == topic && known.error().is_none());
+        if !present {
+            return;
         }
     }
-    panic!("topic {topic} was not recreated in time");
+    panic!("topic {topic} was still present {WAIT:?} after the delete request");
 }
 
 /// Creates `topic` up front so the first subscribe does not race topic auto-creation.
@@ -2210,243 +2230,36 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
         },
     );
 
-    // The lane's transaction commits before a `read_committed` reader sees anything, so waiting
-    // for the output records is the wire-effect assertion.
+    // The lane's transaction commits before a `read_committed` reader sees anything, so the
+    // output stream is both the signal and the assertion: the run ends when it has delivered
+    // what the lanes committed, and each record is checked as it arrives.
     let mut out_subscriber = broker
         .subscribe_with(tracked(&output, &unique("reader")))
         .await
         .expect("subscribe output");
-    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&seen);
     let consume = async move {
         let mut stream = Box::pin(out_subscriber.stream());
-        for _ in 0..COUNT {
+        for seq in 0..COUNT {
             let msg = next_message(&mut stream).await;
-            let payload = String::from_utf8(msg.payload().to_vec()).expect("utf8");
-            sink.lock().expect("seen mutex poisoned").push(payload);
+            assert_eq!(
+                msg.payload(),
+                format!(r#"{{"partition":0,"seq":{seq}}}"#).as_bytes(),
+                "the lane must forward its partition's records in order",
+            );
             msg.ack().await.expect("ack output");
         }
     };
     App::run_until(app, consume).await.expect("run");
 
-    let mut seen = seen.lock().expect("seen mutex poisoned").clone();
-    seen.sort();
-    let expected: Vec<String> = (0..COUNT)
-        .map(|seq| format!(r#"{{"partition":0,"seq":{seq}}}"#))
-        .collect();
-    assert_eq!(
-        seen, expected,
-        "every delivery must be forwarded through its partition's transactional publisher",
-    );
-
     broker.shutdown().await.expect("shutdown");
 }
 
-/// Collects handled sequence numbers and replays the marker record exactly once.
-#[derive(Clone)]
-struct SeekProbe {
-    expected: usize,
-    replayed: Arc<Mutex<bool>>,
-    seen: Arc<Mutex<Vec<u32>>>,
-    done: Arc<Notify>,
-}
-
-impl SeekProbe {
-    fn new(expected: usize) -> Self {
-        Self {
-            expected,
-            replayed: Arc::new(Mutex::new(false)),
-            seen: Arc::new(Mutex::new(Vec::new())),
-            done: Arc::new(Notify::new()),
-        }
-    }
-
-    fn record(&self, seq: u32) {
-        let mut seen = self.seen.lock().expect("seen mutex poisoned");
-        seen.push(seq);
-        if seen.len() >= self.expected {
-            self.done.notify_waiters();
-        }
-    }
-
-    /// Whether this delivery is the one that repositions; true for the first caller only.
-    fn claim_replay(&self) -> bool {
-        let mut replayed = self.replayed.lock().expect("replay mutex poisoned");
-        let first = !*replayed;
-        *replayed = true;
-        first
-    }
-}
-
-// The per-delivery seek contract: `Position` reports where this record sits and `SeekHandle`
-// hands out the subscription's reposition handle, both off the same context the runtime builds
-// per delivery. Seeking to a delivery's own position redelivers exactly that record.
-#[subscriber(
-    KafkaTopic::new(std::env::var("CTX_SEEK_TOPIC").expect("topic env"))
-        .group("ctx-seek-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
-async fn ctx_seek(
-    order: &OrderPayload,
-    Ctx(here): Ctx<keys::Position>,
-    Ctx(seeker): Ctx<keys::SeekHandle>,
-    State(probe): State<SeekProbe>,
-) -> HandlerOutcome {
-    probe.record(order.seq);
-    if order.seq == 1 && probe.claim_replay() && seeker.seek(here).await.is_err() {
-        return HandlerOutcome::retry();
-    }
-    HandlerOutcome::ack()
-}
-
-#[derive(FromRef)]
-struct SeekApp {
-    probe: SeekProbe,
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_context_seek_handle_replays_a_delivery_position() {
-    const COUNT: u32 = 3;
-
-    let Some(url) = kafka_url() else { return };
-    let topic = unique("ctx-seek");
-    create_topic(&url, &topic, 1).await;
-    unsafe { std::env::set_var("CTX_SEEK_TOPIC", &topic) };
-
-    let broker = connected_broker(&url).await;
-    for seq in 0..COUNT {
-        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
-        broker
-            .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
-            .await
-            .expect("publish");
-    }
-    broker.shutdown().await.expect("producer shutdown");
-
-    // Three records plus the replayed pair behind the marker: 0, 1, then 1 and 2 again.
-    let probe = SeekProbe::new(COUNT as usize + 1);
-    let app_probe = probe.clone();
-    let app = RustStream::new(AppInfo::new("ctx-seek", "0.0.0"))
-        .on_startup(async move |()| Ok::<_, Infallible>(SeekApp { probe: app_probe }))
-        .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(ctx_seek);
-        });
-
-    let done = Arc::clone(&probe.done);
-    let wait = async move {
-        tokio::time::timeout(WAIT, done.notified())
-            .await
-            .expect("the replayed deliveries must arrive within the timeout");
-    };
-    App::run_until(app, wait).await.expect("run");
-
-    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
-    assert_eq!(
-        seen,
-        vec![0, 1, 1, 2],
-        "seeking to a delivery's own position must redeliver it and the suffix behind it",
-    );
-}
-
-/// Collects the sequence numbers of every page and repositions the subscription once.
-#[derive(Clone)]
-struct PageSeekProbe {
-    replayed: Arc<Mutex<bool>>,
-    seen: Arc<Mutex<Vec<u32>>>,
-    done: Arc<Notify>,
-}
-
-impl PageSeekProbe {
-    fn record(&self, page: &[OrderPayload]) {
-        let mut seen = self.seen.lock().expect("seen mutex poisoned");
-        seen.extend(page.iter().map(|order| order.seq));
-        if seen.iter().filter(|seq| **seq == 0).count() >= 2 {
-            self.done.notify_waiters();
-        }
-    }
-
-    fn claim_replay(&self) -> bool {
-        let mut replayed = self.replayed.lock().expect("replay mutex poisoned");
-        let first = !*replayed;
-        *replayed = true;
-        first
-    }
-}
-
-// A page spans many deliveries, so it gets the subscription-scoped context instead of the
-// per-delivery one: the same `SeekHandle` key, and no position (no single record to name).
-#[subscriber(
-    KafkaTopic::new(std::env::var("PAGE_SEEK_TOPIC").expect("topic env"))
-        .group("page-seek-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
-async fn page_seek(
-    page: &[OrderPayload],
-    ctx: &mut Context<'_, KafkaBatchContext, PageSeekProbe>,
-) -> HandlerOutcome {
-    ctx.state().record(page);
-    let replay = ctx.state().claim_replay();
-    if replay
-        && ctx
-            .context(keys::SeekHandle)
-            .seek(KafkaPosition::offset(0, 0))
-            .await
-            .is_err()
-    {
-        return HandlerOutcome::retry();
-    }
-    HandlerOutcome::ack()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_page_body_repositions_through_its_subscription_context() {
-    const COUNT: u32 = 2;
-
-    let Some(url) = kafka_url() else { return };
-    let topic = unique("page-seek");
-    create_topic(&url, &topic, 1).await;
-    unsafe { std::env::set_var("PAGE_SEEK_TOPIC", &topic) };
-
-    let broker = connected_broker(&url).await;
-    for seq in 0..COUNT {
-        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
-        broker
-            .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
-            .await
-            .expect("publish");
-    }
-    broker.shutdown().await.expect("producer shutdown");
-
-    let probe = PageSeekProbe {
-        replayed: Arc::new(Mutex::new(false)),
-        seen: Arc::new(Mutex::new(Vec::new())),
-        done: Arc::new(Notify::new()),
-    };
-    let app_probe = probe.clone();
-    let app = RustStream::new(AppInfo::new("page-seek", "0.0.0"))
-        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
-        .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(page_seek);
-        });
-
-    let done = Arc::clone(&probe.done);
-    let wait = async move {
-        tokio::time::timeout(WAIT, done.notified())
-            .await
-            .expect("the replayed page must arrive within the timeout");
-    };
-    App::run_until(app, wait).await.expect("run");
-
-    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
-    assert!(
-        seen.iter().filter(|seq| **seq == 0).count() >= 2,
-        "the page's reposition must replay the log from the start, got {seen:?}",
-    );
-}
+// The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
+// page-scoped context - is application-level behaviour, so it is exercised over the in-process
+// transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
+// that a real consumer moves, and that the offset bookkeeping follows it (see
+// `a_seek_moves_the_tracked_watermark_with_the_read_position` and
+// `positions_reach_every_assigned_partition_and_report_bad_targets` above).
 
 // The EOS publishing-handler sugar: a bare handler returns the reply, and the pipeline's
 // reply publisher pairs it with the consumed offset - no Ctx, no manual publish.

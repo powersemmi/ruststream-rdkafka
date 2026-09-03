@@ -1,28 +1,39 @@
-//! Integration tests for the in-process Kafka test broker.
+//! The in-process Kafka test broker, and the application-level scenarios it carries.
 //!
-//! Most cases drive the public surface (`KafkaTestBroker`, `KafkaTestPublisher`,
-//! `KafkaTestSubscriber`) directly, to keep failures localised; the `TestApp`-driven cases at
-//! the end exercise the `TestableBroker` quiescence wiring (coordinator install,
-//! `enqueued`/`consumed`) through the harness. Real Kafka semantics (groups, partitions,
-//! committed positions, start offsets) live in `tests/integration_rdkafka.rs` against a live
-//! cluster.
+//! Anything whose subject is a service - a handler reading its broker context, repositioning its
+//! own subscription, publishing through an `Out` slot - runs here on `TestApp`, because that is
+//! the level it lives at: real handlers, the real dispatch path, harness assertions, and no
+//! cluster. The cases that drive `KafkaTestBroker` / `KafkaTestPublisher` /
+//! `KafkaTestSubscriber` directly are the ones whose subject IS that transport (its routing
+//! contract, its settlement, what its seeker refuses).
+//!
+//! Real Kafka semantics - consumer groups, partitions, committed positions across restarts,
+//! transactions and the exactly-once pipeline - live in `tests/integration_rdkafka.rs` against a
+//! live cluster.
 
 #![cfg(feature = "testing")]
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use ruststream::runtime::{AppInfo, HandlerOutcome, Out, RustStream};
+use ruststream::codec::{Codec as _, DefaultCodec};
+use ruststream::nonzero;
+use ruststream::runtime::{AppInfo, Ctx, HandlerOutcome, Out, RustStream, SubscriberSettings as _};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
     Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutSlot, Outgoing,
-    OutgoingMessage, Partitioned, Publisher, Subscriber,
+    OutgoingMessage, Partitioned, Publisher, Seeker as _, Subscriber,
 };
+use ruststream_rdkafka::context::keys::{Position, SeekHandle};
+use ruststream_rdkafka::context::{KafkaBatchContext, KafkaContext};
 use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
-use ruststream_rdkafka::{KafkaError, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER};
+use ruststream_rdkafka::{
+    KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
+};
 use serde::{Deserialize, Serialize};
 
 const WAIT: Duration = Duration::from_secs(1);
@@ -338,7 +349,7 @@ async fn test_app_drives_kafka_test_broker_to_quiescence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_app_requeue_stays_balanced() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
-        .on_startup(|()| async { Ok::<_, std::convert::Infallible>(Attempts::default()) })
+        .on_startup(|()| async { Ok::<_, Infallible>(Attempts::default()) })
         .with_broker(KafkaTestBroker::new(), |b| {
             b.include(retry_then_ack);
         });
@@ -518,6 +529,236 @@ async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
         .assert_called_once();
 
     tb.shutdown().await.expect("shutdown");
+}
+
+// ------------------------------------------------------------------ repositioning a service
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Job {
+    id: u64,
+}
+
+/// The handler's own rewind budget: one replay of a stuck record, then let it through. A service
+/// spends a budget like this for real, and holding it in typed app state is what keeps the
+/// handler under test a plain handler.
+#[derive(Clone, Default)]
+struct Rewinds(Arc<AtomicUsize>);
+
+/// Reads both delivery-context keys the seek contract publishes: `Position` names where this
+/// record sits, and `SeekHandle` moves the subscription there.
+#[subscriber(KafkaTopic::new("seek-jobs"))]
+async fn rewind_stuck_job(
+    job: &Job,
+    ctx: &mut Context<'_, KafkaContext, Rewinds>,
+    Ctx(here): Ctx<Position>,
+    Ctx(seeker): Ctx<SeekHandle>,
+) -> HandlerOutcome {
+    if job.id == 1 && ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0 {
+        // The delivery's own coordinates: seeking to them redelivers exactly this record.
+        if seeker.seek(here).await.is_err() {
+            return HandlerOutcome::retry();
+        }
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_replays_its_own_delivery_position_through_the_context() {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
+        .with_broker(KafkaTestBroker::new(), |b| {
+            b.include(rewind_stuck_job);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    for id in 0..3 {
+        tb.broker::<KafkaTestBroker>()
+            .publish("seek-jobs", &Job { id })
+            .await
+            .expect("publish drives the reaction, replay included, to quiescence");
+    }
+
+    // Job 1 rewound to itself, so it and everything behind it on the log came back once.
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("seek-jobs")
+        .received::<Job>()
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![0, 1, 1, 2],
+        "seeking to a delivery's own position must redeliver it and the log suffix behind it",
+    );
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("seek-jobs")
+        .settled(HandlerOutcome::ack());
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// A page body gets the subscription-scoped context: the same `SeekHandle` key and no position,
+/// because a page spans many records. Where to resume rides the elements.
+#[subscriber(KafkaTopic::new("seek-pages"))]
+async fn drain_pages(page: &[Cursor], ctx: &mut Context<'_, KafkaBatchContext>) -> HandlerOutcome {
+    let resume_at = page.iter().find_map(|entry| entry.resume_at);
+    if let Some(offset) = resume_at
+        && ctx
+            .context(SeekHandle)
+            .seek(KafkaPosition::offset(0, offset))
+            .await
+            .is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The producer's cursor contract: an element carrying `resume_at` asks the consumer to
+/// reposition the subscription there once the page is settled.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Cursor {
+    id: u64,
+    resume_at: Option<i64>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_page_body_repositions_through_its_subscription_context() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // The whole run is in the log before the subscription opens, so the opening replay hands the
+    // body one full page. The marker sits at offset 0 and resumes from 1, so the page after the
+    // seek carries no marker and the reposition happens exactly once.
+    for (id, resume_at) in [(0, Some(1)), (1, None)] {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "seek-pages",
+                DefaultCodec::default()
+                    .encode(&Cursor { id, resume_at })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
+        // The framework's own window, so a page is a page of a known size rather than whatever
+        // the transport had ready when the dispatcher looked.
+        b.include(
+            drain_pages
+                .start_at(KafkaPosition::earliest())
+                .buffered(nonzero!(8), Duration::from_millis(5)),
+        );
+    });
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the page and its replay settle");
+
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("seek-pages")
+        .received::<Cursor>()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![0, 1, 1],
+        "the page's reposition must replay the log from the offset its elements named",
+    );
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// Opens at a fixed log position on every startup, whatever was published before.
+#[subscriber(KafkaTopic::new("audit"), start_at(KafkaPosition::earliest()))]
+async fn replay_audit(job: &Job) -> HandlerOutcome {
+    let _ = job;
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_at_opens_a_subscription_on_the_retained_log() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // Published before the app exists: only the start position makes these visible.
+    for id in 0..2 {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "audit",
+                DefaultCodec::default()
+                    .encode(&Job { id })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
+        b.include(replay_audit);
+    });
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the opening replay settles");
+
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("audit")
+        .received::<Job>()
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![0, 1],
+        "start_at(earliest) must replay what the log held before the service started",
+    );
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positions_the_transport_cannot_resolve_are_refused() {
+    use ruststream::Seekable as _;
+
+    let broker = connected().await;
+    let subscriber = broker
+        .subscribe_with("seek-vocab")
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+
+    // No record timestamps in-process, and one partition per topic: both are refused rather than
+    // silently resolved to something the transport made up.
+    let by_time = seeker
+        .seek(KafkaPosition::timestamp(1_767_000_000_000))
+        .await
+        .expect_err("a timestamp position must be refused in-process");
+    assert!(
+        matches!(by_time, KafkaError::InvalidOptions(_)),
+        "{by_time}"
+    );
+
+    let other_partition = seeker
+        .seek(KafkaPosition::offset(3, 0))
+        .await
+        .expect_err("a partition other than 0 must be refused in-process");
+    assert!(
+        matches!(other_partition, KafkaError::InvalidOptions(_)),
+        "{other_partition}",
+    );
+
+    let other_topic = seeker
+        .seek(KafkaPosition::topic_offset("elsewhere", 0, 0))
+        .await
+        .expect_err("a topic this subscription does not read must be refused");
+    assert!(
+        matches!(other_topic, KafkaError::InvalidOptions(_)),
+        "{other_topic}",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
