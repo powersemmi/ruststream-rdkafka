@@ -25,6 +25,7 @@ test-brokers: brokers-up
     set -euo pipefail
     trap 'just brokers-down' EXIT
     KAFKA_TEST_URL=127.0.0.1:9092 \
+    SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
         cargo test --workspace --all-features -- --test-threads=1
 
 fmt:
