@@ -26,15 +26,30 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 ///
 /// # Examples
 ///
-/// ```
-/// use ruststream::runtime::TypedPublisher;
-/// use ruststream_rdkafka::{KafkaPublish, RoundRobin};
+/// The transform is a step of the mount site's chain, right after the publish policy:
 ///
+/// ```
 /// # #[cfg(feature = "json")]
-/// # fn wire() {
-/// let replies =
-///     TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(8));
-/// # let _ = replies;
+/// # mod demo {
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[derive(serde::Serialize)]
+/// # struct WorkItem { order_id: u64 }
+///
+/// #[ruststream::subscriber("orders", publish("work-items"))]
+/// async fn plan(order: &Order) -> WorkItem {
+///     WorkItem { order_id: order.id }
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("planner", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(plan)
+///                 .publisher(Publish::default())
+///                 .transform(RoundRobin::partitions(8));
+///         })
+/// }
 /// # }
 /// ```
 #[derive(Debug)]

@@ -156,9 +156,12 @@ fn app() -> impl App {
         // --8<-- [start:eos_wiring]
         // Every reply of `enrich` rides the pipeline's window, paired with its offset. The
         // pipeline id doubles as the producer's transactional id, and the `enrich`
-        // subscription names the same id in its `Commit::Transactional` mode.
+        // subscription names the same id in its `Commit::Transactional` mode. `EosReplies` is
+        // what relays the delivery's source coordinates onto the reply, which is how the
+        // pipeline pairs the two.
         b.include(enrich)
-            .publisher(EosPublish::new("enrich-svc-1").replies());
+            .publisher(EosPublish::new("enrich-svc-1"))
+            .transform(EosReplies);
         // --8<-- [end:eos_wiring]
     })
 }

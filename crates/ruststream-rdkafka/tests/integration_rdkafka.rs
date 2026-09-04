@@ -35,9 +35,9 @@ use ruststream::{
 };
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
-    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
-    KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
-    PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
+    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
+    KafkaEosPublish, KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey,
+    PARTITION_HEADER, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -2326,13 +2326,13 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     // have committed records and offsets atomically by then.
     // The pipeline is pure policy here; the runtime pairs it (and its reply publisher) with the
     // connected broker at startup.
-    let replies_wiring = KafkaEosPublish::new(&pipeline_id)
-        .commit_interval(Duration::from_millis(50))
-        .replies();
+    let pipeline = KafkaEosPublish::new(&pipeline_id).commit_interval(Duration::from_millis(50));
     let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(eos_sugar).publisher(replies_wiring);
+            b.include(eos_sugar)
+                .publisher(pipeline)
+                .transform(EosReplies);
         },
     );
 

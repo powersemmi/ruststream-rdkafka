@@ -196,16 +196,18 @@ Three places name one id:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos"
 ```
 
-A publishing handler needs no manual pairing at all: mount it with the pipeline's reply
-publisher, and every reply joins the window paired with its delivery's consumed offset -
+A publishing handler needs no manual pairing at all: name the pipeline as the mount site's
+policy and add the `EosReplies` transform after it, and every reply joins the window paired with
+its delivery's consumed offset -
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos_wiring"
 ```
 
-`KafkaEosPublish::replies()` is a plain `TypedPublisher` over the policy (the explicit spelling
-is `TypedPublisher::new(policy).transform(EosReplies)`), so codecs and further transforms
-compose as usual; `replies_with(codec)` names a non-default codec. For manual publishes,
+`EosReplies` relays the delivery's source coordinates onto the reply, which is what the pipeline
+pairs the two by. It is an ordinary step of the mount site's chain, so `.codec(..)` and further
+`.transform(..)` steps compose around it as usual; leave it off and the first reply reports the
+missing coordinates instead of publishing outside the window. For manual publishes,
 `EosPipeline::publish` takes the delivery's coordinates explicitly instead of reading them off
 the relay header, and a handler gets its own from a `Ctx<Source>` extractor parameter, like
 every other `KafkaContext` field key. Reaching the pipeline through an `Out` slot is not a

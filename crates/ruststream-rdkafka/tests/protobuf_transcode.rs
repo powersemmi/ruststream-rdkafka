@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State};
 use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
@@ -143,7 +143,6 @@ async fn live_protobuf_middleware_end_to_end() {
     };
     let app_probe = probe.clone();
     let broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
-    let replies = TypedPublisher::new(KafkaPublish::default());
     let app = RustStream::new(AppInfo::new("proto-mw", "0.0.0"))
         .publish_layer(
             SchemaFrame::new(SchemaRegistry::new(&registry))
@@ -153,7 +152,7 @@ async fn live_protobuf_middleware_end_to_end() {
         .on_startup(async move |()| Ok::<_, Infallible>(ProtoApp { probe: app_probe }))
         .with_broker(broker, |b| {
             b.include(proto_mw);
-            b.include(proto_relay).publisher(replies);
+            b.include(proto_relay).publisher(KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);

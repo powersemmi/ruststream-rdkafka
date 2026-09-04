@@ -5,7 +5,7 @@
 
 #![cfg(feature = "schema-registry")]
 
-use ruststream::runtime::{App, AppInfo, RustStream, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream::{
     Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber,
 };
@@ -268,11 +268,10 @@ async fn live_json_frame_and_transcode_end_to_end() {
         .expect("seed trigger");
     seed_broker.shutdown().await.expect("seed shutdown");
 
-    let replies = TypedPublisher::new(KafkaPublish::default());
     let app = RustStream::new(AppInfo::new("sr-json", "0.0.0"))
         .publish_layer(SchemaFrame::new(SchemaRegistry::new(&registry)))
         .with_broker(KafkaBroker::new([kafka.clone()]), |b| {
-            b.include(relay).publisher(replies);
+            b.include(relay).publisher(KafkaPublish::default());
         });
 
     let registry_for_wait = registry.clone();

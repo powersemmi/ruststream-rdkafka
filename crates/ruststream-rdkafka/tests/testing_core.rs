@@ -403,14 +403,13 @@ impl<C> ruststream::runtime::PublishTransform<C> for KeyStamp {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_stamps_cycling_partitions() {
-    use ruststream::runtime::TypedPublisher;
     use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
-            let work_items =
-                TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(2));
-            b.include(plan).publisher(work_items);
+            b.include(plan)
+                .publisher(KafkaPublish::default())
+                .transform(RoundRobin::partitions(2));
         });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -443,17 +442,16 @@ async fn round_robin_stamps_cycling_partitions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_leaves_keyed_replies_alone() {
-    use ruststream::runtime::TypedPublisher;
     use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
-            let keyed_items = TypedPublisher::new(KafkaPublish::default())
+            b.include(plan_keyed)
+                .publisher(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
-            b.include(plan_keyed).publisher(keyed_items);
         });
     let tb = TestApp::start(app).await.expect("start");
 

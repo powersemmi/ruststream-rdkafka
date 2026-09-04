@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State};
 use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
@@ -140,7 +140,6 @@ async fn live_avro_middleware_end_to_end() {
     };
     let app_probe = probe.clone();
     let broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
-    let replies = TypedPublisher::new(KafkaPublish::default());
     let app = RustStream::new(AppInfo::new("avro-mw", "0.0.0"))
         .publish_layer(
             SchemaFrame::new(SchemaRegistry::new(&registry)).subject(FRAMED_TOPIC, &subject),
@@ -148,7 +147,7 @@ async fn live_avro_middleware_end_to_end() {
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker(broker, |b| {
             b.include(avro_mw);
-            b.include(avro_relay).publisher(replies);
+            b.include(avro_relay).publisher(KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);
