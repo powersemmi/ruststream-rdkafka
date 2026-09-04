@@ -10,7 +10,7 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
-use ruststream::runtime::Slot;
+use ruststream::runtime::{OutPipeline, Slot};
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
@@ -788,10 +788,14 @@ impl PartitionLanes for TransactionalPartitions {
 // bounding the slot with a trait instead of a concrete type. Both paths reach the same unwrapped
 // value, which is what puts a lane's publishes outside the slot's test capture (see the trait's
 // documentation).
-impl<M, L, EncodeCodec, Body> PartitionLanes for Slot<M, L, EncodeCodec, Body>
+impl<M, L, EncodeCodec, Pipe, Body> PartitionLanes for Slot<M, L, EncodeCodec, Pipe, Body>
 where
     L: PartitionLanes,
     EncodeCodec: Send + Sync,
+    // The entry's publish path. A lane's traffic never travels it (it leaves through the
+    // unwrapped value), but naming the bound the mount site's entry already carries keeps this
+    // impl on exactly the slots the runtime builds.
+    Pipe: OutPipeline,
 {
     fn for_partition(
         &self,
