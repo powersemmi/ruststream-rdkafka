@@ -128,7 +128,7 @@ impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
 /// use ruststream::prelude::*;
 /// use ruststream_rdkafka::context::{KafkaBatchContext, keys::SeekHandle};
 /// use ruststream_rdkafka::{KafkaPosition, prelude::Seeker as _};
-/// # #[derive(serde::Deserialize, schemars::JsonSchema)]
+/// # #[derive(serde::Deserialize)]
 /// # struct Order { id: u64, resume_at: Option<i64>, partition: i32 }
 ///
 /// struct Reprocess;
