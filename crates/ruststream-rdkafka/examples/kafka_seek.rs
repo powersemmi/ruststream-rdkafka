@@ -4,7 +4,7 @@
 //! Kafka keeps the log, so a consumer can be moved through it. Three forms appear here: the
 //! `start_at(..)` clause, which forces a starting position on every startup; the `SeekHandle`
 //! context key, which hands a per-message handler the running subscription's seeker; and the
-//! same key on the page-scoped context a batch handler declares.
+//! same key on the batch-scoped context a batch handler declares.
 //!
 //! A seek moves this consumer instance over the partitions it holds - it is not a group
 //! operation, and a rebalance discards it (the subscription then resumes from the committed
@@ -80,13 +80,13 @@ async fn work(
 // --8<-- [end:handler]
 
 // --8<-- [start:batch]
-// A page spans many deliveries, so it gets the subscription-scoped context instead: the same
-// `SeekHandle` key, no position (which record of the page would it name?). The target rides the
-// elements, and the reposition applies once the whole page has settled.
+// A batch spans many deliveries, so it gets the subscription-scoped context instead: the same
+// `SeekHandle` key, no position (which record of the batch would it name?). The target rides the
+// elements, and the reposition applies once the whole batch has settled.
 #[subscriber(KafkaTopic::new("jobs.bulk").group("jobs-bulk-svc").commit(Commit::Tracked))]
-async fn drain(page: &[Job], ctx: &mut Context<'_, KafkaBatchContext>) -> HandlerOutcome {
-    println!("draining {} jobs", page.len());
-    let resume_at = page.iter().find_map(|job| job.resume_at);
+async fn drain(jobs: &[Job], ctx: &mut Context<'_, KafkaBatchContext>) -> HandlerOutcome {
+    println!("draining {} jobs", jobs.len());
+    let resume_at = jobs.iter().find_map(|job| job.resume_at);
     if let Some(offset) = resume_at
         && ctx
             .context(SeekHandle)

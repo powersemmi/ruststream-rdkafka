@@ -46,7 +46,7 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 ///     RustStream::new(AppInfo::new("planner", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
 ///             b.include(plan)
-///                 .publisher(Publish::default())
+///                 .out(Reply, Publish::default())
 ///                 .transform(RoundRobin::partitions(8));
 ///         })
 /// }

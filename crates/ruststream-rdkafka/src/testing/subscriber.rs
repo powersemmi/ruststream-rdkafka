@@ -167,7 +167,7 @@ impl Seekable for KafkaTestSubscriber {
 impl BatchSubscriber for KafkaTestSubscriber {
     type Batch = Vec<KafkaTestMessage>;
 
-    /// Streams non-empty pages natively: each waits for one delivery, then drains whatever
+    /// Streams non-empty batches natively: each waits for one delivery, then drains whatever
     /// else is already enqueued, up to `size` messages in total (mirroring the real
     /// subscriber's bounded drain-what-is-fetched behavior).
     ///

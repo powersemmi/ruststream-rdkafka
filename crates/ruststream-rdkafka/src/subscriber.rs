@@ -277,13 +277,13 @@ impl Seekable for KafkaSubscriber {
 impl BatchSubscriber for KafkaSubscriber {
     type Batch = Vec<KafkaMessage>;
 
-    /// Streams non-empty pages natively: each waits for one delivery, then drains what
-    /// librdkafka has already fetched, up to `size` messages in total. The page never carries
+    /// Streams non-empty batches natively: each waits for one delivery, then drains what
+    /// librdkafka has already fetched, up to `size` messages in total. The batch never carries
     /// more than the registration's `batch(n)` asked for, and carries fewer whenever the fetch
     /// queue holds less; how much librdkafka keeps queued locally stays a consumer setting
     /// (`queued.max.messages.kbytes` and friends, settable through
-    /// [`KafkaTopic::config`](crate::KafkaTopic::config)). A consumer error inside an open page
-    /// yields the page first; the error (if it persists) surfaces on the next poll.
+    /// [`KafkaTopic::config`](crate::KafkaTopic::config)). A consumer error inside an open batch
+    /// yields the batch first; the error (if it persists) surfaces on the next poll.
     ///
     /// # Cancel safety
     ///
@@ -295,7 +295,7 @@ impl BatchSubscriber for KafkaSubscriber {
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
         futures::stream::unfold(self, move |sub| async move {
-            // Wait for the page's first delivery.
+            // Wait for the batch's first delivery.
             let first = loop {
                 match sub.consumer.recv().await {
                     Ok(delivery) => break sub.map_delivery(&delivery),
@@ -307,7 +307,7 @@ impl BatchSubscriber for KafkaSubscriber {
 
             let mut batch = Vec::with_capacity(size.min(64));
             batch.push(first);
-            // Drain what is already fetched, stopping at the page size; recv is cancel safe,
+            // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
             // so dropping the probe future loses nothing.
             while batch.len() < size {
                 let Some(result) = sub.consumer.recv().now_or_never() else {
@@ -320,7 +320,7 @@ impl BatchSubscriber for KafkaSubscriber {
                     }
                     Err(err) if is_transient(&err) => sub.note_transient(&err),
                     // Yield what was collected; a persistent error re-surfaces on the next
-                    // page's first recv.
+                    // batch's first recv.
                     Err(_) => break,
                 }
             }

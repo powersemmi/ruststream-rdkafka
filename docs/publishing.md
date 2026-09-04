@@ -21,8 +21,9 @@ Where a policy is named:
 
 - `b.include(handler)` alone - a `publish("dest")` handler replies through the broker's default
   policy, `KafkaPublish::default()`.
-- `b.include(handler).publisher(policy)` - the handler's reply publisher, or the publisher its
-  `Out<..>` parameter receives.
+- `b.include(handler).out(Reply, policy)` - the handler's reply publisher.
+- `b.include(handler).out(marker, policy).build()` - the publisher an `Out<..>` parameter
+  receives, named by the slot's marker (`DefaultSlot` when the parameter declares none).
 - `b.after_startup(policy, hook)` - a scope-level hook that runs once with the live publisher,
   after the subscriptions open.
 - `connected.publisher(policy)` - outside the runtime, straight off a broker you connected
@@ -172,7 +173,7 @@ Streams uses for its per-task producers):
 ```
 
 The include site names the base id:
-`.publisher(Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
+`.out(DefaultSlot, Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 

@@ -39,7 +39,7 @@ fn app() -> impl App {
         // The transform is a step of the mount site's chain, right after the policy; the
         // runtime pairs the whole chain into the live publisher once the broker is connected.
         b.include(plan)
-            .publisher(Publish::default())
+            .out(Reply, Publish::default())
             .transform(RoundRobin::partitions(8));
         // --8<-- [end:round_robin]
     })

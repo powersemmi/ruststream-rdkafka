@@ -144,15 +144,22 @@ fn app() -> impl App {
         // it is what fences a zombie instance. One id per service replica (pod ordinal,
         // instance id) is the usual scheme.
         b.include(ship)
-            .publisher(Publish::default().transactional_id("shipments-svc-1"));
+            .out(
+                DefaultSlot,
+                Publish::default().transactional_id("shipments-svc-1"),
+            )
+            .build();
         // --8<-- [end:id]
         // `per_partition` makes the id the base of one id per source partition
         // ("billing-svc-1-p{partition}"), pairing into `TransactionalPartitions`.
-        b.include(bill).publisher(
-            Publish::default()
-                .transactional_id("billing-svc-1")
-                .per_partition(),
-        );
+        b.include(bill)
+            .out(
+                DefaultSlot,
+                Publish::default()
+                    .transactional_id("billing-svc-1")
+                    .per_partition(),
+            )
+            .build();
         // --8<-- [start:eos_wiring]
         // Every reply of `enrich` rides the pipeline's window, paired with its offset. The
         // pipeline id doubles as the producer's transactional id, and the `enrich`
@@ -160,7 +167,7 @@ fn app() -> impl App {
         // what relays the delivery's source coordinates onto the reply, which is how the
         // pipeline pairs the two.
         b.include(enrich)
-            .publisher(EosPublish::new("enrich-svc-1"))
+            .out(Reply, EosPublish::new("enrich-svc-1"))
             .transform(EosReplies);
         // --8<-- [end:eos_wiring]
     })

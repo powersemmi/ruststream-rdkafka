@@ -25,8 +25,9 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::runtime::{
-    App, AppInfo, Ctx, HandlerOutcome, Out, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER,
-    RustStream, State, SubscriberSettings as _,
+    App, AppInfo, Ctx, DefaultSlot, HandlerOutcome, Out,
+    RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, Reply, RustStream, State,
+    SubscriberSettings as _,
 };
 use ruststream::subscriber;
 use ruststream::{
@@ -665,9 +666,9 @@ async fn batches_preserve_order_and_settle_per_message() {
     use ruststream::{BatchSubscriber as _, SubscriptionSource as _};
 
     const COUNT: usize = 12;
-    /// Smaller than the run, so the run cannot come back as one page: the cap is what is
+    /// Smaller than the run, so the run cannot come back as one batch: the cap is what is
     /// under test.
-    const PAGE: usize = 5;
+    const BATCH: usize = 5;
     let Some(url) = kafka_url() else { return };
     let topic = unique("batches");
     create_topic(&url, &topic, 1).await;
@@ -680,7 +681,8 @@ async fn batches_preserve_order_and_settle_per_message() {
     let source = tracked(&topic, &unique("group"));
     let mut subscriber = source.subscribe(&broker).await.expect("subscribe");
 
-    let mut stream = Box::pin(subscriber.batches(NonZeroUsize::new(PAGE).expect("non-zero page")));
+    let mut stream =
+        Box::pin(subscriber.batches(NonZeroUsize::new(BATCH).expect("non-zero batch")));
     let mut payloads = Vec::new();
     while payloads.len() < COUNT {
         let batch = tokio::time::timeout(WAIT, stream.next())
@@ -690,8 +692,8 @@ async fn batches_preserve_order_and_settle_per_message() {
             .expect("batch ok");
         assert!(!batch.is_empty(), "a yielded batch must not be empty");
         assert!(
-            batch.len() <= PAGE,
-            "a page must never exceed the size it was opened at, got {}",
+            batch.len() <= BATCH,
+            "a batch must never exceed the size it was opened at, got {}",
             batch.len()
         );
         for msg in batch {
@@ -872,13 +874,13 @@ struct Tagged {
 }
 
 /// Collects handled tags and wakes the test once the expected count for this run arrived, and
-/// remembers the widest page it was handed so the size cap can be asserted afterwards.
+/// remembers the widest batch it was handed so the size cap can be asserted afterwards.
 #[derive(Clone)]
 struct BatchPoolState {
     prefix: String,
     expected: usize,
     seen: Arc<Mutex<Vec<String>>>,
-    widest_page: Arc<AtomicUsize>,
+    widest_batch: Arc<AtomicUsize>,
     done: Arc<Notify>,
 }
 
@@ -894,15 +896,15 @@ impl BatchPoolState {
         }
     }
 
-    fn saw_page(&self, len: usize) {
-        self.widest_page.fetch_max(len, Ordering::SeqCst);
+    fn saw_batch(&self, len: usize) {
+        self.widest_batch.fetch_max(len, Ordering::SeqCst);
     }
 }
 
-// Pages from a fixed topic, up to four in flight at once; the state filters by the run's
+// Batches from a fixed topic, up to four in flight at once; the state filters by the run's
 // prefix so reruns against a long-lived cluster stay isolated.
 #[subscriber(
-    // Native batches: a page is one delivery plus whatever librdkafka already fetched, capped by
+    // Native batches: a batch is one delivery plus whatever librdkafka already fetched, capped by
     // the size the mount site names below; the slice parameter here is what asks for one. A fixed
     // group keeps reruns idempotent (only this run's fresh publishes arrive), and the state
     // filters by the run prefix.
@@ -912,8 +914,8 @@ impl BatchPoolState {
         .commit(Commit::Tracked),
     workers(4)
 )]
-async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerOutcome {
-    ctx.state().saw_page(items.len());
+async fn pool_batch(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerOutcome {
+    ctx.state().saw_batch(items.len());
     for item in items {
         ctx.state().record(&item.tag);
     }
@@ -921,10 +923,10 @@ async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn batch_pages_with_a_worker_pool_process_everything() {
+async fn batches_with_a_worker_pool_process_everything() {
     const COUNT: usize = 20;
-    /// Smaller than the run, so a page that ignored the mount site's size would show up here.
-    const PAGE: usize = 6;
+    /// Smaller than the run, so a batch that ignored the mount site's size would show up here.
+    const BATCH: usize = 6;
     let Some(url) = kafka_url() else { return };
     create_topic(&url, "e2e-batch-pool", 4).await;
 
@@ -944,14 +946,14 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
         prefix: run.clone(),
         expected: COUNT,
         seen: Arc::new(Mutex::new(Vec::new())),
-        widest_page: Arc::new(AtomicUsize::new(0)),
+        widest_batch: Arc::new(AtomicUsize::new(0)),
         done: Arc::new(Notify::new()),
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(pool_page.batch(nonzero!(6)));
+            b.include(pool_batch.batch(nonzero!(6)));
         });
 
     let done = Arc::clone(&state.done);
@@ -966,10 +968,10 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
     seen.sort();
     let expected: Vec<String> = (0..COUNT).map(|i| format!("{run}-{i:02}")).collect();
     assert_eq!(seen, expected, "every message must be handled exactly once");
-    let widest = state.widest_page.load(Ordering::SeqCst);
+    let widest = state.widest_batch.load(Ordering::SeqCst);
     assert!(
-        widest <= PAGE,
-        "a page must never exceed the size the mount site named, got {widest}",
+        widest <= BATCH,
+        "a batch must never exceed the size the mount site named, got {widest}",
     );
 }
 
@@ -2239,11 +2241,14 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
     let app = RustStream::new(AppInfo::new("lanes", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(lane_forward).publisher(
-                KafkaPublish::default()
-                    .transactional_id(unique("lanes-txn"))
-                    .per_partition(),
-            );
+            b.include(lane_forward)
+                .out(
+                    DefaultSlot,
+                    KafkaPublish::default()
+                        .transactional_id(unique("lanes-txn"))
+                        .per_partition(),
+                )
+                .build();
         },
     );
 
@@ -2272,7 +2277,7 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
 }
 
 // The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
-// page-scoped context - is application-level behaviour, so it is exercised over the in-process
+// batch-scoped context - is application-level behaviour, so it is exercised over the in-process
 // transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
 // that a real consumer moves, and that the offset bookkeeping follows it (see
 // `a_seek_moves_the_tracked_watermark_with_the_read_position` and
@@ -2331,7 +2336,7 @@ async fn eos_publishing_handler_replies_ride_the_window() {
         KafkaBroker::new([url.clone()]),
         |b| {
             b.include(eos_sugar)
-                .publisher(pipeline)
+                .out(Reply, pipeline)
                 .transform(EosReplies);
         },
     );

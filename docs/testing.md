@@ -29,7 +29,7 @@ finished state - no sleeps:
 The transport keeps what it routes, so a subscription is seekable over that log and the crate's
 own context keys work here unchanged: a delivery reports its topic and its index in that topic's
 log as its offset, `Ctx<Position>` names where it sits, `Ctx<SeekHandle>` moves the subscription,
-a page body reads `KafkaBatchContext`, and `start_at(..)` opens a subscription at a chosen
+a batch body reads `KafkaBatchContext`, and `start_at(..)` opens a subscription at a chosen
 position. A service that replays or skips is therefore tested with `TestApp` like any other
 handler, and the replay settles inside `publish` before it returns - no sleep, no polling:
 

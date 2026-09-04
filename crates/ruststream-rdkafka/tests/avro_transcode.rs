@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, Reply, RustStream, State};
 use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
@@ -147,7 +147,7 @@ async fn live_avro_middleware_end_to_end() {
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker(broker, |b| {
             b.include(avro_mw);
-            b.include(avro_relay).publisher(KafkaPublish::default());
+            b.include(avro_relay).out(Reply, KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);

@@ -153,7 +153,7 @@ struct PipelineInner {
 /// Wiring, all three naming the same id:
 ///
 /// 1. The policy: `KafkaEosPublish::new("pipeline-1")`, attached at the include site
-///    (`b.include(handler).publisher(policy)`) or bound for an `after_startup` hook.
+///    (`b.include(handler).out(Reply, policy)`) or bound for an `after_startup` hook.
 /// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
 ///    stops committing offsets on its own and registers with the pipeline instead.
 /// 3. The handler: it receives the paired [`EosPipeline`] and calls
@@ -782,7 +782,7 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 ///
 /// A `publish("replies")` handler over an exactly-once pipeline names it as the mount site's
 /// transform step, right after the policy:
-/// `b.include(enrich).publisher(KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
+/// `b.include(enrich).out(Reply, KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
 /// reply then joins the pipeline's open window paired with its delivery's consumed offset,
 /// making the publishing-handler form exactly-once end to end - the handler just returns the
 /// value. The chain takes the codec the same way, with a `.codec(..)` step.
@@ -832,7 +832,7 @@ impl Publisher for EosPipeline {
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
                  relay them (add the `EosReplies` transform to the mount site's chain, \
-                 `.publisher(KafkaEosPublish::new(id)).transform(EosReplies)`)"
+                 `.out(Reply, KafkaEosPublish::new(id)).transform(EosReplies)`)"
                     .to_owned(),
             ));
         };

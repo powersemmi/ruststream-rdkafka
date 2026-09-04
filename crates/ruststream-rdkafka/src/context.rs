@@ -1,4 +1,4 @@
-//! Per-delivery and per-page context fields exposed to handlers.
+//! Per-delivery and per-batch context fields exposed to handlers.
 //!
 //! [`KafkaContext`] carries the Kafka delivery metadata that is not part of the payload or the
 //! headers, plus the subscription's reposition handle. Request it in a handler by typing the
@@ -6,11 +6,11 @@
 //! zero-sized keys in [`keys`], or bind one field as a parameter with the core's `Ctx<K>`
 //! extractor.
 //!
-//! A batch handler gets [`KafkaBatchContext`] instead: a page spans many deliveries, so it
+//! A batch handler gets [`KafkaBatchContext`] instead: a batch spans many deliveries, so it
 //! carries only what the whole subscription shares - the reposition handle, under the same
-//! [`keys::SeekHandle`] key. Per-delivery coordinates ride the page's elements instead (a
-//! `&[Message<H, T>]` page reads them off each element's typed header contract), and the two
-//! being separate types is what keeps a page body from naming a position that belongs to one
+//! [`keys::SeekHandle`] key. Per-delivery coordinates ride the batch's elements instead (a
+//! `&[Message<H, T>]` batch reads them off each element's typed header contract), and the two
+//! being separate types is what keeps a batch body from naming a position that belongs to one
 //! record.
 
 use std::sync::Arc;
@@ -113,11 +113,11 @@ impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
 }
 
 /// The subscription-scoped context of a batch handler: the reposition handle every delivery of
-/// the page shares.
+/// the batch shares.
 ///
-/// Built once per dispatched page, off its first delivery. A page has no single position - it
+/// Built once per dispatched batch, off its first delivery. A batch has no single position - it
 /// spans many records - so the coordinates a body reacts to travel with the elements, and
-/// keeping this a type of its own is what rejects a page body naming [`KafkaContext`] at compile
+/// keeping this a type of its own is what rejects a batch body naming [`KafkaContext`] at compile
 /// time.
 ///
 /// # Examples
@@ -136,13 +136,13 @@ impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
 /// impl Handle<[Order], (), (), KafkaBatchContext> for Reprocess {
 ///     async fn handle(
 ///         &self,
-///         page: &[Order],
+///         orders: &[Order],
 ///         _outs: &(),
 ///         ctx: &mut Context<'_, KafkaBatchContext>,
 ///     ) -> Result<(), Vec<HandlerOutcome>> {
-///         // The page is settled first; the reposition then opens the next page at the target
-///         // the producer marked on one of the elements.
-///         let target = page
+///         // The batch is settled first; the reposition then opens the next batch at the
+///         // target the producer marked on one of the elements.
+///         let target = orders
 ///             .iter()
 ///             .find_map(|order| order.resume_at.map(|at| (order.partition, at)));
 ///         if let Some((partition, at)) = target
@@ -152,7 +152,7 @@ impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
 ///                 .await
 ///                 .is_err()
 ///         {
-///             return Err(page.iter().map(|_| HandlerOutcome::retry()).collect());
+///             return Err(orders.iter().map(|_| HandlerOutcome::retry()).collect());
 ///         }
 ///         Ok(())
 ///     }
@@ -165,7 +165,7 @@ pub struct KafkaBatchContext {
 }
 
 impl KafkaBatchContext {
-    /// The handle repositioning the subscription this page came from.
+    /// The handle repositioning the subscription this batch came from.
     #[must_use]
     pub fn seeker(&self) -> &KafkaSeeker {
         &self.seeker
@@ -180,8 +180,8 @@ impl BuildBatchContext<KafkaMessage> for KafkaBatchContext {
     }
 }
 
-/// The in-process transport carries the page context too: its seeker repositions the retained
-/// log, so a page body that replays is testable with `TestApp`.
+/// The in-process transport carries the batch context too: its seeker repositions the retained
+/// log, so a batch body that replays is testable with `TestApp`.
 #[cfg(feature = "testing")]
 impl BuildBatchContext<crate::testing::KafkaTestMessage> for KafkaBatchContext {
     fn build(first: &crate::testing::KafkaTestMessage) -> Self {
@@ -366,9 +366,8 @@ pub mod keys {
 
     /// Reads the subscription's reposition handle.
     ///
-    /// The same key serves the per-delivery [`KafkaContext`] and the page-scoped
-    /// [`KafkaBatchContext`](super::KafkaBatchContext), because a seek is a subscription
-    /// operation either way.
+    /// The same key serves the per-delivery [`KafkaContext`] and the batch-scoped
+    /// [`KafkaBatchContext`], because a seek is a subscription operation either way.
     ///
     /// # Examples
     ///

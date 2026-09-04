@@ -13,9 +13,9 @@ use crate::orders;
 /// plain one.
 ///
 /// `confirm` needs a publisher for its reply; `Publish` is the publish policy - pure
-/// declaration, holding no connection - and `.publisher(..)` is the chain step that names it.
+/// declaration, holding no connection - and `.out(Reply, ..)` is the chain step that names it.
 /// Nothing names a codec here, so the default one encodes the reply and decodes the order; a
-/// `.codec(..)` step after `.publisher(..)` would name another. `.build()` seals the
+/// `.codec(..)` step after `.out(Reply, ..)` would name another. `.build()` seals the
 /// registration and hands the router back, so the next `include` chains off it. The runtime
 /// pairs the policy into a live publisher once the broker connects, so the router takes no
 /// broker at all. `on_cancel` has no reply, so its `include` registers on its own; the
@@ -27,7 +27,7 @@ use crate::orders;
 pub fn orders() -> impl RouterDef<KafkaBroker> {
     Router::new()
         .include(orders::confirm)
-        .publisher(Publish::default())
+        .out(Reply, Publish::default())
         .build()
         .include(orders::on_cancel)
 }

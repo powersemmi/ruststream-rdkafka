@@ -154,7 +154,7 @@ where the delivery being handled sits, which is what "replay this record" takes:
 ```
 
 A batch handler gets `KafkaBatchContext` instead - the same `SeekHandle` key, and nothing
-per-delivery, because a page spans many records and no single position describes it. Where to
+per-delivery, because a batch spans many records and no single position describes it. Where to
 seek then rides the elements:
 
 ```rust
@@ -255,18 +255,18 @@ origin of the failed delivery:
 
 ## Batches
 
-A handler that takes a slice consumes whole pages; nothing in the attribute says so, the
+A handler that takes a slice consumes whole batches; nothing in the attribute says so, the
 signature does. Batching is native here: the subscriber implements the core `BatchSubscriber`
-capability directly, and a page is one delivery plus everything librdkafka has already fetched,
+capability directly, and a batch is one delivery plus everything librdkafka has already fetched,
 with no added waiting:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
 ```
 
-The mount site names how large a page may be, and a page handler does not compile without it.
+The mount site names how large a batch may be, and a batch handler does not compile without it.
 The size travels to the consumer's poll, which never hands the body more records than that; a
-page carries fewer whenever that is all the fetch queue had:
+batch carries fewer whenever that is all the fetch queue had:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:size"
@@ -282,7 +282,7 @@ otherwise mount with `include`, like every other handler:
 
 ### How batch settlement maps onto Kafka
 
-A batch handler settles its page either uniformly (one `HandlerOutcome` for every element) or
+A batch handler settles its batch either uniformly (one `HandlerOutcome` for every element) or
 per element (`Vec<HandlerOutcome>`, entry `i` settling element `i`):
 
 ```rust
@@ -293,15 +293,15 @@ Kafka commits one position per partition, not per message, so the outcomes map a
 (everything below assumes `Commit::Tracked`; under `Commit::Auto` every settlement is an
 advisory no-op and none of it applies):
 
-- **Uniform `Ack`** - the page settles, the position advances.
+- **Uniform `Ack`** - the batch settles, the position advances.
 - **Per-element with `Ack`s only** - also exact: acks may land out of order across concurrent
-  pages, the position always advances to just below the lowest unsettled delivery.
+  batches, the position always advances to just below the lowest unsettled delivery.
 - **Per-element with a `retry()` in the middle** - the runtime does settle each element
   individually, but the committed position stops in front of the first retried element and
   stays there until that offset redelivers (the next fetch of the partition: a rebalance or a
   restart). When it does, the acked tail behind it replays too - at-least-once duplicates, not
   loss. Selective ack therefore works "up to the first nack" as far as the committed position
-  is concerned; use a retry policy (retry topics) when a poison element must not hold the page
+  is concerned; use a retry policy (retry topics) when a poison element must not hold the batch
   hostage.
 - **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the
   runtime's deferred-republish fallback runs: with `retry_via(broker.retry_publisher())`
@@ -310,18 +310,18 @@ advisory no-op and none of it applies):
   `x-ruststream-retry-count` header - ordering is not preserved, and the copy is at-most-once
   across the delay window (a crash before the timer fires loses it). Without `retry_via` the
   delay is dropped with a warning and the element degrades to a plain `retry()` hole as above.
-- **A too-short result vector** - the unmatched remainder of the page is retried (an extra
+- **A too-short result vector** - the unmatched remainder of the batch is retried (an extra
   redelivery beats a silently lost message) and the mismatch is logged.
 
 ### Concurrency
 
-`workers(n)` on a batch registration keeps up to `n` pages in flight at once; the tracked
+`workers(n)` on a batch registration keeps up to `n` batches in flight at once; the tracked
 position stays correct under out-of-order acks by construction. `by_key` does not apply to
 batches - a keyed policy behaves like a plain pool of the same size. Per-key ordering is a
 single-message-handler feature (`workers(n, by_key)`, see the keyed lanes example), where it
 composes with Kafka's native record-key partitioning end to end.
 
-The in-process test broker batches natively the same way (a page drains what is enqueued), so a
+The in-process test broker batches natively the same way (a batch drains what is enqueued), so a
 batch handler mounts on either without changing.
 
 ## Consume errors

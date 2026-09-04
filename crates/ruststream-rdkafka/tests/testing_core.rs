@@ -21,7 +21,9 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use ruststream::codec::{Codec as _, DefaultCodec};
 use ruststream::nonzero;
-use ruststream::runtime::{AppInfo, Ctx, HandlerOutcome, Out, RustStream, SubscriberSettings as _};
+use ruststream::runtime::{
+    AppInfo, Ctx, HandlerOutcome, Out, Reply, RustStream, SubscriberSettings as _,
+};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
@@ -408,7 +410,7 @@ async fn round_robin_stamps_cycling_partitions() {
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             b.include(plan)
-                .publisher(KafkaPublish::default())
+                .out(Reply, KafkaPublish::default())
                 .transform(RoundRobin::partitions(2));
         });
     let tb = TestApp::start(app).await.expect("start");
@@ -449,7 +451,7 @@ async fn round_robin_leaves_keyed_replies_alone() {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
             b.include(plan_keyed)
-                .publisher(KafkaPublish::default())
+                .out(Reply, KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
         });
@@ -596,15 +598,15 @@ async fn a_handler_replays_its_own_delivery_position_through_the_context() {
     tb.shutdown().await.expect("shutdown");
 }
 
-/// A page body gets the subscription-scoped context: the same `SeekHandle` key and no position,
-/// because a page spans many records. Where to resume rides the elements, and the budget bounds
+/// A batch body gets the subscription-scoped context: the same `SeekHandle` key and no position,
+/// because a batch spans many records. Where to resume rides the elements, and the budget bounds
 /// the replay the way a service's would.
-#[subscriber(KafkaTopic::new("seek-pages"))]
-async fn drain_pages(
-    page: &[Cursor],
+#[subscriber(KafkaTopic::new("seek-batches"))]
+async fn drain_batches(
+    cursors: &[Cursor],
     ctx: &mut Context<'_, KafkaBatchContext, Rewinds>,
 ) -> HandlerOutcome {
-    let resume_at = page.iter().find_map(|entry| entry.resume_at);
+    let resume_at = cursors.iter().find_map(|entry| entry.resume_at);
     if let Some(offset) = resume_at
         && ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0
         && ctx
@@ -619,7 +621,7 @@ async fn drain_pages(
 }
 
 /// The producer's cursor contract: an element carrying `resume_at` asks the consumer to
-/// reposition the subscription there once the page is settled.
+/// reposition the subscription there once the batch is settled.
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 struct Cursor {
     id: u64,
@@ -627,18 +629,18 @@ struct Cursor {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_page_body_repositions_through_its_subscription_context() {
+async fn a_batch_body_repositions_through_its_subscription_context() {
     let broker = KafkaTestBroker::new();
     let seeded = broker.clone().connect().await.expect("connect");
     // The whole run is in the log before the subscription opens, so the opening replay is what
-    // the body pages over. The marker asks to resume from offset 0, so whatever the window makes
-    // of the run, the record the target names is delivered again - and exactly once more,
+    // the body batches over. The marker asks to resume from offset 0, so whatever the window
+    // makes of the run, the record the target names is delivered again - and exactly once more,
     // because the budget is spent by then.
     for (id, resume_at) in [(0, Some(0)), (1, None)] {
         seeded
             .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(
-                "seek-pages",
+                "seek-batches",
                 DefaultCodec::default()
                     .encode(&Cursor { id, resume_at })
                     .expect("serializable")
@@ -651,30 +653,30 @@ async fn a_page_body_repositions_through_its_subscription_context() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
         .with_broker(broker, |b| {
-            // The mount site names the page size; the transport honours it, so a page holds at
+            // The mount site names the batch size; the transport honours it, so a batch holds at
             // most that many records and however few it had ready.
             b.include(
-                drain_pages
+                drain_batches
                     .start_at(KafkaPosition::earliest())
                     .batch(nonzero!(8)),
             );
         });
     let tb = TestApp::start(app).await.expect("start");
-    tb.settle().await.expect("the page and its replay settle");
+    tb.settle().await.expect("the batch and its replay settle");
 
     let seen: Vec<u64> = tb
         .broker::<KafkaTestBroker>()
-        .subscriber("seek-pages")
+        .subscriber("seek-batches")
         .received::<Cursor>()
         .into_iter()
         .map(|entry| entry.id)
         .collect();
-    // How the run is split into pages is the window's business, so the assertion is on the
+    // How the run is split into batches is the window's business, so the assertion is on the
     // reposition itself: the sought record came back, once, and the rest of the log kept flowing.
     assert_eq!(
         seen.iter().filter(|id| **id == 0).count(),
         2,
-        "the page's reposition must replay the record its elements named, got {seen:?}",
+        "the batch's reposition must replay the record its elements named, got {seen:?}",
     );
     assert!(
         seen.contains(&1),
@@ -684,24 +686,24 @@ async fn a_page_body_repositions_through_its_subscription_context() {
     tb.shutdown().await.expect("shutdown");
 }
 
-/// Pages a replayed log, so the pages the transport builds are the only thing under test.
-#[subscriber(KafkaTopic::new("page-sizes"), start_at(KafkaPosition::earliest()))]
-async fn count_pages(page: &[Job]) -> HandlerOutcome {
-    let _ = page;
+/// Batches a replayed log, so the batches the transport builds are the only thing under test.
+#[subscriber(KafkaTopic::new("batch-sizes"), start_at(KafkaPosition::earliest()))]
+async fn count_batches(jobs: &[Job]) -> HandlerOutcome {
+    let _ = jobs;
     HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_transport_cuts_pages_at_the_size_the_mount_named() {
+async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
     let broker = KafkaTestBroker::new();
     let seeded = broker.clone().connect().await.expect("connect");
     // The whole run is on the log before the subscription opens, so the replay hands the
-    // transport more than one page's worth at once - which is what a page size has to cut.
+    // transport more than one batch's worth at once - which is what a batch size has to cut.
     for id in 0..5u64 {
         seeded
             .publisher(KafkaPublish::default())
             .publish(OutgoingMessage::new(
-                "page-sizes",
+                "batch-sizes",
                 DefaultCodec::default()
                     .encode(&Job { id })
                     .expect("serializable")
@@ -712,14 +714,14 @@ async fn the_transport_cuts_pages_at_the_size_the_mount_named() {
     }
 
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
-        .with_broker(broker, |b| b.include(count_pages.batch(nonzero!(2))));
+        .with_broker(broker, |b| b.include(count_batches.batch(nonzero!(2))));
     let tb = TestApp::start(app).await.expect("start");
-    tb.settle().await.expect("the replayed pages settle");
+    tb.settle().await.expect("the replayed batches settle");
 
     tb.broker::<KafkaTestBroker>()
-        .subscriber("page-sizes")
+        .subscriber("batch-sizes")
         // Two, two, then the remainder: never more than the mount site asked for.
-        .assert_page_sizes(&[2, 2, 1])
+        .assert_batch_sizes(&[2, 2, 1])
         .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
