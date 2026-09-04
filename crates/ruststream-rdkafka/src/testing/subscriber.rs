@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::future::{Future, ready};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, ready as poll_ready};
@@ -167,15 +168,17 @@ impl BatchSubscriber for KafkaTestSubscriber {
     type Batch = Vec<KafkaTestMessage>;
 
     /// Streams non-empty pages natively: each waits for one delivery, then drains whatever
-    /// else is already enqueued (mirroring the real subscriber's drain-what-is-fetched
-    /// behavior).
+    /// else is already enqueued, up to `size` messages in total (mirroring the real
+    /// subscriber's bounded drain-what-is-fetched behavior).
     ///
     /// # Cancel safety
     ///
     /// Same guarantees as [`Subscriber::stream`]: cancel safe between polls.
     fn batches(
         &mut self,
+        size: NonZeroUsize,
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
+        let size = size.get();
         let Self {
             receiver,
             sender,
@@ -197,8 +200,12 @@ impl BatchSubscriber for KafkaTestSubscriber {
                     None => return Poll::Ready(None),
                 }
             };
-            let mut batch = vec![first];
-            while let Ok(delivery) = receiver.try_recv() {
+            let mut batch = Vec::with_capacity(size.min(64));
+            batch.push(first);
+            while batch.len() < size {
+                let Ok(delivery) = receiver.try_recv() else {
+                    break;
+                };
                 if let Some(message) =
                     Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
                 {

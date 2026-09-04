@@ -107,7 +107,7 @@ fn app() -> impl App {
         |b| {
             b.include(replay);
             b.include(work);
-            b.include(drain);
+            b.include(drain.batch(nonzero!(128)));
         },
     )
 }

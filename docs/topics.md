@@ -257,21 +257,24 @@ origin of the failed delivery:
 
 A handler that takes a slice consumes whole pages; nothing in the attribute says so, the
 signature does. Batching is native here: the subscriber implements the core `BatchSubscriber`
-capability directly, and a page is one delivery plus everything librdkafka has already fetched -
-no added waiting, no crate-imposed knobs:
+capability directly, and a page is one delivery plus everything librdkafka has already fetched,
+with no added waiting:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
 ```
 
-Page size is bounded by librdkafka's own fetch-queue limits, reached through the descriptor's
-config passthrough:
+The mount site names how large a page may be, and a page handler does not compile without it.
+The size travels to the consumer's poll, which never hands the body more records than that; a
+page carries fewer whenever that is all the fetch queue had:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:size"
 ```
 
-Batch handlers mount with `include`, like every other handler:
+How much librdkafka keeps queued locally is a separate, consumer-side question, and it stays in
+the descriptor's config passthrough (`queued.max.messages.kbytes` and friends). Batch handlers
+otherwise mount with `include`, like every other handler:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"

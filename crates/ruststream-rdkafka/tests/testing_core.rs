@@ -653,12 +653,12 @@ async fn a_page_body_repositions_through_its_subscription_context() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
         .with_broker(broker, |b| {
-            // The framework's own window over a natively batching transport: pages close on the
-            // declared size or deadline rather than on whatever the transport had ready.
+            // The mount site names the page size; the transport honours it, so a page holds at
+            // most that many records and however few it had ready.
             b.include(
                 drain_pages
                     .start_at(KafkaPosition::earliest())
-                    .buffered(nonzero!(8), Duration::from_millis(50)),
+                    .batch(nonzero!(8)),
             );
         });
     let tb = TestApp::start(app).await.expect("start");
@@ -682,6 +682,47 @@ async fn a_page_body_repositions_through_its_subscription_context() {
         seen.contains(&1),
         "the log behind the target must keep flowing, got {seen:?}",
     );
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// Pages a replayed log, so the pages the transport builds are the only thing under test.
+#[subscriber(KafkaTopic::new("page-sizes"), start_at(KafkaPosition::earliest()))]
+async fn count_pages(page: &[Job]) -> HandlerOutcome {
+    let _ = page;
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_transport_cuts_pages_at_the_size_the_mount_named() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // The whole run is on the log before the subscription opens, so the replay hands the
+    // transport more than one page's worth at once - which is what a page size has to cut.
+    for id in 0..5u64 {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "page-sizes",
+                DefaultCodec::default()
+                    .encode(&Job { id })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker, |b| b.include(count_pages.batch(nonzero!(2))));
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the replayed pages settle");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("page-sizes")
+        // Two, two, then the remainder: never more than the mount site asked for.
+        .assert_page_sizes(&[2, 2, 1])
+        .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
 }
