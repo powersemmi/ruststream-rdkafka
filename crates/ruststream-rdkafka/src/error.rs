@@ -88,6 +88,18 @@ pub enum KafkaError {
     #[cfg(feature = "schema-registry")]
     #[error("schema registry error: {0}")]
     SchemaRegistry(#[source] Box<dyn StdError + Send + Sync>),
+
+    /// A value could not be written to, or read from, its binary wire form.
+    ///
+    /// This is the byte lanes' own failure: the Avro or Protobuf encoder rejected the value,
+    /// the payload is not the datum a schema describes, or a delivery does not carry the
+    /// Confluent envelope the reader expected. It stays distinct from
+    /// [`SchemaRegistry`](Self::SchemaRegistry), which is the registry conversation failing -
+    /// the fixed-schema lane reaches no registry at all, so folding the two would make every
+    /// diagnostic point at a component that was never involved.
+    #[cfg(feature = "schema-registry")]
+    #[error("wire format error: {0}")]
+    WireFormat(#[source] Box<dyn StdError + Send + Sync>),
 }
 
 impl KafkaError {
@@ -102,6 +114,18 @@ impl KafkaError {
     #[cfg(feature = "schema-registry")]
     pub(crate) fn schema_registry(err: impl StdError + Send + Sync + 'static) -> Self {
         Self::SchemaRegistry(Box::new(err))
+    }
+
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn wire_format(err: impl StdError + Send + Sync + 'static) -> Self {
+        Self::WireFormat(Box::new(err))
+    }
+
+    /// The wire-format failure the lanes report for a payload that is structurally wrong (not
+    /// framed, indexes truncated) rather than for another error's failure.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn malformed(message: impl Into<String>) -> Self {
+        Self::WireFormat(message.into().into())
     }
 
     pub(crate) fn subscribe(err: rdkafka::error::KafkaError) -> Self {
