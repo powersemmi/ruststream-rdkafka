@@ -73,6 +73,52 @@ async fn register_caches_subject_and_id() {
 }
 
 #[tokio::test]
+async fn lookup_id_answers_for_the_callers_own_schema() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subjects/orders-value"))
+        .and(body_partial_json(
+            serde_json::json!({ "schema": ORDER_SCHEMA }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "subject": "orders-value",
+            "id": 5,
+            "version": 2,
+            "schema": ORDER_SCHEMA,
+        })))
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri());
+    let id = sr
+        .lookup_id("orders-value", SchemaType::Avro, ORDER_SCHEMA)
+        .await
+        .expect("lookup");
+    assert_eq!(id, 5);
+    assert!(
+        sr.cached_subject("orders-value").is_none(),
+        "a lookup answers about the caller's schema, not about what the subject holds",
+    );
+}
+
+#[tokio::test]
+async fn lookup_id_names_the_subject_it_could_not_find() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subjects/missing-value"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri());
+    let err = sr
+        .lookup_id("missing-value", SchemaType::Avro, ORDER_SCHEMA)
+        .await
+        .expect_err("unregistered");
+    assert!(err.to_string().contains("missing-value"));
+}
+
+#[tokio::test]
 async fn warm_resolves_the_latest_version() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
