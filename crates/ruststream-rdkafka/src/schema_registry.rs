@@ -502,17 +502,22 @@ impl SchemaRegistry {
     /// Registers the Avro schema derived from `T` under `subject` - the typed shorthand for
     /// [`register`](Self::register) with `T::get_schema()`.
     ///
+    /// The full schema JSON is registered, not its Parsing Canonical Form: canonicalization
+    /// keeps only what makes two schemas *the same* and drops field defaults, aliases, docs and
+    /// logical types - and a field default is precisely what lets a later reader resolve an
+    /// earlier writer's datum, so a subject registered canonically can never carry an evolution.
+    ///
     /// # Errors
     ///
-    /// As [`register`](Self::register).
+    /// As [`register`](Self::register), plus [`KafkaError::WireFormat`] when the derived schema
+    /// cannot be serialized.
     #[cfg(feature = "avro")]
     pub async fn register_avro<T: apache_avro::AvroSchema>(
         &self,
         subject: &str,
     ) -> Result<u32, KafkaError> {
-        let schema = T::get_schema();
-        self.register(subject, SchemaType::Avro, schema.canonical_form())
-            .await
+        let definition = crate::avro::schema_json(&T::get_schema())?;
+        self.register(subject, SchemaType::Avro, definition).await
     }
 
     /// The parsed Avro schema for a cached registered schema, parsed once and shared.
