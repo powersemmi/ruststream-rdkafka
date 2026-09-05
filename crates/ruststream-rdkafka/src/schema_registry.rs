@@ -30,7 +30,7 @@ pub use schemars::JsonSchema;
 use crate::error::KafkaError;
 
 /// The zero magic byte opening every Confluent-framed payload.
-const WIRE_MAGIC: u8 = 0;
+pub(crate) const WIRE_MAGIC: u8 = 0;
 
 /// The schema flavors the registry stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
