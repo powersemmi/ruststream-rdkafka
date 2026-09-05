@@ -1677,6 +1677,7 @@ dependencies = [
  "apache-avro",
  "bytes",
  "futures",
+ "prost",
  "prost-reflect",
  "protox",
  "rdkafka",
