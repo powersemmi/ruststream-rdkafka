@@ -338,6 +338,49 @@ impl SchemaRegistry {
         Ok(registered.id)
     }
 
+    /// The id the registry already gave exactly this schema under `subject`, registering
+    /// nothing.
+    ///
+    /// This is the lookup a producer that owns its schema needs and [`warm`](Self::warm) cannot
+    /// answer: `warm` resolves *the subject's latest* schema, while a byte-lane producer writes
+    /// datums under *its own*, and framing one with the other's id puts an unreadable record on
+    /// the topic. Nothing is cached, for the same reason: the answer is about a schema the
+    /// caller brought, not about what the subject currently holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable or rejects the
+    /// request, and [`KafkaError::InvalidOptions`] when the subject does not hold this schema.
+    pub async fn lookup_id(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        definition: impl Into<String>,
+    ) -> Result<u32, KafkaError> {
+        let body = serde_json::json!({
+            "schema": definition.into(),
+            "schemaType": schema_type.as_api(),
+        });
+        let response = self
+            .request(reqwest::Method::POST, &format!("/subjects/{subject}"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(KafkaError::schema_registry)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(KafkaError::InvalidOptions(format!(
+                "the registry holds no such schema under subject {subject:?}; register it there \
+                 first (the typed shorthands do it in one call) or point the producer at the \
+                 subject that carries this schema",
+            )));
+        }
+        let response = response
+            .error_for_status()
+            .map_err(KafkaError::schema_registry)?;
+        let found: RegisterResponse = response.json().await.map_err(KafkaError::schema_registry)?;
+        Ok(found.id)
+    }
+
     /// Resolves `subject`'s latest version and caches it - the warm-only alternative to
     /// [`register`](Self::register) when producers must not create schemas, and a startup
     /// probe that a required subject exists (the framing middleware itself resolves subjects
