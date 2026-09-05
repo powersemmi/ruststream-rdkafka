@@ -1,6 +1,7 @@
 //! The subscriber: a stream of Kafka deliveries from one topic subscription.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -52,6 +53,9 @@ pub struct KafkaSubscriber {
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
     retry: Option<Arc<RetryContext>>,
+    /// Minted once, when the subscription opens: every delivery carries a clone so a handler's
+    /// context can hand out the reposition handle for one reference-count bump.
+    seeker: Arc<KafkaSeeker>,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
@@ -68,6 +72,10 @@ impl KafkaSubscriber {
         lane_key: LaneKey,
         retry: Option<Arc<RetryContext>>,
     ) -> Self {
+        let seeker = Arc::new(KafkaSeeker::new(
+            Arc::clone(&consumer),
+            Arc::clone(&tracker),
+        ));
         Self {
             consumer,
             topic,
@@ -75,6 +83,7 @@ impl KafkaSubscriber {
             tracker,
             lane_key,
             retry,
+            seeker,
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
             in_transient_episode: false,
@@ -200,6 +209,7 @@ impl KafkaSubscriber {
             settlement,
             lane,
             self.retry.clone(),
+            Arc::clone(&self.seeker),
         )
     }
 }
@@ -257,23 +267,23 @@ impl Subscriber for KafkaSubscriber {
 impl Seekable for KafkaSubscriber {
     type Seeker = KafkaSeeker;
 
-    /// Mints a handle for repositioning this subscription; see [`KafkaSeeker`] for the scope of
-    /// a seek and what a rebalance does to it.
+    /// Hands out a handle for repositioning this subscription; see [`KafkaSeeker`] for the
+    /// scope of a seek and what a rebalance does to it.
     fn seeker(&self) -> Self::Seeker {
-        KafkaSeeker::new(Arc::clone(&self.consumer), Arc::clone(&self.tracker))
+        KafkaSeeker::clone(&self.seeker)
     }
 }
 
 impl BatchSubscriber for KafkaSubscriber {
     type Batch = Vec<KafkaMessage>;
 
-    /// Streams non-empty pages natively: each waits for one delivery, then drains everything
-    /// librdkafka has already fetched. There is no crate-imposed window - the page is bounded
-    /// by librdkafka's own fetch-queue limits (`queued.max.messages.kbytes` and friends,
-    /// settable through [`KafkaTopic::config`](crate::KafkaTopic::config)); wrap the source in
-    /// the core [`Buffered`](ruststream::Buffered) adapter for an explicit size/deadline
-    /// window. A consumer error inside an open page yields the page first; the error (if it
-    /// persists) surfaces on the next poll.
+    /// Streams non-empty batches natively: each waits for one delivery, then drains what
+    /// librdkafka has already fetched, up to `size` messages in total. The batch never carries
+    /// more than the registration's `batch(n)` asked for, and carries fewer whenever the fetch
+    /// queue holds less; how much librdkafka keeps queued locally stays a consumer setting
+    /// (`queued.max.messages.kbytes` and friends, settable through
+    /// [`KafkaTopic::config`](crate::KafkaTopic::config)). A consumer error inside an open batch
+    /// yields the batch first; the error (if it persists) surfaces on the next poll.
     ///
     /// # Cancel safety
     ///
@@ -281,9 +291,11 @@ impl BatchSubscriber for KafkaSubscriber {
     /// lost by dropping the stream.
     fn batches(
         &mut self,
+        size: NonZeroUsize,
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
-        futures::stream::unfold(self, |sub| async move {
-            // Wait for the page's first delivery.
+        let size = size.get();
+        futures::stream::unfold(self, move |sub| async move {
+            // Wait for the batch's first delivery.
             let first = loop {
                 match sub.consumer.recv().await {
                     Ok(delivery) => break sub.map_delivery(&delivery),
@@ -293,10 +305,14 @@ impl BatchSubscriber for KafkaSubscriber {
             };
             sub.note_recovered();
 
-            let mut batch = vec![first];
-            // Drain what is already fetched; recv is cancel safe, so dropping the probe
-            // future loses nothing.
-            while let Some(result) = sub.consumer.recv().now_or_never() {
+            let mut batch = Vec::with_capacity(size.min(64));
+            batch.push(first);
+            // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
+            // so dropping the probe future loses nothing.
+            while batch.len() < size {
+                let Some(result) = sub.consumer.recv().now_or_never() else {
+                    break;
+                };
                 match result {
                     Ok(delivery) => {
                         let item = sub.map_delivery(&delivery);
@@ -304,7 +320,7 @@ impl BatchSubscriber for KafkaSubscriber {
                     }
                     Err(err) if is_transient(&err) => sub.note_transient(&err),
                     // Yield what was collected; a persistent error re-surfaces on the next
-                    // page's first recv.
+                    // batch's first recv.
                     Err(_) => break,
                 }
             }

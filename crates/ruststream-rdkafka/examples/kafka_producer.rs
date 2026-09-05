@@ -16,7 +16,7 @@ use ruststream::{Broker, ConnectedBroker};
 use ruststream_rdkafka::KafkaPublish;
 
 // --8<-- [start:producer]
-use ruststream::{Headers, OutgoingMessage, Publisher};
+use ruststream::{HeaderMap, OutgoingMessage, Publisher};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaError, KafkaPublisher, PARTITION_HEADER, PARTITION_KEY_HEADER,
 };
@@ -28,7 +28,7 @@ async fn publish_keyed(
     id: u64,
     tenant: &str,
 ) -> Result<(), KafkaError> {
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(PARTITION_KEY_HEADER, tenant.to_owned());
     let payload = format!(r#"{{"id":{id},"tenant":"{tenant}"}}"#);
     publisher
@@ -46,7 +46,7 @@ async fn publish_pinned(
     id: u64,
     partition: i32,
 ) -> Result<(), KafkaError> {
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(PARTITION_HEADER, partition.to_string());
     let payload = format!(r#"{{"id":{id},"tenant":"pinned"}}"#);
     publisher

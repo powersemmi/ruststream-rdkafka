@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -25,19 +25,20 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::runtime::{
-    App, AppInfo, Ctx, HandlerResult, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, RustStream,
-    State,
+    App, AppInfo, Ctx, DefaultSlot, HandlerOutcome, Out,
+    RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, Reply, RustStream, State,
+    SubscriberSettings as _,
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, Headers, IncomingMessage, OutgoingMessage, Positioned,
-    PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
+    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, OutgoingMessage, Positioned,
+    PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher, nonzero,
 };
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
-    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, KafkaBroker, KafkaEosPublish,
-    KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey, PARTITION_HEADER,
-    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
+    Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
+    KafkaEosPublish, KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey,
+    PARTITION_HEADER, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -71,22 +72,42 @@ async fn recreate_topic(url: &str, topic: &str, partitions: i32) {
         .delete_topics(&[topic], &AdminOptions::new())
         .await
         .expect("delete_topics call");
-    // Deletion completes asynchronously; poll creation until the name is free again.
-    for _ in 0..50 {
-        let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
-        let results = admin
-            .create_topics([&new_topic], &AdminOptions::new())
-            .await
-            .expect("create_topics call");
-        match &results[0] {
-            Ok(_) => return,
-            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            Err((name, code)) => panic!("recreate {name}: {code}"),
+    // Deletion completes asynchronously. Waiting on the cluster's own answer is what makes this
+    // deterministic: a metadata fetch blocks until the broker replies, so the loop is paced by
+    // the condition it is waiting for rather than by a guessed delay.
+    await_topic_absent(&admin, topic);
+    let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
+    let results = admin
+        .create_topics([&new_topic], &AdminOptions::new())
+        .await
+        .expect("create_topics call");
+    match &results[0] {
+        Ok(_) | Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {}
+        Err((name, code)) => panic!("recreate {name}: {code}"),
+    }
+}
+
+/// Polls cluster metadata until `topic` is gone, bounded by [`WAIT`].
+///
+/// Each fetch is a round trip to the broker with its own timeout, so the loop advances only when
+/// the cluster has answered.
+fn await_topic_absent(admin: &AdminClient<DefaultClientContext>, topic: &str) {
+    let probe = Duration::from_millis(500);
+    let deadline = std::time::Instant::now() + WAIT;
+    while std::time::Instant::now() < deadline {
+        let metadata = admin
+            .inner()
+            .fetch_metadata(Some(topic), probe)
+            .expect("fetch_metadata call");
+        let present = metadata
+            .topics()
+            .iter()
+            .any(|known| known.name() == topic && known.error().is_none());
+        if !present {
+            return;
         }
     }
-    panic!("topic {topic} was not recreated in time");
+    panic!("topic {topic} was still present {WAIT:?} after the delete request");
 }
 
 /// Creates `topic` up front so the first subscribe does not race topic auto-creation.
@@ -153,7 +174,7 @@ async fn round_trip_with_headers_and_key() {
         .await
         .expect("subscribe");
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "order-1");
     broker
@@ -392,7 +413,7 @@ async fn shared_key_lands_on_one_partition() {
         .expect("subscribe");
 
     for i in 0..COUNT {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_KEY_HEADER, "same-key");
         broker
             .publisher(KafkaPublish::default())
@@ -547,7 +568,7 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
         .expect("subscribe dlq");
 
     // Simulate the second delivery of a message: one retry hop already behind it.
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(RETRY_COUNT_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
@@ -642,9 +663,12 @@ async fn seek_back_redelivers_in_place_and_caps_deliveries() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batches_preserve_order_and_settle_per_message() {
-    use ruststream::{BatchSubscriber as _, Buffered, SubscriptionSource as _};
+    use ruststream::{BatchSubscriber as _, SubscriptionSource as _};
 
     const COUNT: usize = 12;
+    /// Smaller than the run, so the run cannot come back as one batch: the cap is what is
+    /// under test.
+    const BATCH: usize = 5;
     let Some(url) = kafka_url() else { return };
     let topic = unique("batches");
     create_topic(&url, &topic, 1).await;
@@ -654,12 +678,11 @@ async fn batches_preserve_order_and_settle_per_message() {
         publish(&broker, &topic, format!("b{i:02}").as_bytes()).await;
     }
 
-    let source = Buffered::new(tracked(&topic, &unique("group")))
-        .max_size(NonZeroUsize::new(5).expect("non-zero cap"))
-        .max_wait(Duration::from_millis(50));
+    let source = tracked(&topic, &unique("group"));
     let mut subscriber = source.subscribe(&broker).await.expect("subscribe");
 
-    let mut stream = Box::pin(subscriber.batches());
+    let mut stream =
+        Box::pin(subscriber.batches(NonZeroUsize::new(BATCH).expect("non-zero batch")));
     let mut payloads = Vec::new();
     while payloads.len() < COUNT {
         let batch = tokio::time::timeout(WAIT, stream.next())
@@ -669,8 +692,8 @@ async fn batches_preserve_order_and_settle_per_message() {
             .expect("batch ok");
         assert!(!batch.is_empty(), "a yielded batch must not be empty");
         assert!(
-            batch.len() <= 5,
-            "the batch cap must hold, got {}",
+            batch.len() <= BATCH,
+            "a batch must never exceed the size it was opened at, got {}",
             batch.len()
         );
         for msg in batch {
@@ -850,12 +873,14 @@ struct Tagged {
     tag: String,
 }
 
-/// Collects handled tags and wakes the test once the expected count for this run arrived.
+/// Collects handled tags and wakes the test once the expected count for this run arrived, and
+/// remembers the widest batch it was handed so the size cap can be asserted afterwards.
 #[derive(Clone)]
 struct BatchPoolState {
     prefix: String,
     expected: usize,
     seen: Arc<Mutex<Vec<String>>>,
+    widest_batch: Arc<AtomicUsize>,
     done: Arc<Notify>,
 }
 
@@ -870,32 +895,38 @@ impl BatchPoolState {
             self.done.notify_one();
         }
     }
+
+    fn saw_batch(&self, len: usize) {
+        self.widest_batch.fetch_max(len, Ordering::SeqCst);
+    }
 }
 
-// Pages from a fixed topic, up to four in flight at once; the state filters by the run's
+// Batches from a fixed topic, up to four in flight at once; the state filters by the run's
 // prefix so reruns against a long-lived cluster stay isolated.
 #[subscriber(
-    // Native batches: a page is one delivery plus whatever librdkafka already fetched. A
-    // fixed group keeps reruns idempotent (only this run's fresh publishes arrive), and the
-    // state filters by the run prefix.
-    batch(
-        KafkaTopic::new("e2e-batch-pool")
-            .group("e2e-batch-pool-group")
-            .start(StartOffset::Earliest)
-            .commit(Commit::Tracked)
-    ),
+    // Native batches: a batch is one delivery plus whatever librdkafka already fetched, capped by
+    // the size the mount site names below; the slice parameter here is what asks for one. A fixed
+    // group keeps reruns idempotent (only this run's fresh publishes arrive), and the state
+    // filters by the run prefix.
+    KafkaTopic::new("e2e-batch-pool")
+        .group("e2e-batch-pool-group")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked),
     workers(4)
 )]
-async fn pool_page(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerResult {
+async fn pool_batch(items: &[Tagged], ctx: &mut Context<'_, (), BatchPoolState>) -> HandlerOutcome {
+    ctx.state().saw_batch(items.len());
     for item in items {
         ctx.state().record(&item.tag);
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn batch_pages_with_a_worker_pool_process_everything() {
+async fn batches_with_a_worker_pool_process_everything() {
     const COUNT: usize = 20;
+    /// Smaller than the run, so a batch that ignored the mount site's size would show up here.
+    const BATCH: usize = 6;
     let Some(url) = kafka_url() else { return };
     create_topic(&url, "e2e-batch-pool", 4).await;
 
@@ -915,13 +946,14 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
         prefix: run.clone(),
         expected: COUNT,
         seen: Arc::new(Mutex::new(Vec::new())),
+        widest_batch: Arc::new(AtomicUsize::new(0)),
         done: Arc::new(Notify::new()),
     };
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(pool_page);
+            b.include(pool_batch.batch(nonzero!(6)));
         });
 
     let done = Arc::clone(&state.done);
@@ -936,6 +968,11 @@ async fn batch_pages_with_a_worker_pool_process_everything() {
     seen.sort();
     let expected: Vec<String> = (0..COUNT).map(|i| format!("{run}-{i:02}")).collect();
     assert_eq!(seen, expected, "every message must be handled exactly once");
+    let widest = state.widest_batch.load(Ordering::SeqCst);
+    assert!(
+        widest <= BATCH,
+        "a batch must never exceed the size the mount site named, got {widest}",
+    );
 }
 
 #[derive(Debug, Deserialize)]
@@ -986,9 +1023,9 @@ impl KeyedLanesState {
 async fn keyed_lane(
     event: &KeyedEvent,
     ctx: &mut Context<'_, (), KeyedLanesState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     ctx.state().record(&event.key, event.seq);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1003,7 +1040,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
     for seq in 0..PER_KEY {
         for k in 0..KEYS {
             let key = format!("{run}-k{k}");
-            let mut headers = Headers::new();
+            let mut headers = HeaderMap::new();
             headers.insert(PARTITION_KEY_HEADER, key.clone());
             broker
                 .publisher(KafkaPublish::default())
@@ -1085,9 +1122,9 @@ impl PartitionLaneState {
 async fn partition_lane(
     event: &KeyedEvent,
     ctx: &mut Context<'_, (), PartitionLaneState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     ctx.state().record(&event.key, event.seq);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1102,7 +1139,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
         // Alternating record keys: under record-key lanes these could interleave, but the
         // partition lane must keep the single partition's global order.
         let key = format!("{run}-{}", if seq % 2 == 0 { "even" } else { "odd" });
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_KEY_HEADER, key.clone());
         broker
             .publisher(KafkaPublish::default())
@@ -1410,7 +1447,7 @@ async fn explicit_partition_header_targets_the_partition() {
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert(PARTITION_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
@@ -1428,7 +1465,7 @@ async fn explicit_partition_header_targets_the_partition() {
     msg.ack().await.expect("ack");
 
     // A malformed partition value fails the publish clearly instead of falling back.
-    let mut bad = Headers::new();
+    let mut bad = HeaderMap::new();
     bad.insert(PARTITION_HEADER, "one");
     let err = broker
         .publisher(KafkaPublish::default())
@@ -1450,7 +1487,7 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
     let broker = connected_broker(&url).await;
 
     for (payload, partition) in [(b"p0".as_slice(), 0), (b"p1", 1)] {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_HEADER, partition.to_string());
         broker
             .publisher(KafkaPublish::default())
@@ -1600,17 +1637,17 @@ struct AssignedLaneState {
 async fn assigned_lane(
     payload: &OrderPayload,
     ctx: &mut ruststream::runtime::Context<'_, (), AssignedLaneState>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     let state = ctx.state().clone();
     {
         let mut seen = state.seen.lock().expect("seen mutex poisoned");
         seen.push((payload.partition, payload.seq));
         if seen.len() < state.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     state.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
@@ -1632,7 +1669,7 @@ async fn manual_assignment_composes_with_partition_lanes() {
     let broker = connected_broker(&url).await;
     for seq in 0..PER_PARTITION {
         for partition in [0, 1] {
-            let mut headers = Headers::new();
+            let mut headers = HeaderMap::new();
             headers.insert(PARTITION_HEADER, partition.to_string());
             let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
             broker
@@ -1967,7 +2004,7 @@ struct DeferredRetryProbe {
 async fn deferred_retry(
     _order: &OrderPayload,
     ctx: &mut Context<'_, (), DeferredRetryProbe>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     let count = ctx
         .headers()
         .get_str(RUNTIME_RETRY_COUNT_HEADER)
@@ -1979,10 +2016,10 @@ async fn deferred_retry(
         .expect("seen mutex poisoned")
         .push(count.clone());
     if count.is_none() {
-        return HandlerResult::retry_after(Duration::from_millis(200));
+        return HandlerOutcome::retry_after(Duration::from_millis(200));
     }
     probe.done.notify_one();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2073,16 +2110,16 @@ async fn ctx_di(
     Ctx(partition): Ctx<keys::Partition>,
     Ctx(offset): Ctx<keys::Offset>,
     State(probe): State<CtxDiProbe>,
-) -> HandlerResult {
+) -> HandlerOutcome {
     {
         let mut seen = probe.seen.lock().expect("seen mutex poisoned");
         seen.push((partition, offset));
         if seen.len() < probe.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     probe.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2136,6 +2173,116 @@ async fn ctx_extractors_inject_delivery_fields() {
     );
 }
 
+/// Publishes one record inside the lane's own transaction. Generic over the capability rather
+/// than over a publisher type: an `Out` slot entry has to satisfy the bound, not merely resolve
+/// the method, which is what the arena wiring must keep true.
+async fn forward_through_lane<L: PartitionLanes>(
+    lanes: &L,
+    partition: i32,
+    order: &OrderPayload,
+) -> Result<(), KafkaError> {
+    let publisher = lanes.for_partition(partition).await?;
+    publisher.begin_transaction().await?;
+    let topic = std::env::var("LANES_OUT_TOPIC").expect("out topic env");
+    let payload = format!(r#"{{"partition":{},"seq":{}}}"#, order.partition, order.seq);
+    if let Err(err) = publisher
+        .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+        .await
+    {
+        publisher.abort().await.ok();
+        return Err(err);
+    }
+    publisher.commit().await
+}
+
+// A broker-defined capability through the `Out` arena: the handler names `PartitionLanes` and
+// never the concrete `TransactionalPartitions` the `per_partition()` policy pairs into.
+#[subscriber(
+    KafkaTopic::new(std::env::var("LANES_IN_TOPIC").expect("topic env"))
+        .group("lanes-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn lane_forward(
+    order: &OrderPayload,
+    Ctx(partition): Ctx<keys::Partition>,
+    Out(lanes): Out<impl PartitionLanes>,
+) -> HandlerOutcome {
+    if forward_through_lane(lanes, partition, order).await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lanes_slot_publishes_through_its_partition_transaction() {
+    const COUNT: usize = 2;
+
+    let Some(url) = kafka_url() else { return };
+    let input = unique("lanes-in");
+    let output = unique("lanes-out");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &output, 1).await;
+    unsafe {
+        std::env::set_var("LANES_IN_TOPIC", &input);
+        std::env::set_var("LANES_OUT_TOPIC", &output);
+    }
+
+    let broker = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(&input, payload.as_bytes()))
+            .await
+            .expect("publish input");
+    }
+
+    let app = RustStream::new(AppInfo::new("lanes", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            b.include(lane_forward)
+                .out(
+                    DefaultSlot,
+                    KafkaPublish::default()
+                        .transactional_id(unique("lanes-txn"))
+                        .per_partition(),
+                )
+                .build();
+        },
+    );
+
+    // The lane's transaction commits before a `read_committed` reader sees anything, so the
+    // output stream is both the signal and the assertion: the run ends when it has delivered
+    // what the lanes committed, and each record is checked as it arrives.
+    let mut out_subscriber = broker
+        .subscribe_with(tracked(&output, &unique("reader")))
+        .await
+        .expect("subscribe output");
+    let consume = async move {
+        let mut stream = Box::pin(out_subscriber.stream());
+        for seq in 0..COUNT {
+            let msg = next_message(&mut stream).await;
+            assert_eq!(
+                msg.payload(),
+                format!(r#"{{"partition":0,"seq":{seq}}}"#).as_bytes(),
+                "the lane must forward its partition's records in order",
+            );
+            msg.ack().await.expect("ack output");
+        }
+    };
+    App::run_until(app, consume).await.expect("run");
+
+    broker.shutdown().await.expect("shutdown");
+}
+
+// The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
+// batch-scoped context - is application-level behaviour, so it is exercised over the in-process
+// transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
+// that a real consumer moves, and that the offset bookkeeping follows it (see
+// `a_seek_moves_the_tracked_watermark_with_the_read_position` and
+// `positions_reach_every_assigned_partition_and_report_bad_targets` above).
+
 // The EOS publishing-handler sugar: a bare handler returns the reply, and the pipeline's
 // reply publisher pairs it with the consumed offset - no Ctx, no manual publish.
 #[subscriber(
@@ -2184,13 +2331,13 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     // have committed records and offsets atomically by then.
     // The pipeline is pure policy here; the runtime pairs it (and its reply publisher) with the
     // connected broker at startup.
-    let replies_wiring = KafkaEosPublish::new(&pipeline_id)
-        .commit_interval(Duration::from_millis(50))
-        .replies();
+    let pipeline = KafkaEosPublish::new(&pipeline_id).commit_interval(Duration::from_millis(50));
     let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(eos_sugar).publisher(replies_wiring);
+            b.include(eos_sugar)
+                .out(Reply, pipeline)
+                .transform(EosReplies);
         },
     );
 

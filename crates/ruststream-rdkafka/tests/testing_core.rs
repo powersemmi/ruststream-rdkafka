@@ -1,28 +1,41 @@
-//! Integration tests for the in-process Kafka test broker.
+//! The in-process Kafka test broker, and the application-level scenarios it carries.
 //!
-//! Most cases drive the public surface (`KafkaTestBroker`, `KafkaTestPublisher`,
-//! `KafkaTestSubscriber`) directly, to keep failures localised; the `TestApp`-driven cases at
-//! the end exercise the `TestableBroker` quiescence wiring (coordinator install,
-//! `enqueued`/`consumed`) through the harness. Real Kafka semantics (groups, partitions,
-//! committed positions, start offsets) live in `tests/integration_rdkafka.rs` against a live
-//! cluster.
+//! Anything whose subject is a service - a handler reading its broker context, repositioning its
+//! own subscription, publishing through an `Out` slot - runs here on `TestApp`, because that is
+//! the level it lives at: real handlers, the real dispatch path, harness assertions, and no
+//! cluster. The cases that drive `KafkaTestBroker` / `KafkaTestPublisher` /
+//! `KafkaTestSubscriber` directly are the ones whose subject IS that transport (its routing
+//! contract, its settlement, what its seeker refuses).
+//!
+//! Real Kafka semantics - consumer groups, partitions, committed positions across restarts,
+//! transactions and the exactly-once pipeline - live in `tests/integration_rdkafka.rs` against a
+//! live cluster.
 
 #![cfg(feature = "testing")]
 
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use ruststream::runtime::{AppInfo, HandlerResult, RustStream};
+use ruststream::codec::{Codec as _, DefaultCodec};
+use ruststream::nonzero;
+use ruststream::runtime::{
+    AppInfo, Ctx, HandlerOutcome, Out, Reply, RustStream, SubscriberSettings as _,
+};
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, expect_published};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, Headers, IncomingMessage, OutgoingMessage,
-    Partitioned, Publisher, Subscriber,
+    Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutSlot, Outgoing,
+    OutgoingMessage, Partitioned, Publisher, Seeker as _, Subscriber,
 };
+use ruststream_rdkafka::context::keys::{Position, SeekHandle};
+use ruststream_rdkafka::context::{KafkaBatchContext, KafkaContext};
 use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
-use ruststream_rdkafka::{KafkaError, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER};
+use ruststream_rdkafka::{
+    KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
+};
 use serde::{Deserialize, Serialize};
 
 const WAIT: Duration = Duration::from_secs(1);
@@ -135,7 +148,7 @@ async fn headers_and_partition_key_propagate() {
     let broker = connected().await;
     let mut subscriber = broker.subscribe_with("keyed").await.expect("subscribe");
 
-    let mut headers = Headers::new();
+    let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "k-1");
     broker
@@ -269,17 +282,17 @@ struct Order {
 }
 
 #[subscriber("orders")]
-async fn ack_order(order: &Order) -> HandlerResult {
+async fn ack_order(order: &Order) -> HandlerOutcome {
     let _ = order;
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 // The descriptor form must mount against the test broker through the testing-gated
 // `SubscriptionSource<ConnectedKafkaTestBroker>` impl on `KafkaTopic`.
 #[subscriber(KafkaTopic::new("payments"))]
-async fn ack_payment(order: &Order) -> HandlerResult {
+async fn ack_payment(order: &Order) -> HandlerOutcome {
     let _ = order;
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 /// Counts how many times the retry handler ran, so the test can wire it as typed app state.
@@ -287,14 +300,14 @@ async fn ack_payment(order: &Order) -> HandlerResult {
 struct Attempts(Arc<AtomicUsize>);
 
 #[subscriber(KafkaTopic::new("retry"))]
-async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerResult {
+async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerOutcome {
     let _ = order;
     // Requeue once, then acknowledge: exercises the `nack(requeue = true)` -> `enqueued`
     // re-count balanced against the delivery's `Drop` -> `consumed` decrement.
     if ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0 {
-        HandlerResult::retry()
+        HandlerOutcome::retry()
     } else {
-        HandlerResult::Ack
+        HandlerOutcome::ack()
     }
 }
 
@@ -323,12 +336,12 @@ async fn test_app_drives_kafka_test_broker_to_quiescence() {
         .subscriber("orders")
         .assert_called_once()
         .with(&Order { id: 1 })
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
     tb.broker::<KafkaTestBroker>()
         .subscriber("payments")
         .assert_called_once()
         .with(&Order { id: 2 })
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
 }
@@ -338,7 +351,7 @@ async fn test_app_drives_kafka_test_broker_to_quiescence() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_app_requeue_stays_balanced() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
-        .on_startup(|()| async { Ok::<_, std::convert::Infallible>(Attempts::default()) })
+        .on_startup(|()| async { Ok::<_, Infallible>(Attempts::default()) })
         .with_broker(KafkaTestBroker::new(), |b| {
             b.include(retry_then_ack);
         });
@@ -352,7 +365,7 @@ async fn test_app_requeue_stays_balanced() {
     tb.broker::<KafkaTestBroker>()
         .subscriber("retry")
         .assert_called(2)
-        .settled(HandlerResult::Ack);
+        .settled(HandlerOutcome::ack());
 
     tb.shutdown().await.expect("shutdown");
 }
@@ -392,14 +405,13 @@ impl<C> ruststream::runtime::PublishTransform<C> for KeyStamp {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_stamps_cycling_partitions() {
-    use ruststream::runtime::TypedPublisher;
     use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
-            let work_items =
-                TypedPublisher::new(KafkaPublish::default()).transform(RoundRobin::partitions(2));
-            b.include(plan).publisher(work_items);
+            b.include(plan)
+                .out(Reply, KafkaPublish::default())
+                .transform(RoundRobin::partitions(2));
         });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -432,17 +444,16 @@ async fn round_robin_stamps_cycling_partitions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_leaves_keyed_replies_alone() {
-    use ruststream::runtime::TypedPublisher;
     use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
-            let keyed_items = TypedPublisher::new(KafkaPublish::default())
+            b.include(plan_keyed)
+                .out(Reply, KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
-            b.include(plan_keyed).publisher(keyed_items);
         });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -463,6 +474,345 @@ async fn round_robin_leaves_keyed_replies_alone() {
     assert!(
         messages[0].headers().get(PARTITION_HEADER).is_none(),
         "a keyed reply keeps its key-implied placement",
+    );
+}
+
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "slot-work-items")]
+struct SlotItem {
+    order_id: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(SlotItem)]
+struct Work;
+
+// A publisher-shaped slot: the handler sends through the slot entry itself, so the harness
+// attributes the publish to the marker. This is the near side of the capture boundary that
+// `PartitionLanes` sits on the far side of - a lane hands out a publisher of its own, and what
+// that publisher sends reaches the broker's publish log without a slot record.
+#[subscriber("slot-orders")]
+async fn plan_through_slot(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher, Work>,
+) -> HandlerOutcome {
+    if out
+        .message(&SlotItem { order_id: order.id })
+        .publish()
+        .await
+        .is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(plan_through_slot)
+                .out(Work, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("slot-orders", &PlanOrder { id: 5 })
+        .await
+        .expect("publish");
+
+    // Through the slot: recorded against the marker, and visible on the wire.
+    tb.out::<Work>().assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<SlotItem>("slot-work-items")
+        .assert_called_once();
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+// ------------------------------------------------------------------ repositioning a service
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Job {
+    id: u64,
+}
+
+/// The handler's own rewind budget: one replay of a stuck record, then let it through. A service
+/// spends a budget like this for real, and holding it in typed app state is what keeps the
+/// handler under test a plain handler.
+#[derive(Clone, Default)]
+struct Rewinds(Arc<AtomicUsize>);
+
+/// Reads both delivery-context keys the seek contract publishes: `Position` names where this
+/// record sits, and `SeekHandle` moves the subscription there.
+#[subscriber(KafkaTopic::new("seek-jobs"))]
+async fn rewind_stuck_job(
+    job: &Job,
+    ctx: &mut Context<'_, KafkaContext, Rewinds>,
+    Ctx(here): Ctx<Position>,
+    Ctx(seeker): Ctx<SeekHandle>,
+) -> HandlerOutcome {
+    if job.id == 1 && ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0 {
+        // The delivery's own coordinates: seeking to them redelivers exactly this record.
+        if seeker.seek(here).await.is_err() {
+            return HandlerOutcome::retry();
+        }
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handler_replays_its_own_delivery_position_through_the_context() {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
+        .with_broker(KafkaTestBroker::new(), |b| {
+            b.include(rewind_stuck_job);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    for id in 0..3 {
+        tb.broker::<KafkaTestBroker>()
+            .publish("seek-jobs", &Job { id })
+            .await
+            .expect("publish drives the reaction, replay included, to quiescence");
+    }
+
+    // Job 1 rewound to itself, so it and everything behind it on the log came back once.
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("seek-jobs")
+        .received::<Job>()
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![0, 1, 1, 2],
+        "seeking to a delivery's own position must redeliver it and the log suffix behind it",
+    );
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("seek-jobs")
+        .settled(HandlerOutcome::ack());
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// A batch body gets the subscription-scoped context: the same `SeekHandle` key and no position,
+/// because a batch spans many records. Where to resume rides the elements, and the budget bounds
+/// the replay the way a service's would.
+#[subscriber(KafkaTopic::new("seek-batches"))]
+async fn drain_batches(
+    cursors: &[Cursor],
+    ctx: &mut Context<'_, KafkaBatchContext, Rewinds>,
+) -> HandlerOutcome {
+    let resume_at = cursors.iter().find_map(|entry| entry.resume_at);
+    if let Some(offset) = resume_at
+        && ctx.state().0.fetch_add(1, Ordering::SeqCst) == 0
+        && ctx
+            .context(SeekHandle)
+            .seek(KafkaPosition::offset(0, offset))
+            .await
+            .is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The producer's cursor contract: an element carrying `resume_at` asks the consumer to
+/// reposition the subscription there once the batch is settled.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Cursor {
+    id: u64,
+    resume_at: Option<i64>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_batch_body_repositions_through_its_subscription_context() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // The whole run is in the log before the subscription opens, so the opening replay is what
+    // the body batches over. The marker asks to resume from offset 0, so whatever the window
+    // makes of the run, the record the target names is delivered again - and exactly once more,
+    // because the budget is spent by then.
+    for (id, resume_at) in [(0, Some(0)), (1, None)] {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "seek-batches",
+                DefaultCodec::default()
+                    .encode(&Cursor { id, resume_at })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
+        .with_broker(broker, |b| {
+            // The mount site names the batch size; the transport honours it, so a batch holds at
+            // most that many records and however few it had ready.
+            b.include(
+                drain_batches
+                    .start_at(KafkaPosition::earliest())
+                    .batch(nonzero!(8)),
+            );
+        });
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the batch and its replay settle");
+
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("seek-batches")
+        .received::<Cursor>()
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect();
+    // How the run is split into batches is the window's business, so the assertion is on the
+    // reposition itself: the sought record came back, once, and the rest of the log kept flowing.
+    assert_eq!(
+        seen.iter().filter(|id| **id == 0).count(),
+        2,
+        "the batch's reposition must replay the record its elements named, got {seen:?}",
+    );
+    assert!(
+        seen.contains(&1),
+        "the log behind the target must keep flowing, got {seen:?}",
+    );
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// Batches a replayed log, so the batches the transport builds are the only thing under test.
+#[subscriber(KafkaTopic::new("batch-sizes"), start_at(KafkaPosition::earliest()))]
+async fn count_batches(jobs: &[Job]) -> HandlerOutcome {
+    let _ = jobs;
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // The whole run is on the log before the subscription opens, so the replay hands the
+    // transport more than one batch's worth at once - which is what a batch size has to cut.
+    for id in 0..5u64 {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "batch-sizes",
+                DefaultCodec::default()
+                    .encode(&Job { id })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker, |b| b.include(count_batches.batch(nonzero!(2))));
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the replayed batches settle");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("batch-sizes")
+        // Two, two, then the remainder: never more than the mount site asked for.
+        .assert_batch_sizes(&[2, 2, 1])
+        .settled(HandlerOutcome::ack());
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// Opens at a fixed log position on every startup, whatever was published before.
+#[subscriber(KafkaTopic::new("audit"), start_at(KafkaPosition::earliest()))]
+async fn replay_audit(job: &Job) -> HandlerOutcome {
+    let _ = job;
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_at_opens_a_subscription_on_the_retained_log() {
+    let broker = KafkaTestBroker::new();
+    let seeded = broker.clone().connect().await.expect("connect");
+    // Published before the app exists: only the start position makes these visible.
+    for id in 0..2 {
+        seeded
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(
+                "audit",
+                DefaultCodec::default()
+                    .encode(&Job { id })
+                    .expect("serializable")
+                    .as_ref(),
+            ))
+            .await
+            .expect("seed");
+    }
+
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
+        b.include(replay_audit);
+    });
+    let tb = TestApp::start(app).await.expect("start");
+    tb.settle().await.expect("the opening replay settles");
+
+    let seen: Vec<u64> = tb
+        .broker::<KafkaTestBroker>()
+        .subscriber("audit")
+        .received::<Job>()
+        .into_iter()
+        .map(|job| job.id)
+        .collect();
+    assert_eq!(
+        seen,
+        vec![0, 1],
+        "start_at(earliest) must replay what the log held before the service started",
+    );
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn positions_the_transport_cannot_resolve_are_refused() {
+    use ruststream::Seekable as _;
+
+    let broker = connected().await;
+    let subscriber = broker
+        .subscribe_with("seek-vocab")
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+
+    // No record timestamps in-process, and one partition per topic: both are refused rather than
+    // silently resolved to something the transport made up.
+    let by_time = seeker
+        .seek(KafkaPosition::timestamp(1_767_000_000_000))
+        .await
+        .expect_err("a timestamp position must be refused in-process");
+    assert!(
+        matches!(by_time, KafkaError::InvalidOptions(_)),
+        "{by_time}"
+    );
+
+    let other_partition = seeker
+        .seek(KafkaPosition::offset(3, 0))
+        .await
+        .expect_err("a partition other than 0 must be refused in-process");
+    assert!(
+        matches!(other_partition, KafkaError::InvalidOptions(_)),
+        "{other_partition}",
+    );
+
+    let other_topic = seeker
+        .seek(KafkaPosition::topic_offset("elsewhere", 0, 0))
+        .await
+        .expect_err("a topic this subscription does not read must be refused");
+    assert!(
+        matches!(other_topic, KafkaError::InvalidOptions(_)),
+        "{other_topic}",
     );
 }
 

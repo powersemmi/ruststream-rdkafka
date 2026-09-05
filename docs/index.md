@@ -6,8 +6,8 @@
 
 ```toml
 [dependencies]
-ruststream = { version = "0.6", features = ["macros", "json"] }
-ruststream-rdkafka = "0.6"
+ruststream = { version = "0.7", features = ["macros", "json"] }
+ruststream-rdkafka = "0.7"
 serde = { version = "1", features = ["derive"] }
 ```
 
@@ -61,9 +61,10 @@ shutdown instead of succeeding against a dead connection.
 Publishers follow the same split. `KafkaPublish` - and its `transactional_id`, `per_partition`,
 and `KafkaEosPublish` transitions - is a **policy**: pure declaration, constructible anywhere,
 with no publish surface of its own. The include site names the policy
-(`b.include(handler).publisher(policy)`), and the runtime pairs it against the connected broker
-into the **live** publisher the handler receives. A handler that only replies to its
-`publish("dest")` topic names nothing at all: the broker's default policy is used.
+(`b.include(handler).out(Reply, policy)` for the reply, `.out(marker, policy)` for an `Out<..>`
+slot), and the runtime pairs it against the connected broker into the **live** publisher the
+handler receives. A handler that only replies to its `publish("dest")` topic names nothing at
+all: the broker's default policy is used.
 
 ## Capabilities
 
@@ -72,12 +73,12 @@ The framework's optional capability traits, and which of them this broker implem
 | Capability | Native | Detail |
 |---|---|---|
 | `Subscribe` | yes | A bare-string `#[subscriber("orders")]` resolves through the broker's [default consumer group](topics.md#consumer-groups). |
-| `BatchSubscriber` | yes | A page is one delivery plus everything librdkafka has already fetched, with no added waiting: [Batches](topics.md#batches). |
+| `BatchSubscriber` | yes | A batch is one delivery plus everything librdkafka has already fetched, with no added waiting, cut off at the size the mount site names: [Batches](topics.md#batches). |
 | `TransactionalPublisher` | yes | `KafkaTransactionalPublisher` drives the producer's transaction API, one open transaction per handle: [Transactions](publishing.md#transactions). |
 | `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows use [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
 | `RequestReply` | no | The protocol has no reply correlation; request/reply on Kafka is an application-level reply topic plus a correlation header. |
 | `Partitioned` | yes | The partition key of a delivery is the record's native Kafka key: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
-| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, and every delivery carries its topic-partition-offset: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
+| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, reached from a handler through the `SeekHandle` context key next to the delivery's own `Position`; the in-process test broker mints the same seeker over its retained log, so a service that replays is testable without a cluster: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
 | `DescribeServer` | yes | The broker reports its bootstrap servers under the `kafka` protocol for generated AsyncAPI documents. |
 
 ## Scaffold a service

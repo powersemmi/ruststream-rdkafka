@@ -8,12 +8,22 @@ never holds a publisher that is not connected yet. A plain live publisher rides 
 shared producer (a transactional one gets its own, fenced by its id), and each publish awaits
 the cluster's delivery report, so an `Ok` means Kafka accepted the record.
 
+Two vocabularies, and they belong in different files. A handler body imports
+`ruststream::prelude` and bounds its injected slot with the **capability** it needs
+(`Out<impl Publisher>`, `Out<impl TransactionalPublisher>`), so it names no broker type at all. A
+mount site imports `ruststream_rdkafka::prelude`, which carries the core one plus the
+**policies** under their concept names - `Publish`, `TransactionalPublish`, `PartitionedPublish`,
+`EosPublish` - which is what the include sites on this page write. An include site therefore
+reads the same on every broker, and moving a service between brokers touches the descriptor
+rather than the wiring.
+
 Where a policy is named:
 
 - `b.include(handler)` alone - a `publish("dest")` handler replies through the broker's default
   policy, `KafkaPublish::default()`.
-- `b.include(handler).publisher(policy)` - the handler's reply publisher, or the publisher its
-  `Out<..>` parameter receives.
+- `b.include(handler).out(Reply, policy)` - the handler's reply publisher.
+- `b.include(handler).out(marker, policy).build()` - the publisher an `Out<..>` parameter
+  receives, named by the slot's marker (`DefaultSlot` when the parameter declares none).
 - `b.after_startup(policy, hook)` - a scope-level hook that runs once with the live publisher,
   after the subscriptions open.
 - `connected.publisher(policy)` - outside the runtime, straight off a broker you connected
@@ -26,6 +36,33 @@ it has no native delayed redelivery (see
 [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)). It resolves the connection
 at startup; used before `connect` it reports `KafkaError::NotConnected`, and after the broker
 shuts down `KafkaError::Closed` - never a silent success.
+
+## The publish builder
+
+Every publisher starts a publish the same way, through the blanket `PublishExt`:
+`message(&value)`, then `to(..)` for the destination, `with_headers(..)` for the headers,
+`with_codec(..)` for a non-default codec, and `publish()` to send. A handler's `Out` parameter, a
+publisher held in application state and a handle taken off the connected broker all publish
+through those calls; only the codec `message(..)` uses differs. There is no bytes entry point:
+an already-encoded payload is a `#[derive(Outgoing, Serialized)]` newtype, which carries its
+bytes through the same call with no codec in the way.
+
+This crate's per-message arguments travel in the publish's headers position, and the publisher
+turns them into native record fields rather than wire headers: the record key and the explicit
+partition below. A placement rule that is not per-message goes on the publisher instead, as a
+`PublishTransform` (`RoundRobin` below).
+
+An `Out` parameter names a capability rather than a publisher type, and this crate declares
+`PartitionLanes`, the capability of handing out one transactional publisher per source partition.
+A handler writes `Out(lanes): Out<impl PartitionLanes>` instead of naming the concrete
+`TransactionalPartitions` that the `per_partition()` policy pairs into (see
+[transaction scopes and worker pools](#transaction-scopes-and-worker-pools)).
+
+That capability is a router, not a publisher: it hands out a publisher rather than sending a
+message, so what a lane publishes leaves through that publisher and lands in the broker's publish
+log rather than in the slot's test record (`tb.out::<Marker>()`) - the same boundary a settled
+owned transaction's buffer has. In tests, assert on the publish log for lane traffic; the slot
+record covers handlers that publish through the slot itself.
 
 ## Record keys
 
@@ -136,7 +173,7 @@ Streams uses for its per-task producers):
 ```
 
 The include site names the base id:
-`.publisher(KafkaPublish::default().transactional_id("billing-svc-1").per_partition())`. Each
+`.out(DefaultSlot, Publish::default().transactional_id("billing-svc-1").per_partition())`. Each
 partition's publisher is created and initialized on its first delivery, so `for_partition` is
 async and reports the initialization failure rather than hiding it.
 
@@ -160,19 +197,23 @@ Three places name one id:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos"
 ```
 
-A publishing handler needs no manual pairing at all: mount it with the pipeline's reply
-publisher, and every reply joins the window paired with its delivery's consumed offset -
+A publishing handler needs no manual pairing at all: name the pipeline as the mount site's
+policy and add the `EosReplies` transform after it, and every reply joins the window paired with
+its delivery's consumed offset -
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos_wiring"
 ```
 
-`KafkaEosPublish::replies()` is a plain `TypedPublisher` over the policy (the explicit spelling
-is `TypedPublisher::new(policy).transform(EosReplies)`), so codecs and further transforms
-compose as usual; `replies_with(codec)` names a non-default codec. For manual publishes from a
-plain handler, take the pipeline as an `Out<EosPipeline>` parameter: `EosPipeline::publish`
-takes the delivery's coordinates explicitly - as a `Ctx<Source>` extractor parameter, like
-every other `KafkaContext` field key.
+`EosReplies` relays the delivery's source coordinates onto the reply, which is what the pipeline
+pairs the two by. It is an ordinary step of the mount site's chain, so `.codec(..)` and further
+`.transform(..)` steps compose around it as usual; leave it off and the first reply reports the
+missing coordinates instead of publishing outside the window. For manual publishes,
+`EosPipeline::publish` takes the delivery's coordinates explicitly instead of reading them off
+the relay header, and a handler gets its own from a `Ctx<Source>` extractor parameter, like
+every other `KafkaContext` field key. Reaching the pipeline through an `Out` slot is not a
+route yet: an `Out` parameter names a capability, never a publisher type, and this crate
+declares no capability for the pipeline's explicit form.
 
 The subscription's `Commit::Transactional("enrich-svc-1")` switches its consumer's own
 committing off (the pipeline owns the offsets) and registers its watermark with the pipeline;

@@ -17,7 +17,7 @@ workspace = true
 [features]
 default = ["json"]
 # Codec forwarders, mirroring the core's feature names: `json` (the default) makes the core's
-# DefaultCodec available, which is what `KafkaEosPublish::replies` encodes with.
+# DefaultCodec available, which is what a mount site with no `.codec(..)` step encodes with.
 json = ["ruststream/json"]
 msgpack = ["ruststream/msgpack"]
 cbor = ["ruststream/cbor"]

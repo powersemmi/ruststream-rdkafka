@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "0.5.*"]
+    branches: [main]
   pull_request:
-    branches: [main, "0.5.*"]
+    branches: [main]
 
 permissions:
   contents: read
@@ -20,28 +20,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, msrv]
+        # The floor, what users build with, and the early warning. Releases in between add
+        # nothing: what fails on a later one fails on the floor too. Keep the floor in step
+        # with `rust-version` in the workspace manifest.
+        toolchain: [stable, beta, "1.88"]
+    # Installing a toolchain does not select it: `rust-toolchain.toml` pins `stable` and
+    # outranks the rustup default the install action sets, so without this every leg would build
+    # on stable and the matrix would prove nothing. RUSTUP_TOOLCHAIN outranks the file.
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      # The MSRV leg follows `rust-version` in Cargo.toml, so an MSRV bump is a one-line change.
-      - name: Resolve toolchain
-        id: toolchain
-        env:
-          TOOLCHAIN: ${{ matrix.toolchain }}
-        run: |
-          if [ "$TOOLCHAIN" = "msrv" ]; then
-            TOOLCHAIN="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)"
-            test -n "$TOOLCHAIN"
-          fi
-          echo "toolchain=$TOOLCHAIN" >> "$GITHUB_OUTPUT"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ steps.toolchain.outputs.toolchain }}
+          toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -53,16 +49,101 @@ jobs:
 
       - name: cargo clippy
         if: matrix.toolchain == 'stable'
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      # Advisory, not a gate: surfaces a lint added by the next clippy release six weeks
+      # before it turns the build red.
+      - name: cargo clippy (beta, advisory)
+        if: matrix.toolchain == 'beta'
+        continue-on-error: true
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: cargo check (no default features)
-        run: cargo check --workspace --no-default-features
+        run: cargo check --locked --workspace --no-default-features
 
       - name: cargo check (all features)
-        run: cargo check --workspace --all-targets --all-features
+        run: cargo check --locked --workspace --all-targets --all-features
 
+      # --no-fail-fast: a failing target must not hide failures in the targets behind it;
+      # the log then lists every red test, not just the first binary's.
       - name: cargo test (in-process only, no live broker)
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
+      # The crate-root missing_docs deny covers item docs; this gate catches what rustc
+      # cannot: broken intra-doc links and redundant targets only rustdoc resolves.
+      - name: cargo doc
+        if: matrix.toolchain == 'stable'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+
+  features:
+    name: Each feature alone
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
+      # Every feature is additive, so each one has to compile on its own: the all-features
+      # build hides an item that reaches for a sibling feature's API without gating itself.
+      # --no-dev-deps: a dev-dependency in scope masks a missing feature gate in the library.
+      # It also rewrites the manifests in place, which is why this is the one job without
+      # --locked.
+      - name: cargo hack check (each feature)
+        run: cargo hack check --workspace --each-feature --no-dev-deps
+
+  minimal-versions:
+    name: Minimal versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly (resolver only)
+        uses: dtolnay/rust-toolchain@nightly
+
+      # The floor, for the build step below. Keep the version in step with
+      # `rust-version` in the workspace manifest.
+      - name: Install the MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The full flag rather than -Z direct-minimal-versions: the narrow one leaves the assembled
+      # graph unverified, and that is what a user builds. The price is that a third-party crate
+      # declaring a bound looser than it compiles against fails here; pin such a crate with a
+      # `cargo update -p <crate> --precise <version>` step, naming the reason. None needed today.
+      - name: Resolve minimal versions
+        run: cargo +nightly update -Z minimal-versions
+
+      # Minimum dependencies on the minimum compiler: the worst case a user can assemble.
+      # Resolution above needs nightly, so only this step drops to the floor. --locked keeps
+      # the minimal resolution: without it cargo would quietly re-resolve it away.
+      - name: Build and test against minimal versions
+        env:
+          RUSTUP_TOOLCHAIN: "1.88"
+        run: |
+          cargo check --locked --workspace --all-targets --all-features
+          cargo test --locked --workspace --all-features --no-fail-fast
 
   broker-integration:
     name: "Broker integration (Kafka)"
@@ -128,6 +209,10 @@ jobs:
             mkdir -p "$dest"
             cargo generate --path "templates/$tpl" \
               --name smoke --destination "$dest" --vcs none
+            # The scaffold manifest is checked in as `Cargo.toml.liquid` so that cargo's git-source
+            # package discovery never parses its placeholder name. Assert that cargo-generate did
+            # drop the suffix, otherwise the append below would quietly write a manifest of its own.
+            test -f "$dest/smoke/Cargo.toml"
             {
               echo ""
               echo "[patch.crates-io]"

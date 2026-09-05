@@ -2,17 +2,18 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
-use ruststream::{AckError, Headers, IncomingMessage, Partitioned, Positioned};
+use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned};
 
 use crate::retry::{
     DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
     RETRY_COUNT_HEADER, Retry, RetryContext,
 };
-use crate::seek::KafkaPosition;
+use crate::seek::{KafkaPosition, KafkaSeeker};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
@@ -80,7 +81,7 @@ pub(crate) enum Settlement {
 #[derive(Debug)]
 pub struct KafkaMessage {
     payload: Bytes,
-    headers: Headers,
+    headers: HeaderMap,
     topic: String,
     partition: i32,
     offset: i64,
@@ -90,6 +91,9 @@ pub struct KafkaMessage {
     /// `LaneKey::RecordKey`.
     lane: Option<Bytes>,
     retry: Option<Arc<RetryContext>>,
+    /// The subscription's own reposition handle, minted when it opened: this is what lets a
+    /// per-delivery context be built from the delivery alone.
+    seeker: Arc<KafkaSeeker>,
 }
 
 impl fmt::Debug for Settlement {
@@ -108,7 +112,7 @@ impl KafkaMessage {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         payload: Bytes,
-        headers: Headers,
+        headers: HeaderMap,
         topic: String,
         partition: i32,
         offset: i64,
@@ -116,6 +120,7 @@ impl KafkaMessage {
         settlement: Settlement,
         lane: Option<Bytes>,
         retry: Option<Arc<RetryContext>>,
+        seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
             payload,
@@ -127,7 +132,13 @@ impl KafkaMessage {
             settlement,
             lane,
             retry,
+            seeker,
         }
+    }
+
+    /// The subscription's reposition handle, for the context built off this delivery.
+    pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
+        Arc::clone(&self.seeker)
     }
 
     /// The topic this record was consumed from.
@@ -264,7 +275,7 @@ impl IncomingMessage for KafkaMessage {
         &self.payload
     }
 
-    fn headers(&self) -> &Headers {
+    fn headers(&self) -> &HeaderMap {
         &self.headers
     }
 
@@ -280,8 +291,8 @@ impl IncomingMessage for KafkaMessage {
     ///
     /// Cancel safe: the watermark update is synchronous, so the future either completed or did
     /// nothing.
-    async fn ack(self) -> Result<(), AckError> {
-        self.settle()
+    fn ack(self) -> impl Future<Output = Result<(), AckError>> {
+        ready(self.settle())
     }
 
     /// Settles negatively. With a [`Retry`] policy configured on the subscription,
