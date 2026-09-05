@@ -396,7 +396,11 @@ where
     /// [`KafkaError::WireFormat`] when `T`'s own schema cannot be built.
     pub async fn register(registry: &SchemaRegistry, subject: &str) -> Result<Self, KafkaError> {
         let schema_id = registry
-            .register(subject, SchemaType::Avro, canonical_form::<T>()?)
+            .register(
+                subject,
+                SchemaType::Avro,
+                schema_json(prepared::<T>()?.schema)?,
+            )
             .await?;
         Ok(Self {
             schema_id,
@@ -413,7 +417,11 @@ where
     /// startup, naming the subject rather than failing on its first message.
     pub async fn resolve(registry: &SchemaRegistry, subject: &str) -> Result<Self, KafkaError> {
         let schema_id = registry
-            .lookup_id(subject, SchemaType::Avro, canonical_form::<T>()?)
+            .lookup_id(
+                subject,
+                SchemaType::Avro,
+                schema_json(prepared::<T>()?.schema)?,
+            )
             .await?;
         Ok(Self {
             schema_id,
@@ -443,9 +451,14 @@ where
     }
 }
 
-/// The canonical form of `T`'s schema: what the registry stores and compares subjects by.
-fn canonical_form<T: AvroSchema + Send + Sync + 'static>() -> Result<String, KafkaError> {
-    Ok(prepared::<T>()?.schema.canonical_form())
+/// The JSON definition a schema is registered under.
+///
+/// Deliberately not `Schema::canonical_form`: the Parsing Canonical Form keeps only what two
+/// schemas must agree on to be *the same* schema, and drops field defaults, aliases, docs and
+/// logical types. Those are exactly what a reader resolves an older writer's datum with, so a
+/// subject registered in canonical form can never carry an evolution.
+pub(crate) fn schema_json(schema: &Schema) -> Result<String, KafkaError> {
+    serde_json::to_string(schema).map_err(KafkaError::wire_format)
 }
 
 /// The parsed Avro schema of a registered one, rejecting the other flavors by name.
