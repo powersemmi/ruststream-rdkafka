@@ -116,7 +116,9 @@ impl KafkaError {
         Self::SchemaRegistry(Box::new(err))
     }
 
-    #[cfg(feature = "schema-registry")]
+    // Only a format's own encoder produces one of these; the envelope's own failures come
+    // through `malformed`, which the frame types report with no format feature enabled.
+    #[cfg(any(feature = "avro", feature = "protobuf"))]
     pub(crate) fn wire_format(err: impl StdError + Send + Sync + 'static) -> Self {
         Self::WireFormat(Box::new(err))
     }

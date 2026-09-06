@@ -285,3 +285,93 @@ async fn live_protobuf_lanes_frame_what_the_registry_can_read() {
     );
     assert_ne!(reply_id, 0, "the reply framed under a resolved schema id");
 }
+
+/// The same shape in process, with no cluster and no registry: what a service's own unit tests
+/// look like, and the only lane coverage that runs where a broker is not available.
+#[cfg(feature = "testing")]
+mod in_process {
+    use ruststream::prelude::*;
+    use ruststream::runtime::{AppInfo, RustStream};
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::testing::KafkaTestBroker;
+    use ruststream_rdkafka::{IncomingFrame, KafkaTopic, OutgoingFrame, protobuf};
+
+    use super::{Confirmation, Order};
+
+    /// The ids a registry would have assigned. Reading needs none of this; the publish side
+    /// needs one number, so the test names it instead of standing a registry up.
+    const ORDERS_SCHEMA_ID: u32 = 3;
+    const CONFIRMATIONS_SCHEMA_ID: u32 = 7;
+
+    #[derive(Clone)]
+    struct Wiring {
+        confirmations: protobuf::Subject<Confirmation>,
+    }
+
+    #[derive(FromRef)]
+    struct Orders {
+        wiring: Wiring,
+    }
+
+    #[subscriber(
+        KafkaTopic::new("in-process-orders"),
+        publish("in-process-confirmations")
+    )]
+    async fn confirm_in_process(
+        frame: &IncomingFrame<'_>,
+        State(wiring): State<Wiring>,
+    ) -> Result<OutgoingFrame, HandlerOutcome> {
+        let order: Order = protobuf::decode_framed(frame).map_err(|_| HandlerOutcome::drop())?;
+        wiring
+            .confirmations
+            .frame(&Confirmation {
+                id: order.id,
+                item: order.item,
+            })
+            .map_err(|_| HandlerOutcome::drop())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_lane_handler_round_trips_on_the_test_broker() {
+        let wiring = Wiring {
+            confirmations: protobuf::Subject::pinned(CONFIRMATIONS_SCHEMA_ID, &[0]),
+        };
+        let app = RustStream::new(AppInfo::new("proto-lane", "0.0.0"))
+            .on_startup(async move |()| Ok::<_, std::io::Error>(Orders { wiring }))
+            .with_broker(KafkaTestBroker::new(), |b| {
+                b.include(confirm_in_process);
+            });
+        let tb = TestApp::start(app).await.expect("start");
+
+        // An `OutgoingFrame` publishes like any other typed value, and carries its own bytes, so
+        // the injection puts the exact wire form on the topic.
+        let seeded = protobuf::Subject::<Order>::pinned(ORDERS_SCHEMA_ID, &[0])
+            .frame(&Order {
+                id: 42,
+                item: "anvil".to_owned(),
+            })
+            .expect("frame");
+        tb.message(&seeded)
+            .to("in-process-orders")
+            .publish()
+            .await
+            .expect("publish drives the handler to quiescence");
+
+        let published = tb
+            .broker::<KafkaTestBroker>()
+            .published::<()>("in-process-confirmations")
+            .assert_called_once();
+        let reply =
+            IncomingFrame::from_payload(published.messages()[0].payload()).expect("framed reply");
+        assert_eq!(reply.schema_id(), CONFIRMATIONS_SCHEMA_ID);
+        assert_eq!(
+            protobuf::decode_framed::<Confirmation>(&reply).expect("decode"),
+            Confirmation {
+                id: 42,
+                item: "anvil".to_owned(),
+            },
+        );
+
+        tb.shutdown().await.expect("shutdown");
+    }
+}

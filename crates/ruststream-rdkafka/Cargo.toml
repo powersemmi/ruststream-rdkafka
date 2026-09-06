@@ -111,8 +111,20 @@ name = "kafka_avro"
 required-features = ["avro"]
 
 [[example]]
+name = "kafka_avro_lanes"
+required-features = ["avro"]
+
+[[example]]
 name = "kafka_protobuf"
 required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_lanes_testing"
+required-features = ["protobuf", "testing"]
+
+[[example]]
+name = "kafka_lanes_manual"
+required-features = ["protobuf", "testing"]
 
 [[example]]
 name = "kafka_testing"
