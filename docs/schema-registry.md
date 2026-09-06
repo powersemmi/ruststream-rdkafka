@@ -3,27 +3,103 @@
 Kafka deployments standardized on Confluent Schema Registry frame their payloads with the
 Confluent wire format - a zero magic byte, a big-endian 4-byte schema id, then the encoded
 datum - and keep the schemas themselves in the registry. The `schema-registry` cargo feature
-covers both halves, and there are two ways to consume them.
+covers both halves, and there are three ways to consume them. **Reach for the codec first.**
 
-**The byte lanes** put the wire form in the handler's signature. A delivery arrives as an
-`IncomingFrame` - the schema id and the datum, byte for byte as they came off the topic - and the
-value is made from it by Avro's or Protobuf's own reader, against the schema the envelope names.
-No codec is resolved anywhere, no JSON document exists on the path, and a datum written under an
-older version of the subject is resolved onto the reading type's schema. This is the canonical
-path; the rest of this page's Avro and Protobuf sections lead with it.
-
-**The transcode** converts at the broker's edges instead, so handlers keep plain serde models on
-the default codec and never see the wire. It is the compatibility path: the right choice for a
-service that must not carry generated types or Avro-derived models, at the cost of a JSON hop per
-message and of losing schema resolution, since a JSON handler has no reader schema to resolve
-onto.
+**The codec** puts the schema where a serializer belongs. `AvroCodec` holds the schema, handlers
+stay ordinary functions over ordinary structs, and nothing about the wire appears in a signature -
+which is what a codec is for, and what makes this the default choice. Avro fits the position
+exactly, being a schema-driven format with a serde front end; a JSON payload under the envelope is
+the core's own `JsonCodec` inside `SchemaFramed`.
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_avro_lanes.rs:handler"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:handler"
 ```
 
-The two do not mix on one broker: `KafkaBroker::schema_registry(sr)` attaches the transcode to
-every subscription that broker opens, so a frame-reading handler on it would be handed JSON.
+**The byte lanes** put the wire form in the handler's signature instead: a delivery arrives as an
+`IncomingFrame` - the schema id and the datum, byte for byte as they came off the topic - and the
+handler decides what to make of it. Reach for this when the handler must see the wire itself: a
+topic carrying more than one schema, a router dispatching on the id, a service forwarding frames
+it never decodes. It is also the only path for Protobuf, whose `prost` messages are not serde
+types and so cannot ride a codec at all.
+
+**The transcode** converts at the broker's edges, so handlers keep plain serde models on the
+default codec and never see the wire. It is the compatibility path: the right choice for a service
+that must not carry generated types or Avro-derived models, at the cost of a JSON hop per message
+and of losing schema resolution, since a JSON handler has no reader schema to resolve onto.
+
+None of the three mix on one broker. `KafkaBroker::schema_registry(sr)` attaches the transcode to
+every subscription that broker opens, so a codec or a frame-reading handler on it would be handed
+JSON; the codec and the lanes take `KafkaBroker::schema_prefetch(..)` instead, which resolves
+schemas without touching a payload.
+
+## The codec
+
+The schema source is part of the codec, and there are two.
+
+`AvroCodec::local(schema)` pins one schema: a bare datum on the wire, no envelope, no registry,
+and no I/O anywhere on the path - a fixed-schema topic, and every unit test.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:local"
+```
+
+`AvroCodec::registry(&prefetch, subject)` speaks the Confluent wire format: encoding frames with
+the id its subject holds, and decoding reads each delivery with the writer schema that delivery's
+envelope names - so a producer still on an older version stays readable.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:wiring"
+```
+
+`SchemaPrefetch` is the async half, and it exists because a `Codec` is synchronous on both ends
+while a registry lookup is not. That meeting cannot be arranged inside `encode` or `decode`:
+blocking a runtime worker from a sync function is not an option, and guessing a schema is
+corruption. So the lookups move to the two places that are already async and already know when
+they must happen - the broker's `connect`, for the subjects the codecs publish under, and the
+delivery path, for the writer schema an arriving envelope names. A subject that does not exist
+therefore fails startup rather than the first publish, and an id the prefetch could not resolve
+becomes a decode failure the subscription's failure policy settles, never a silent guess.
+
+### Schema evolution
+
+Reading a datum with its writer schema recovers what the writer wrote, and no more. A field the
+writer never had is filled from a *reader* schema's default, which is Avro's own schema
+resolution: `resolve_onto(schema)` names the schema this consumer expects. Without it a model
+carrying a field the writer lacks fails to deserialize, which is the honest outcome - the value is
+genuinely not on the wire.
+
+### JSON under the envelope
+
+`SchemaFramed::new(&prefetch, subject, JsonCodec)` is the JSON registry codec. The envelope is
+separable here because a JSON document is self-describing: the id says which schema it claims to
+conform to, and the document parses without it. An Avro datum cannot be read without the schema
+its id names, which is why `AvroCodec` owns its envelope rather than riding this wrapper - the
+line between them is that property, not the two formats.
+
+There is no local JSON codec, because there is nothing for it to do: a local JSON Schema would be
+a schema the codec never consults, so the local JSON case is the core's own `JsonCodec`.
+
+The wrapper frames and does not validate. A registry's JSON Schema is a compatibility contract the
+registry enforces between versions, and checking every message against it would mean carrying a
+JSON Schema validator and paying it per delivery - which is why Confluent's own serializer makes
+that optional too. Validation belongs to the inner codec, and the inner codec is named right at
+the call site: pass one that validates instead of a plain one.
+
+### What the client remembers
+
+`SchemaCachePolicy` follows a property of the registry rather than a preference: **a schema id is
+immutable**. An id is assigned per distinct schema definition, globally and by content, so a new
+version of a subject mints a new id and leaves the old one resolving to the old schema for ever,
+while a subject's *latest version* moves whenever someone registers one.
+
+So the two halves need opposite treatment. Id-keyed entries need a bound and no expiry - a TTL
+over them could only cause a refetch returning identical bytes - and the bound matters because a
+consumer meets one id per writer version, which is small in a healthy topology and unbounded in a
+broken one. Subject-keyed entries need an expiry and no bound. Confluent's own clients scope their
+`latest.cache.ttl.sec` to the latest-version caches for the same reason. `SchemaCachePolicy::Disabled`
+turns the cache off entirely - a real configuration rather than a zero TTL in disguise, with the
+consequence that the synchronous codecs, which read the cache and cannot await a miss, cannot work
+under it.
 
 ## The client
 
