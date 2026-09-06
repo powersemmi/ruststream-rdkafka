@@ -52,6 +52,7 @@ impl Prepared {
 /// An enum rather than a registry plus an optional local schema: the two sources answer
 /// different questions (one schema for every message, or one per delivery named by the wire),
 /// they put a different thing on the wire, and no combination of them is meaningful.
+#[derive(Clone)]
 enum SchemaSource {
     /// One schema, known at construction. A bare datum on the wire, and no registry anywhere.
     Local(&'static Prepared),
@@ -59,9 +60,11 @@ enum SchemaSource {
     Registry {
         registry: SchemaRegistry,
         subject: String,
-        /// The schemas met so far, keyed by registry id (the subject's own included). Per codec
-        /// rather than per process: an id means nothing outside the registry that issued it.
-        prepared: Mutex<HashMap<u32, &'static Prepared>>,
+        /// The schemas met so far, keyed by registry id (the subject's own included). Keyed per
+        /// codec rather than per process, because an id means nothing outside the registry that
+        /// issued it - and shared by clones, because the mount machinery clones a codec once per
+        /// registration and those are the same codec by every measure that matters here.
+        prepared: Arc<Mutex<HashMap<u32, &'static Prepared>>>,
     },
 }
 
@@ -118,6 +121,7 @@ enum SchemaSource {
 /// # }
 /// # check().unwrap();
 /// ```
+#[derive(Clone)]
 pub struct AvroCodec {
     source: SchemaSource,
     /// The schema the reading side expects, when it is not the writer's. Applies to decoding
@@ -172,7 +176,7 @@ impl AvroCodec {
             source: SchemaSource::Registry {
                 registry: prefetch.registry().clone(),
                 subject,
-                prepared: Mutex::new(HashMap::new()),
+                prepared: Arc::new(Mutex::new(HashMap::new())),
             },
             reader_schema: None,
         }
