@@ -109,7 +109,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::KafkaError;
 use crate::frame::{IncomingFrame, OutgoingFrame};
-use crate::schema_registry::{RegisteredSchema, SchemaRegistry, SchemaType};
+use crate::schema_registry::{RegisteredSchema, RegistrySubject, SchemaRegistry, SchemaType};
 
 /// One message type's Avro artefacts, built once per type.
 ///
@@ -455,7 +455,36 @@ where
     pub fn schema_id(&self) -> u32 {
         self.schema_id
     }
+}
 
+impl<T> Subject<T>
+where
+    T: AvroSchema + Serialize + RegistrySubject + Send + Sync + 'static,
+{
+    /// [`register`](Self::register) at the subject `T` declares.
+    ///
+    /// # Errors
+    ///
+    /// As [`register`](Self::register).
+    pub async fn register_declared(registry: &SchemaRegistry) -> Result<Self, KafkaError> {
+        Self::register(registry, T::SUBJECT).await
+    }
+
+    /// [`resolve`](Self::resolve) at the subject `T` declares - the byte-lane counterpart of
+    /// [`AvroCodec::for_type`](crate::avro::AvroCodec::for_type), reading the same declaration.
+    ///
+    /// # Errors
+    ///
+    /// As [`resolve`](Self::resolve).
+    pub async fn resolve_declared(registry: &SchemaRegistry) -> Result<Self, KafkaError> {
+        Self::resolve(registry, T::SUBJECT).await
+    }
+}
+
+impl<T> Subject<T>
+where
+    T: AvroSchema + Serialize + Send + Sync + 'static,
+{
     /// Writes `value` as an Avro datum and pairs it with this subject's id, ready to publish.
     ///
     /// Synchronous by construction: the only thing that needed the registry was the id, and

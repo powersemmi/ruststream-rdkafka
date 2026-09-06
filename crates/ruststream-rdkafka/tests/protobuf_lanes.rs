@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use ruststream::prelude::*;
 use ruststream::runtime::{App, AppInfo, Reply, RustStream};
 use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Subscriber};
+use ruststream_rdkafka::schema_registry::RegistrySubject;
 use ruststream_rdkafka::{
     ConnectedKafkaBroker, IncomingFrame, KafkaBroker, KafkaPublish, KafkaTopic, OutgoingFrame,
     SchemaRegistry, SchemaType, StartOffset, protobuf,
@@ -66,6 +67,13 @@ struct Confirmation {
     id: i64,
     #[prost(string, tag = "2")]
     item: String,
+}
+
+// The subject and the Protobuf message name are facts about this type, so they live on it and
+// every mount site names the type instead.
+impl RegistrySubject for Confirmation {
+    const SUBJECT: &'static str = "proto-lane-confirmations-placeholder-value";
+    const MESSAGE: &'static str = "rslane.Confirmation";
 }
 
 /// What the transcoding consumer sees: the same shape as plain JSON.
@@ -210,7 +218,10 @@ async fn seed_a_framed_order(
         .expect("seed trigger");
     seed_broker.shutdown().await.expect("seed shutdown");
 
-    protobuf::Subject::<Confirmation>::resolve(&sr, &confirmations_subject, "rslane.Confirmation")
+    // Off the type's own declaration: the subject and the message name are written once, on
+    // `Confirmation`, and this site names the type.
+    assert_eq!(Confirmation::SUBJECT, confirmations_subject);
+    protobuf::Subject::<Confirmation>::resolve_declared(&sr)
         .await
         .expect("resolve confirmations")
 }

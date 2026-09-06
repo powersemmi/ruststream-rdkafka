@@ -14,6 +14,7 @@ use apache_avro::AvroSchema;
 use ruststream::runtime::{App, AppInfo, HandlerOutcome, Router, RustStream};
 use ruststream::subscriber;
 use ruststream_rdkafka::avro::AvroCodec;
+use ruststream_rdkafka::schema_registry::RegistrySubject;
 use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
 use serde::Deserialize;
 
@@ -25,6 +26,12 @@ struct Order {
     id: i64,
     #[allow(dead_code, reason = "part of the schema, unused by the audit handler")]
     item: String,
+}
+
+// The subject is a fact about the type, so it is written here once and every mount site names
+// the type instead of repeating the string.
+impl RegistrySubject for Order {
+    const SUBJECT: &'static str = "orders-value";
 }
 
 /// The same record one version on. A consumer that has moved ahead of its producers names this
@@ -56,7 +63,9 @@ fn app() -> impl App {
     // which is synchronous, never reaches the network.
     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
     let prefetch_for_audit = prefetch.clone();
-    let codec = AvroCodec::registry(&prefetch, "orders-value")
+    // The subject comes off the type: `for_type` reads `Order::SUBJECT` here, at construction,
+    // where the type is known - which is the one place a codec can read a declaration on it.
+    let codec = AvroCodec::for_type::<Order>(&prefetch)
         .resolve_onto(OrderV2::get_schema())
         .expect("the reader schema resolves");
 

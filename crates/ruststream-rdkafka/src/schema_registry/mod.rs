@@ -136,6 +136,73 @@ impl SubjectStrategy {
     }
 }
 
+/// A message type that names its own registry subject.
+///
+/// The subject a type is registered under is a fact about the type, not about the place it is
+/// mounted, and repeating it as a string literal at every mount site is how a producer and a
+/// consumer come to disagree about it. Declared here, it is written once:
+///
+/// ```
+/// use ruststream_rdkafka::schema_registry::RegistrySubject;
+///
+/// # #[derive(serde::Serialize)]
+/// struct Order {
+///     id: i64,
+/// }
+///
+/// impl RegistrySubject for Order {
+///     const SUBJECT: &'static str = "orders-value";
+/// }
+///
+/// # fn check() {
+/// assert_eq!(Order::SUBJECT, "orders-value");
+/// # }
+/// # check();
+/// ```
+///
+/// Every mount site then names the type rather than the string:
+/// [`AvroCodec::for_type`](crate::avro::AvroCodec::for_type) on the codec path, and
+/// [`avro::Subject::resolve_declared`](crate::avro::Subject::resolve_declared) on the byte-lane
+/// one.
+///
+/// # Which name to write
+///
+/// Whatever the deployment's naming strategy produces, spelled out. Under Confluent's default
+/// [`TopicName`](SubjectStrategy::TopicName) that is `{topic}-value`; under the record
+/// strategies it is the record's fully qualified name, or `{topic}-{record}`.
+/// [`SubjectStrategy::subject`] renders any of them rather than writing one by hand.
+///
+/// The strategy is deliberately not a second associated constant. Two of the three need a topic,
+/// which is the mount site's to know and not the type's, so a strategy declared here could only
+/// describe the answer already written above it.
+///
+/// # What this does not check
+///
+/// Nothing verifies that the schema under `SUBJECT` is this type's schema. That exposure is
+/// exactly the one a hand-written subject string already had - mount a codec against the wrong
+/// message type and the format rejects the first message against the wrong schema, loudly - so
+/// declaring the subject here removes a way to mistype it and introduces no failure of its own.
+/// Checking the pairing before the first message is the compile-time validation layer of issue
+/// #54, which is a separate piece of work.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not declare a registry subject",
+    note = "implement `RegistrySubject` for `{Self}` with one associated constant, `const \
+            SUBJECT: &'static str`, naming the registry subject its schema lives under"
+)]
+pub trait RegistrySubject {
+    /// The registry subject this type's schema lives under.
+    const SUBJECT: &'static str;
+
+    /// For Protobuf, the fully qualified name of the message within the subject's `.proto`
+    /// schema, package included. The other formats need no name beyond the subject and leave
+    /// this empty.
+    ///
+    /// A `prost`-generated type carries no descriptor to read this from, which is why it is
+    /// declared rather than derived; [`protobuf::Subject`](crate::protobuf::Subject) reports an
+    /// empty one when it resolves, rather than framing against a message it cannot address.
+    const MESSAGE: &'static str = "";
+}
+
 struct RegistryInner {
     /// What answers a registry question, and what remembers the answer. Both are seams: a
     /// service that wants a different HTTP stack, a published client crate, a binding to a

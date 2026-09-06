@@ -13,7 +13,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::KafkaError;
-use crate::schema_registry::{SchemaPrefetch, SchemaRegistry, WIRE_MAGIC, parse_envelope};
+use crate::schema_registry::{
+    RegistrySubject, SchemaPrefetch, SchemaRegistry, WIRE_MAGIC, parse_envelope,
+};
 
 /// One schema prepared for both directions, built once and borrowed for the process's life.
 ///
@@ -180,6 +182,49 @@ impl AvroCodec {
             },
             reader_schema: None,
         }
+    }
+
+    /// A codec on the Confluent wire format, publishing under the subject `T` declares.
+    ///
+    /// This is [`registry`](Self::registry) with the subject taken from the type instead of
+    /// written out, and construction is where a type's declaration can be read at all: a codec is
+    /// built once, per mount site, where `T` is known - while [`Codec::encode`] is generic over
+    /// every `Serialize` value and can require nothing of them. Reading `T::SUBJECT` here and
+    /// keeping it as a field is what lets the mount site name the type instead of a string.
+    ///
+    /// ```no_run
+    /// # use apache_avro::AvroSchema;
+    /// # use ruststream_rdkafka::avro::AvroCodec;
+    /// # use ruststream_rdkafka::schema_registry::RegistrySubject;
+    /// # use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+    /// # use serde::{Deserialize, Serialize};
+    /// #[derive(Serialize, Deserialize, AvroSchema)]
+    /// struct Order {
+    ///     id: i64,
+    /// }
+    ///
+    /// impl RegistrySubject for Order {
+    ///     const SUBJECT: &'static str = "orders-value";
+    /// }
+    ///
+    /// # fn check() {
+    /// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    /// let codec = AvroCodec::for_type::<Order>(&prefetch);
+    /// # let _ = codec;
+    /// # }
+    /// ```
+    ///
+    /// Nothing binds the codec to `T` afterwards: it encodes whatever the handlers mounted under
+    /// it hand over, as any codec does. Mounting it where another message type travels fails on
+    /// the first message, against the wrong schema, exactly as a mistyped subject string would -
+    /// see [`RegistrySubject`] for what that does and does not check.
+    ///
+    /// # Panics
+    ///
+    /// As [`registry`](Self::registry).
+    #[must_use]
+    pub fn for_type<T: RegistrySubject>(prefetch: &SchemaPrefetch) -> Self {
+        Self::registry(prefetch, T::SUBJECT)
     }
 
     /// Reads every delivery onto `schema` instead of the schema it was written with, so Avro's
@@ -353,6 +398,11 @@ mod tests {
         note: String,
     }
 
+    // The declaration `for_type` reads, written once on the type.
+    impl RegistrySubject for Order {
+        const SUBJECT: &'static str = "orders-value";
+    }
+
     fn order() -> Order {
         Order {
             id: 42,
@@ -452,6 +502,20 @@ mod tests {
         assert!(!datum.is_empty());
 
         // And it reads its own frame back through the id the envelope names.
+        assert_eq!(codec.decode::<Order>(&bytes).expect("decode"), order());
+    }
+
+    /// The read happens at construction, where `T` is known - which is what makes a declaration
+    /// on the type usable at all from a `Codec` whose `encode` can require nothing of `T`.
+    #[tokio::test]
+    async fn for_type_takes_the_subject_off_the_type() {
+        let (_server, prefetch) = registry_with_order(11).await;
+        let codec = AvroCodec::for_type::<Order>(&prefetch);
+        prefetch.warm_subjects().await.expect("warm");
+
+        let bytes = codec.encode(&order()).expect("encode");
+        let (id, _) = parse_envelope(&bytes).expect("the wire format");
+        assert_eq!(id, 11, "framed under the subject the type declared");
         assert_eq!(codec.decode::<Order>(&bytes).expect("decode"), order());
     }
 
