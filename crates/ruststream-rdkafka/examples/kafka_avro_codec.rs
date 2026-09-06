@@ -1,0 +1,86 @@
+//! Avro as a codec: the schema lives in the codec, and handlers stay ordinary functions over
+//! ordinary structs.
+//!
+//! This is the path to reach for first on a registry-backed Avro topic. Nothing about Avro
+//! appears in a handler's signature, the models carry no derive of this crate's, and the wire
+//! form is the codec's business - which is what a codec is for.
+//!
+//! ```text
+//! just brokers-up
+//! cargo run --example kafka_avro_codec --features avro -- run
+//! ```
+
+use apache_avro::AvroSchema;
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream};
+use ruststream::subscriber;
+use ruststream_rdkafka::avro::AvroCodec;
+use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
+use serde::Deserialize;
+
+// --8<-- [start:types]
+// Plain serde structs. `AvroSchema` derives the schema the codec is built from; nothing here
+// knows it will travel as Avro.
+#[derive(Debug, Deserialize, AvroSchema)]
+struct Order {
+    #[allow(
+        dead_code,
+        reason = "the shape is the point; the local codec below reads it"
+    )]
+    id: i64,
+    #[allow(
+        dead_code,
+        reason = "the shape is the point; the local codec below reads it"
+    )]
+    item: String,
+}
+
+/// The same record one version on. A consumer that has moved ahead of its producers names this
+/// as its reader schema, so Avro's resolution fills what an older writer never wrote.
+#[derive(Debug, Deserialize, AvroSchema)]
+#[serde(rename = "Order")]
+struct OrderV2 {
+    id: i64,
+    item: String,
+    #[avro(default = r#""none""#)]
+    note: String,
+}
+// --8<-- [end:types]
+
+// --8<-- [start:handler]
+// An ordinary handler: the codec decoded the delivery before it got here.
+#[subscriber("orders")]
+async fn take_order(order: &OrderV2) -> HandlerOutcome {
+    println!("order {} of {} ({})", order.id, order.item, order.note);
+    HandlerOutcome::ack()
+}
+// --8<-- [end:handler]
+
+#[ruststream::app]
+fn app() -> impl App {
+    // --8<-- [start:wiring]
+    // The prefetch is the async half: `connect` resolves the subjects the codecs publish under,
+    // and each delivery's writer schema is resolved on the consume path - so the codec itself,
+    // which is synchronous, never reaches the network.
+    let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    let codec = AvroCodec::registry(&prefetch, "orders-value")
+        .resolve_onto(OrderV2::get_schema())
+        .expect("the reader schema resolves");
+
+    let broker = KafkaBroker::new(["localhost:9092"])
+        .default_group("orders-svc")
+        .schema_prefetch(prefetch);
+
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
+        b.include(take_order);
+    })
+    // --8<-- [end:wiring]
+}
+
+// --8<-- [start:local]
+/// A topic with no registry: one schema, pinned here, and a bare datum on the wire.
+fn local_codec() -> AvroCodec {
+    AvroCodec::local(Order::get_schema()).expect("the schema resolves")
+}
+// --8<-- [end:local]
+
+const _: fn() -> AvroCodec = local_codec;

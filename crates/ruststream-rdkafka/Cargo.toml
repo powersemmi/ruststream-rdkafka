@@ -111,6 +111,10 @@ name = "kafka_avro"
 required-features = ["avro"]
 
 [[example]]
+name = "kafka_avro_codec"
+required-features = ["avro"]
+
+[[example]]
 name = "kafka_avro_lanes"
 required-features = ["avro"]
 
