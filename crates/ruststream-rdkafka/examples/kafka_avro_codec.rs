@@ -78,9 +78,11 @@ fn app() -> impl App {
 
 // --8<-- [start:local]
 /// A topic with no registry: one schema, pinned here, and a bare datum on the wire.
+#[allow(
+    dead_code,
+    reason = "the other schema source, shown rather than wired into this app"
+)]
 fn local_codec() -> AvroCodec {
     AvroCodec::local(Order::get_schema()).expect("the schema resolves")
 }
 // --8<-- [end:local]
-
-const _: fn() -> AvroCodec = local_codec;
