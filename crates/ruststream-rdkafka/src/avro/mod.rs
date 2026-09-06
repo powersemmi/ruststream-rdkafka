@@ -88,7 +88,10 @@
 //! broker carrying [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)
 //! transcodes every subscription it opens, so a frame-reading handler on it would be handed JSON.
 
+mod codec;
+
 pub use apache_avro::AvroSchema;
+pub use codec::AvroCodec;
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;

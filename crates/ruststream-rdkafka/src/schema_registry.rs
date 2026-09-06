@@ -16,13 +16,16 @@
 //! and the typed shorthands), mirroring Confluent's production guidance of not
 //! auto-registering schemas from producers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error as StdError;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use ruststream::Publisher;
+use ruststream::codec::{Codec, CodecError};
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
+use ruststream::{BytesMut, Publisher};
 use serde::Deserialize;
 
 pub use schemars::JsonSchema;
@@ -119,18 +122,116 @@ impl SubjectStrategy {
     }
 }
 
+#[derive(Clone)]
 enum Auth {
     None,
     Basic { user: String, password: String },
     Bearer(String),
 }
 
+/// How a [`SchemaRegistry`] remembers what it has resolved.
+///
+/// The two halves of the registry's answer expire differently, and that is not a preference but
+/// a property of the service: **a schema id is immutable**. The registry assigns an id per
+/// distinct schema definition, globally and by content - registering a new version of a subject
+/// mints a *new* id and leaves the old one resolving to the old schema for ever, and registering
+/// an identical schema under a different subject hands back the id it already had. A subject's
+/// *latest version*, by contrast, moves whenever someone registers one.
+///
+/// So an id-keyed entry can never go stale and needs no expiry - a TTL over it could only cause
+/// a refetch that returns the identical bytes - while a subject-keyed entry can, and is the only
+/// thing [`subject_ttl`](Self::subject_ttl) governs. Confluent's own clients scope their
+/// `latest.cache.ttl.sec` to exactly the latest-version caches for the same reason.
+///
+/// What ids still need is a bound. A consumer meets one id per writer version it is sent, which
+/// is small in a healthy topology and unbounded in a broken one (a producer registering a schema
+/// per message), so the cache is capped and evicts in insertion order. Evicting an id that is
+/// still in use costs one refetch and never a wrong answer, which is what makes plain insertion
+/// order enough here and a recency policy not worth its bookkeeping.
+///
+/// # Examples
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use std::time::Duration;
+///
+/// use ruststream_rdkafka::{SchemaCachePolicy, SchemaRegistry};
+///
+/// // The default: ids kept, up to a bound, and subjects never re-resolved.
+/// let sr = SchemaRegistry::new("http://localhost:8081");
+///
+/// // A producer that should notice a newly registered version without a restart.
+/// let refreshing = SchemaRegistry::new("http://localhost:8081").cache_policy(
+///     SchemaCachePolicy::Cached {
+///         capacity: NonZeroUsize::new(256).expect("non-zero"),
+///         subject_ttl: Some(Duration::from_secs(300)),
+///     },
+/// );
+///
+/// // Nothing remembered at all: every lookup reaches the registry.
+/// let uncached = SchemaRegistry::new("http://localhost:8081")
+///     .cache_policy(SchemaCachePolicy::Disabled);
+/// # let _ = (sr, refreshing, uncached);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SchemaCachePolicy {
+    /// Nothing is remembered: every lookup reaches the registry.
+    ///
+    /// This is a real configuration, not a zero TTL wearing a disguise - for a process that must
+    /// hold no schema state, or a test that wants every call observable. It has one consequence
+    /// worth knowing before choosing it: a synchronous [`Codec`] reads the cache and cannot
+    /// await a miss, so [`AvroCodec::registry`](crate::avro::AvroCodec::registry) and
+    /// [`SchemaFramed`] cannot work under it. The transcoding path, whose lookups are all
+    /// `async`, works unchanged.
+    Disabled,
+    /// Ids are remembered up to `capacity`, and a subject's resolved version for `subject_ttl`.
+    Cached {
+        /// The most id-keyed schemas held at once; the oldest is dropped past it.
+        capacity: NonZeroUsize,
+        /// How long a subject's resolved version is trusted before the next `async` lookup
+        /// re-resolves it. `None` never re-resolves, which is Confluent's own default.
+        ///
+        /// This governs the `async` lookups only ([`warm`](SchemaRegistry::warm) and the
+        /// publish-side transcode). A codec's subject is resolved once, when the broker
+        /// connects, and stays put: its `encode` is synchronous and cannot re-resolve, and a
+        /// producer changing the schema it writes mid-process is a deliberate act, not something
+        /// to absorb silently between two messages.
+        subject_ttl: Option<Duration>,
+    },
+}
+
+impl SchemaCachePolicy {
+    /// The bound Confluent's own clients default to.
+    const DEFAULT_CAPACITY: usize = 1000;
+}
+
+impl Default for SchemaCachePolicy {
+    /// Ids kept up to 1000 (Confluent's own default bound), subjects never re-resolved
+    /// (Confluent's own default TTL).
+    fn default() -> Self {
+        Self::Cached {
+            capacity: NonZeroUsize::new(Self::DEFAULT_CAPACITY).expect("a non-zero constant"),
+            subject_ttl: None,
+        }
+    }
+}
+
+/// A subject's resolved id, with the moment it was resolved, so a TTL can be applied to it.
+struct SubjectEntry {
+    id: u32,
+    resolved: Instant,
+}
+
 struct RegistryInner {
     base_url: String,
     http: reqwest::Client,
     auth: Auth,
+    policy: SchemaCachePolicy,
     by_id: Mutex<HashMap<u32, Arc<RegisteredSchema>>>,
-    by_subject: Mutex<HashMap<String, u32>>,
+    /// The ids in `by_id`, in the order they were inserted, so the cap can drop the oldest.
+    id_order: Mutex<VecDeque<u32>>,
+    by_subject: Mutex<HashMap<String, SubjectEntry>>,
     #[cfg(feature = "avro")]
     parsed_avro: Mutex<HashMap<u32, Arc<apache_avro::Schema>>>,
     #[cfg(feature = "protobuf")]
@@ -199,7 +300,9 @@ impl SchemaRegistry {
                 base_url,
                 http: reqwest::Client::new(),
                 auth: Auth::None,
+                policy: SchemaCachePolicy::default(),
                 by_id: Mutex::new(HashMap::new()),
+                id_order: Mutex::new(VecDeque::new()),
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
@@ -207,6 +310,16 @@ impl SchemaRegistry {
                 parsed_proto: Mutex::new(HashMap::new()),
             }),
         }
+    }
+
+    /// How much of what it resolves this client remembers; see [`SchemaCachePolicy`].
+    ///
+    /// Configure before handing the client out: clones share one cache and the configuration it
+    /// was made with.
+    #[must_use]
+    pub fn cache_policy(self, policy: SchemaCachePolicy) -> Self {
+        let auth = self.inner.auth.clone();
+        self.rebuilt(auth, policy)
     }
 
     /// HTTP basic authentication for every registry request. Configure before handing the
@@ -227,12 +340,24 @@ impl SchemaRegistry {
     }
 
     fn with_auth(self, auth: Auth) -> Self {
+        let policy = self.inner.policy;
+        self.rebuilt(auth, policy)
+    }
+
+    /// A client with the same endpoint and a new configuration, and empty caches.
+    ///
+    /// The caches are not carried over: what the credentials could see and what the policy would
+    /// have kept are both part of how an entry got there, so an entry from the previous
+    /// configuration is not an answer this one may give.
+    fn rebuilt(self, auth: Auth, policy: SchemaCachePolicy) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
                 base_url: self.inner.base_url.clone(),
                 http: self.inner.http.clone(),
                 auth,
+                policy,
                 by_id: Mutex::new(HashMap::new()),
+                id_order: Mutex::new(VecDeque::new()),
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
@@ -285,11 +410,7 @@ impl SchemaRegistry {
             schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
             definition: fetched.schema,
         });
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .insert(id, Arc::clone(&schema));
+        self.cache_by_id(&schema);
         Ok(schema)
     }
 
@@ -439,18 +560,89 @@ impl SchemaRegistry {
         Ok(Some(schema))
     }
 
+    /// The bound on id-keyed entries, or `None` when nothing is remembered at all.
+    fn capacity(&self) -> Option<NonZeroUsize> {
+        match self.inner.policy {
+            SchemaCachePolicy::Disabled => None,
+            SchemaCachePolicy::Cached { capacity, .. } => Some(capacity),
+        }
+    }
+
     fn cache(&self, subject: &str, schema: &Arc<RegisteredSchema>) {
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .insert(schema.id, Arc::clone(schema));
+        self.cache_by_id(schema);
+        if self.capacity().is_none() {
+            return;
+        }
         self.inner
             .by_subject
             .lock()
             .expect("subject cache mutex poisoned")
-            .insert(subject.to_owned(), schema.id);
+            .insert(
+                subject.to_owned(),
+                SubjectEntry {
+                    id: schema.id,
+                    resolved: Instant::now(),
+                },
+            );
     }
+
+    /// Remembers one schema by its id, dropping the oldest once the bound is reached.
+    fn cache_by_id(&self, schema: &Arc<RegisteredSchema>) {
+        let Some(capacity) = self.capacity() else {
+            return;
+        };
+        // The two schema maps are taken together and released before the parsed-schema maps are
+        // touched, so no two of these locks are ever held at once.
+        let mut by_id = self
+            .inner
+            .by_id
+            .lock()
+            .expect("schema cache mutex poisoned");
+        let mut order = self
+            .inner
+            .id_order
+            .lock()
+            .expect("schema cache order mutex poisoned");
+        if by_id.insert(schema.id, Arc::clone(schema)).is_none() {
+            order.push_back(schema.id);
+        }
+        let mut evicted = Vec::new();
+        while order.len() > capacity.get() {
+            let Some(oldest) = order.pop_front() else {
+                break;
+            };
+            by_id.remove(&oldest);
+            evicted.push(oldest);
+        }
+        drop(order);
+        drop(by_id);
+        self.purge_parsed(&evicted);
+    }
+
+    /// Drops the parsed forms of schemas the id cache has just evicted: they are derived from
+    /// the definitions that went with them, so keeping them would outlive their source.
+    #[cfg(any(feature = "avro", feature = "protobuf"))]
+    fn purge_parsed(&self, evicted: &[u32]) {
+        for id in evicted {
+            #[cfg(feature = "avro")]
+            self.inner
+                .parsed_avro
+                .lock()
+                .expect("parsed schema cache mutex poisoned")
+                .remove(id);
+            #[cfg(feature = "protobuf")]
+            self.inner
+                .parsed_proto
+                .lock()
+                .expect("descriptor cache mutex poisoned")
+                .remove(id);
+        }
+    }
+
+    /// No parsed forms are kept without a format feature, so there is nothing to purge.
+    #[cfg(not(any(feature = "avro", feature = "protobuf")))]
+    #[allow(clippy::unused_self)]
+    fn purge_parsed(&self, _evicted: &[u32]) {}
 
     /// The cached schema for `id`, when an earlier lookup resolved it (the subscription's
     /// transcoding keeps ids it has seen warm).
@@ -478,13 +670,24 @@ impl SchemaRegistry {
     /// the client (an invariant violation, not an operational failure).
     #[must_use]
     pub fn cached_subject(&self, subject: &str) -> Option<Arc<RegisteredSchema>> {
-        let id = *self
+        let ttl = match self.inner.policy {
+            SchemaCachePolicy::Disabled => return None,
+            SchemaCachePolicy::Cached { subject_ttl, .. } => subject_ttl,
+        };
+        // A subject's latest version moves, so an entry past its time is not an answer. The id it
+        // named stays valid for ever and stays in its own cache; what expired is the claim that
+        // this subject still points at it. The guard is released before the id cache is taken.
+        let by_subject = self
             .inner
             .by_subject
             .lock()
-            .expect("subject cache mutex poisoned")
-            .get(subject)?;
-        self.cached_schema(id)
+            .expect("subject cache mutex poisoned");
+        let fresh = by_subject.get(subject).and_then(|entry| {
+            ttl.is_none_or(|ttl| entry.resolved.elapsed() < ttl)
+                .then_some(entry.id)
+        });
+        drop(by_subject);
+        self.cached_schema(fresh?)
     }
 
     /// Registers the JSON Schema generated from `T` (via schemars) under `subject` - the
@@ -703,6 +906,233 @@ fn outgoing_json_to_datum(
              not enabled on ruststream-rdkafka; enable it to publish to this topic",
             schema.id,
         ))),
+    }
+}
+
+/// The async half of a registry-backed codec: it resolves, on the broker's async edges, every
+/// schema the synchronous codec will read.
+///
+/// A [`Codec`](ruststream::codec::Codec) is synchronous on both ends and a registry lookup is
+/// not, and no amount of arranging makes those meet inside `encode` or `decode`: blocking a
+/// runtime worker from a sync function is not an option and guessing a schema is corruption. So
+/// the lookups move to the two places that are already `async` and already know when they have to
+/// happen - the broker's `connect`, for the subjects a codec publishes under, and each
+/// subscription's delivery path, for the writer schema an arriving envelope names. By the time a
+/// codec runs, what it needs is in the shared cache, and its own work is pure computation.
+///
+/// This is a distinct attachment from
+/// [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) on purpose. That one
+/// *rewrites* deliveries into JSON, which is the transcoding compatibility path; this one leaves
+/// every payload exactly as it arrived and only fills a cache. Attaching both to one broker is
+/// contradictory - the transcode would hand a JSON document to a codec expecting the Confluent
+/// wire format - and the prefetch runs first so it still sees the envelope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
+/// use ruststream_rdkafka::avro::AvroCodec;
+///
+/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+/// // Every codec built here records its subject, so `connect` resolves it and a subject that
+/// // is missing fails the app's startup rather than its first publish.
+/// let codec = AvroCodec::registry(&prefetch, "confirmations-value");
+/// let broker = KafkaBroker::new(["localhost:9092"]).schema_prefetch(prefetch);
+/// # let _ = (codec, broker);
+/// ```
+#[derive(Clone)]
+pub struct SchemaPrefetch {
+    registry: SchemaRegistry,
+    /// The subjects registry codecs were built against. Shared with the codecs' own clones, so
+    /// naming a subject once - at the codec - is what puts it on this list.
+    subjects: Arc<Mutex<HashSet<String>>>,
+}
+
+impl fmt::Debug for SchemaPrefetch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaPrefetch")
+            .field("registry", &self.registry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SchemaPrefetch {
+    /// Builds the prefetch over `registry`. Construction is synchronous and does no I/O; the
+    /// resolving happens on the broker's async edges.
+    #[must_use]
+    pub fn new(registry: SchemaRegistry) -> Self {
+        Self {
+            registry,
+            subjects: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// The client the codecs share a cache with.
+    #[must_use]
+    pub fn registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+
+    /// Records a subject a codec will publish under, so [`warm_subjects`](Self::warm_subjects)
+    /// resolves it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal mutex is poisoned, which requires a prior panic inside this
+    /// type (an invariant violation, not an operational failure).
+    pub(crate) fn record_subject(&self, subject: &str) {
+        self.subjects
+            .lock()
+            .expect("prefetch subjects mutex poisoned")
+            .insert(subject.to_owned());
+    }
+
+    /// Resolves every recorded subject. Called once, by the broker's `connect`, so a subject
+    /// that does not exist fails the app's startup instead of its first publish.
+    pub(crate) async fn warm_subjects(&self) -> Result<(), KafkaError> {
+        let subjects: Vec<String> = self
+            .subjects
+            .lock()
+            .expect("prefetch subjects mutex poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        for subject in subjects {
+            self.registry.warm(&subject).await.map_err(|err| {
+                KafkaError::SchemaRegistry(
+                    format!(
+                        "the schema of subject {subject:?} could not be resolved at startup, so \
+                         a codec publishing under it would have no id to frame with: {err}"
+                    )
+                    .into(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Resolves the writer schema an arriving envelope names, so the delivery's own decode finds
+    /// it in the cache. The payload is not touched.
+    ///
+    /// A payload carrying no envelope needs nothing, and a lookup that fails is only logged: the
+    /// decode that follows reports it as a decode failure, which the subscription's failure
+    /// policy settles - one delivery's fate decided in one place, rather than half of it here.
+    pub(crate) async fn warm_delivery(&self, payload: &[u8]) {
+        let Some((id, _)) = parse_envelope(payload) else {
+            return;
+        };
+        if self.registry.cached_schema(id).is_some() {
+            return;
+        }
+        if let Err(err) = self.registry.schema_by_id(id).await {
+            tracing::warn!(
+                target: "ruststream_rdkafka",
+                schema_id = id,
+                error = %err,
+                "the writer schema of an arriving delivery could not be resolved; its decode \
+                 will report the miss and the subscription's failure policy settles it",
+            );
+        }
+    }
+}
+
+/// The Confluent envelope around another codec, for a payload that does not need its schema to
+/// be read.
+///
+/// The envelope is separable exactly when the datum inside it is self-describing. A JSON
+/// document is: the id says which schema it claims to conform to, and the document parses
+/// without it, so framing decomposes cleanly into "put the envelope on, take the envelope off"
+/// with an inner codec doing the rest. An Avro datum is not: the id names the schema the datum
+/// *cannot be read without*, and no wrapper can hand that per-delivery schema through a
+/// [`Codec`] method - which is why [`AvroCodec`](crate::avro::AvroCodec) owns its envelope
+/// instead of riding this one. That line is the design rule, not an accident of the two formats.
+///
+/// The wrapper frames and does not validate. A registry's JSON Schema is a compatibility
+/// contract the registry itself enforces between versions, and checking every message against it
+/// would mean carrying a JSON Schema validator and paying it per delivery, which Confluent's own
+/// serializer makes optional for the same reason. Validation is the inner codec's business, and
+/// the inner codec is named right here at the call site: a service that wants it passes a codec
+/// that validates instead of a plain one.
+///
+/// Only encoding needs the registry, for the subject's id; decoding strips the envelope and
+/// hands the bytes on, so a consumer needs no [`SchemaPrefetch`] resolved for it at all.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream::codec::JsonCodec;
+/// use ruststream_rdkafka::{SchemaFramed, SchemaPrefetch, SchemaRegistry};
+///
+/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+/// // Confluent-framed JSON: the core's own codec, under the envelope of a registered subject.
+/// let codec = SchemaFramed::new(&prefetch, "orders-value", JsonCodec);
+/// # let _ = codec;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SchemaFramed<C> {
+    registry: SchemaRegistry,
+    subject: String,
+    inner: C,
+}
+
+impl<C> SchemaFramed<C> {
+    /// Frames `inner`'s payloads under the envelope of `subject`.
+    ///
+    /// Construction is synchronous and does no I/O: `subject` is recorded on `prefetch`, which
+    /// resolves it when the broker connects.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the prefetch's internal mutex is poisoned, which requires a prior panic
+    /// inside it (an invariant violation, not an operational failure).
+    #[must_use]
+    pub fn new(prefetch: &SchemaPrefetch, subject: impl Into<String>, inner: C) -> Self {
+        let subject = subject.into();
+        prefetch.record_subject(&subject);
+        Self {
+            registry: prefetch.registry().clone(),
+            subject,
+            inner,
+        }
+    }
+
+    /// The codec whose payloads travel inside the envelope.
+    pub fn inner(&self) -> &C {
+        &self.inner
+    }
+}
+
+impl<C: Codec> Codec for SchemaFramed<C> {
+    fn encode<T: serde::Serialize>(&self, value: &T) -> Result<BytesMut, CodecError> {
+        let schema = self.registry.cached_subject(&self.subject).ok_or_else(|| {
+            CodecError::Encode(Box::new(KafkaError::malformed(format!(
+                "no schema is cached for subject {:?}: it was not resolved at startup. Attach \
+                 the SchemaPrefetch this codec was built from to the broker \
+                 (KafkaBroker::schema_prefetch), so connect resolves it",
+                self.subject,
+            ))))
+        })?;
+        let datum = self.inner.encode(value)?;
+        let mut framed = BytesMut::with_capacity(1 + 4 + datum.len());
+        framed.extend_from_slice(&[WIRE_MAGIC]);
+        framed.extend_from_slice(&schema.id().to_be_bytes());
+        framed.extend_from_slice(&datum);
+        Ok(framed)
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, CodecError> {
+        // A payload with no envelope is refused rather than passed through: on a registry-backed
+        // topic an unframed record is a producer that did not frame, and reading it anyway would
+        // make that look like it worked.
+        let (_, datum) = parse_envelope(bytes).ok_or_else(|| {
+            CodecError::Decode(Box::new(KafkaError::malformed(format!(
+                "the delivery does not carry the Confluent wire format (a zero magic byte and a \
+                 4-byte schema id) that subject {:?} publishes under; its first bytes are {:02x?}",
+                self.subject,
+                &bytes[..bytes.len().min(8)],
+            ))))
+        })?;
+        self.inner.decode(datum)
     }
 }
 
