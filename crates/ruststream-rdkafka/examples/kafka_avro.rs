@@ -2,6 +2,10 @@
 //! edges convert - incoming Avro datums arrive as JSON, and the `SchemaFrame` publish layer
 //! puts Avro on the wire because the reply topic's subject holds an Avro schema.
 //!
+//! This is the compatibility path, for a service that must keep plain serde models on a
+//! registry-backed topic. It costs a JSON hop per message and resolves no writer schema onto a
+//! reader schema, because a JSON handler has none. `kafka_avro_lanes` is the canonical path.
+//!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_avro --features avro -- run

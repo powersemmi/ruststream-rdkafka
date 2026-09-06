@@ -20,11 +20,11 @@
 
 use std::convert::Infallible;
 
-use ruststream::BytesMut;
 use ruststream::runtime::{
     Deserialized, Input, MessageWire, ReplyShape, Serialized, SerializedReply, SerializedWire,
     SoloDeserialized,
 };
+use ruststream::{BytesMut, CallerName, MessageHeaders, NoHeaders, OutgoingDestination};
 
 use crate::error::KafkaError;
 use crate::schema_registry::{WIRE_MAGIC, parse_envelope};
@@ -171,6 +171,16 @@ impl ReplyShape for OutgoingFrame {
     type Body = Self;
     type Headers = ();
     type Wire = SerializedReply;
+}
+
+// A frame carries a schema, not a destination: the same message type is published to whatever
+// topic the call site names, so the address is the caller's and the type declares none.
+impl OutgoingDestination for OutgoingFrame {
+    type Form = CallerName;
+}
+
+impl MessageHeaders for OutgoingFrame {
+    type Contract = NoHeaders;
 }
 
 #[cfg(test)]

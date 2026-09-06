@@ -7,8 +7,8 @@
 //! What the registry adds is the envelope, and the envelope is where this module comes in. A
 //! Confluent-framed Protobuf payload is the zero magic byte, the schema id, a message-index path
 //! naming which message of the schema was written, and then the message. The envelope rides the
-//! lane as [`IncomingFrame`](crate::IncomingFrame) / [`OutgoingFrame`](crate::OutgoingFrame), and
-//! the two ends of the index path are handled here:
+//! lane as [`IncomingFrame`] / [`OutgoingFrame`], and the two ends of the index path are handled
+//! here:
 //!
 //! - [`decode_framed`] skips the indexes and hands the message bytes to `prost`. It needs no
 //!   registry: a generated type knows its own fields, and the index path only says which message
@@ -178,6 +178,25 @@ impl<T: prost::Message> Subject<T> {
             indexes: encode_indexes(&indexes),
             message: PhantomData,
         })
+    }
+
+    /// A subject whose id and message-index path are already known, taking no registry at all.
+    ///
+    /// [`resolve`](Self::resolve) exists to learn those two things; a service that already has
+    /// them - a deployment pinning ids in configuration, a replay tool, a test with no registry
+    /// in front of it - names them here. The path is the message's position in its schema file:
+    /// `[0]` for the first top-level message, `[1, 0]` for the first message nested in the
+    /// second, and so on.
+    ///
+    /// The caller owns the pairing `resolve` establishes: the id must name a schema that
+    /// declares `T` at that path, or consumers address the wrong message.
+    #[must_use]
+    pub fn pinned(schema_id: u32, message_indexes: &[i32]) -> Self {
+        Self {
+            schema_id,
+            indexes: encode_indexes(message_indexes),
+            message: PhantomData,
+        }
     }
 
     /// The registry-assigned id of the schema this subject holds.

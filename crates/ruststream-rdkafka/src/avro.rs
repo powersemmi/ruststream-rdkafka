@@ -6,9 +6,9 @@
 //!
 //! # What rides the lane, and why it is the envelope
 //!
-//! The lane type is the Confluent envelope ([`IncomingFrame`](crate::IncomingFrame),
-//! [`OutgoingFrame`](crate::OutgoingFrame)), not the message model, and the value is converted by
-//! an explicit call. That split is forced from two sides and neither of them is a preference:
+//! The lane type is the Confluent envelope ([`IncomingFrame`], [`OutgoingFrame`]), not the
+//! message model, and the value is converted by an explicit call. That split is forced from two
+//! sides and neither of them is a preference:
 //!
 //! - `apache-avro` is a serde-driven implementation of Avro: reading and writing a Rust struct as
 //!   a datum goes through `Serialize` / `Deserialize`, guided by the schema. The core's lanes are
@@ -406,6 +406,24 @@ where
             schema_id,
             message: PhantomData,
         })
+    }
+
+    /// A subject whose id is already known, taking no registry at all.
+    ///
+    /// The two async constructors exist to learn one number; a service that already has it - a
+    /// deployment pinning ids in configuration, a replay tool reading an id off a captured
+    /// record, a test with no registry in front of it - names it here instead of standing up a
+    /// registry to be told what it knows.
+    ///
+    /// The caller owns the pairing that [`register`](Self::register) and
+    /// [`resolve`](Self::resolve) establish: `schema_id` must be the id of `T`'s own schema, or
+    /// consumers decode this producer's datums against the wrong one.
+    #[must_use]
+    pub fn pinned(schema_id: u32) -> Self {
+        Self {
+            schema_id,
+            message: PhantomData,
+        }
     }
 
     /// Resolves the id `T`'s schema already has under `subject`, registering nothing.

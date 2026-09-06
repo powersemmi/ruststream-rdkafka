@@ -3,19 +3,70 @@
 Kafka deployments standardized on Confluent Schema Registry frame their payloads with the
 Confluent wire format - a zero magic byte, a big-endian 4-byte schema id, then the encoded
 datum - and keep the schemas themselves in the registry. The `schema-registry` cargo feature
-integrates all of it as **middleware on the async edges** - the subscription's delivery path
-on the way in, the app's publish pipeline on the way out - so handlers, codecs, and the whole
-runtime stay on plain JSON (the default codec).
+covers both halves, and there are two ways to consume them.
+
+**The byte lanes** put the wire form in the handler's signature. A delivery arrives as an
+`IncomingFrame` - the schema id and the datum, byte for byte as they came off the topic - and the
+value is made from it by Avro's or Protobuf's own reader, against the schema the envelope names.
+No codec is resolved anywhere, no JSON document exists on the path, and a datum written under an
+older version of the subject is resolved onto the reading type's schema. This is the canonical
+path; the rest of this page's Avro and Protobuf sections lead with it.
+
+**The transcode** converts at the broker's edges instead, so handlers keep plain serde models on
+the default codec and never see the wire. It is the compatibility path: the right choice for a
+service that must not carry generated types or Avro-derived models, at the cost of a JSON hop per
+message and of losing schema resolution, since a JSON handler has no reader schema to resolve
+onto.
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:wiring"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_lanes.rs:handler"
 ```
+
+The two do not mix on one broker: `KafkaBroker::schema_registry(sr)` attaches the transcode to
+every subscription that broker opens, so a frame-reading handler on it would be handed JSON.
 
 ## The client
 
 `SchemaRegistry` constructs synchronously and does no I/O until the first lookup; clones share
 one schema cache, so an id or a subject resolves over the network once per process. Basic and
 bearer authentication are builder options, TLS comes via rustls.
+
+## The byte lanes
+
+The envelope is a lane type on both ends: `IncomingFrame` arrives through the core's
+`Deserialized` lane, `OutgoingFrame` leaves through `Serialized`. What rides the lane is the
+envelope rather than the message model, and that is forced rather than chosen. Resolving a schema
+id is a registry conversation and therefore `async`, while `Deserialized::from_payload` is a sync
+associated function with no context to reach a registry from; and for Avro the model type is a
+serde type, which the core's lanes are reserved against (`MessageWire`, `ReplyShape` and `Input`
+are blanket-implemented for every `Serialize` / `DeserializeOwned` value - which is why
+`#[wire(prost)]` works for a `prost` message and an equivalent `#[wire(avro)]` cannot exist). So
+the wire form rides the lane, the value's conversion is one call, and no decode hides an I/O stall
+or reaches for a process-wide registry singleton.
+
+Reading resolves the writer schema the envelope names onto the reading type's own, which is what
+makes a producer still on an older version of the subject readable. Publishing resolves its
+subject once, at startup, so the publish itself does no I/O and a subject that is missing or
+incompatible fails the app's startup rather than its first message:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_lanes.rs:app"
+```
+
+`Subject::register` publishes the type's own schema and takes the id back; `Subject::resolve`
+looks the id up without registering, for deployments where producers must not create schemas
+(Confluent's own guidance, with `auto.register.schemas` off); `Subject::pinned` takes an id the
+service already knows, for a pinned deployment, a replay tool, or a test with no registry in
+front of it.
+
+The Protobuf half is the same shape with one difference: reading needs no registry at all. The
+envelope's message-index path only says which message of the schema was written, and the reading
+type has already decided which one it reads, so `protobuf::decode_framed` is a plain synchronous
+call. Only the publish side resolves anything.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:handler"
+```
 
 ## Consuming: transcode on the way in
 
@@ -72,7 +123,7 @@ EOS pipeline all compose unchanged: they publish through the app's pipeline, whe
 sits. A publisher paired straight off a connected broker outside the runtime bypasses the
 pipeline and publishes exactly what it is given.
 
-## Formats
+## Formats on the transcoding path
 
 - **JSON** (this feature, works with the default `json` codec alone): envelope on and off,
   documents untouched. Documents are not validated against the registered schema; the handler
@@ -94,5 +145,32 @@ pipeline and publishes exactly what it is given.
     --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf.rs:wiring"
     ```
 
-The transcoding trade-off: one JSON hop per message on registry topics buys a
-single uniform handler model - the same struct, the same codec, any wire format.
+The transcoding trade-off: one JSON hop per message on registry topics buys a single uniform
+handler model - the same struct, the same codec, any wire format - and gives up what the JSON
+document cannot carry. Avro types JSON has no shape for do not survive it, and a datum written
+under an older version of the subject is decoded, not resolved: the handler sees the writer's
+fields, with no reader schema to fill in what the producer never wrote. Reach for it when a
+service must keep plain serde models on a registry-backed topic; reach for the lanes otherwise.
+
+## Testing a lane handler
+
+A lane handler is an ordinary handler, so `TestApp` and the in-process `KafkaTestBroker` drive it
+with no cluster - and, on the Protobuf side, with no registry either, since reading needs none.
+An `OutgoingFrame` is a publish value like any other, so the injection is the ordinary typed one
+and the frame's own bytes go on the topic untouched:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:testapp"
+```
+
+Without the `macros` feature the same handler is a `Handle` impl over the same two axes; the
+mount names the subscription and the reply's destination, and nothing in either knows a codec
+exists:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:handler"
+```
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:mount"
+```

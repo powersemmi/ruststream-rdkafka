@@ -42,6 +42,14 @@ What the transport does not have, it refuses instead of inventing: `KafkaPositio
 topic the subscription does not read all report `KafkaError::InvalidOptions`. Timestamp-resolved
 seeks and multi-partition placement belong in the live suite.
 
+## Byte-lane handlers
+
+A handler reading the Confluent wire form is an ordinary handler here too: `IncomingFrame` and
+`OutgoingFrame` carry their own bytes, so nothing about them needs a cluster, and on the Protobuf
+side reading needs no registry either. See
+[the Schema Registry page](schema-registry.md#testing-a-lane-handler) for the `TestApp` shape and
+its manual-path counterpart.
+
 ## What the test broker does not simulate
 
 The in-process broker implements the core routing contract - exact topic-name fanout,
