@@ -60,6 +60,25 @@ delivery path, for the writer schema an arriving envelope names. A subject that 
 therefore fails startup rather than the first publish, and an id the prefetch could not resolve
 becomes a decode failure the subscription's failure policy settles, never a silent guess.
 
+### Naming the registry once
+
+The registry is named twice in an app and never at a mount site: once when the prefetch is built,
+and once when it is attached to the broker. Every codec is minted from that one prefetch, so what
+varies per mount is the subject - which is what actually differs per mount.
+
+The scoping is the core's own codec cascade, and it already does what schemas need: a codec set
+for a broker scope covers every handler in it, and a router mounted inside overrides it for the
+handlers it carries. Most specific wins, exactly as for any other codec.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:cascade"
+```
+
+There is no app-wide level, because the core scopes codecs at the broker and the router, and a
+registry is a per-cluster thing in any case. What the core does not offer is a *partial* override -
+"take the scope's codec and change only its subject" - since a codec is an opaque value to it. The
+prefetch minting a second codec is that override, and it costs one line.
+
 ### Schema evolution
 
 Reading a datum with its writer schema recovers what the writer wrote, and no more. A field the
