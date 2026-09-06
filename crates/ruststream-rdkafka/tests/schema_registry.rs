@@ -5,14 +5,17 @@
 
 #![cfg(feature = "schema-registry")]
 
+use std::num::NonZeroUsize;
+use std::time::Duration;
+
 use ruststream::runtime::{App, AppInfo, Reply, RustStream};
 use ruststream::{
     Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber,
 };
 use ruststream_rdkafka::schema_registry::{JsonSchema, parse_envelope};
 use ruststream_rdkafka::{
-    ConnectedKafkaBroker, KafkaBroker, KafkaError, KafkaPublish, KafkaTopic, SchemaFrame,
-    SchemaRegistry, SchemaType, StartOffset,
+    ConnectedKafkaBroker, KafkaBroker, KafkaError, KafkaPublish, KafkaTopic, SchemaCachePolicy,
+    SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use wiremock::matchers::{basic_auth, body_partial_json, method, path};
@@ -70,6 +73,213 @@ async fn register_caches_subject_and_id() {
     assert_eq!(cached.id(), 42);
     assert_eq!(cached.definition(), ORDER_SCHEMA);
     assert!(sr.cached_schema(42).is_some(), "id cache fed too");
+}
+
+#[tokio::test]
+async fn lookup_id_answers_for_the_callers_own_schema() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subjects/orders-value"))
+        .and(body_partial_json(
+            serde_json::json!({ "schema": ORDER_SCHEMA }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "subject": "orders-value",
+            "id": 5,
+            "version": 2,
+            "schema": ORDER_SCHEMA,
+        })))
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri());
+    let id = sr
+        .lookup_id("orders-value", SchemaType::Avro, ORDER_SCHEMA)
+        .await
+        .expect("lookup");
+    assert_eq!(id, 5);
+    assert!(
+        sr.cached_subject("orders-value").is_none(),
+        "a lookup answers about the caller's schema, not about what the subject holds",
+    );
+}
+
+#[tokio::test]
+async fn lookup_id_names_the_subject_it_could_not_find() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subjects/missing-value"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri());
+    let err = sr
+        .lookup_id("missing-value", SchemaType::Avro, ORDER_SCHEMA)
+        .await
+        .expect_err("unregistered");
+    assert!(err.to_string().contains("missing-value"));
+}
+
+/// The point of the seam: a client of the caller's own reaches everything written against
+/// `SchemaRegistry`, with no HTTP anywhere.
+#[tokio::test]
+async fn a_supplied_client_answers_for_the_whole_crate() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::future::BoxFuture;
+    use ruststream_rdkafka::schema_registry::{RegisteredSchema, RegistryClient};
+
+    struct Counting {
+        calls: AtomicUsize,
+    }
+
+    impl RegistryClient for Counting {
+        fn schema_by_id(
+            &self,
+            id: u32,
+        ) -> BoxFuture<'_, Result<Arc<RegisteredSchema>, KafkaError>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                Ok(Arc::new(RegisteredSchema::new(
+                    id,
+                    SchemaType::Avro,
+                    ORDER_SCHEMA,
+                )))
+            })
+        }
+
+        fn latest(
+            &self,
+            _subject: &str,
+        ) -> BoxFuture<'_, Result<Option<Arc<RegisteredSchema>>, KafkaError>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                Ok(Some(Arc::new(RegisteredSchema::new(
+                    77,
+                    SchemaType::Avro,
+                    ORDER_SCHEMA,
+                ))))
+            })
+        }
+
+        fn register(
+            &self,
+            _subject: &str,
+            _schema_type: SchemaType,
+            _definition: String,
+        ) -> BoxFuture<'_, Result<u32, KafkaError>> {
+            Box::pin(async move { Ok(77) })
+        }
+
+        fn lookup_id(
+            &self,
+            _subject: &str,
+            _schema_type: SchemaType,
+            _definition: String,
+        ) -> BoxFuture<'_, Result<u32, KafkaError>> {
+            Box::pin(async move { Ok(77) })
+        }
+    }
+
+    let client = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+    });
+    let sr = SchemaRegistry::with_client(Arc::clone(&client) as Arc<dyn RegistryClient>);
+
+    assert_eq!(sr.schema_by_id(5).await.expect("by id").id(), 5);
+    assert_eq!(sr.warm("orders-value").await.expect("warm").id(), 77);
+    // And the facade's cache still sits in front of it: the repeat asks nobody.
+    assert_eq!(sr.schema_by_id(5).await.expect("cached").id(), 5);
+    assert_eq!(
+        client.calls.load(Ordering::Relaxed),
+        2,
+        "one call per distinct lookup, the cache absorbing the repeat",
+    );
+    assert!(sr.cached_subject("orders-value").is_some());
+}
+
+#[tokio::test]
+async fn a_disabled_cache_remembers_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/schemas/ids/7"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "schema": ORDER_SCHEMA })),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri()).cache_policy(SchemaCachePolicy::Disabled);
+    sr.schema_by_id(7).await.expect("first fetch");
+    sr.schema_by_id(7)
+        .await
+        .expect("the second reaches the registry too (expect(2) verifies)");
+
+    assert!(sr.cached_schema(7).is_none(), "nothing is remembered");
+    assert!(sr.cached_subject("orders-value").is_none());
+}
+
+#[tokio::test]
+async fn the_id_cache_is_bounded_and_drops_the_oldest() {
+    let server = MockServer::start().await;
+    for id in 1..=3u32 {
+        Mock::given(method("GET"))
+            .and(path(format!("/schemas/ids/{id}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "schema": ORDER_SCHEMA })),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let sr = SchemaRegistry::new(server.uri()).cache_policy(SchemaCachePolicy::Cached {
+        capacity: NonZeroUsize::new(2).expect("non-zero"),
+        subject_ttl: None,
+    });
+    for id in 1..=3u32 {
+        sr.schema_by_id(id).await.expect("fetch");
+    }
+
+    assert!(sr.cached_schema(1).is_none(), "the oldest is dropped");
+    assert!(sr.cached_schema(2).is_some());
+    assert!(sr.cached_schema(3).is_some());
+}
+
+/// The split the whole policy rests on: a subject's latest version moves, a schema id never
+/// does, so only the subject-keyed claim can expire.
+#[tokio::test]
+async fn a_subject_entry_expires_but_the_id_it_named_does_not() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/subjects/orders-value/versions/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 9,
+            "version": 1,
+            "schema": ORDER_SCHEMA,
+            "schemaType": "AVRO",
+        })))
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri()).cache_policy(SchemaCachePolicy::Cached {
+        capacity: NonZeroUsize::new(8).expect("non-zero"),
+        // Elapsed by the time it is read: the entry is stamped when it is stored.
+        subject_ttl: Some(Duration::ZERO),
+    });
+    sr.warm("orders-value").await.expect("warm");
+
+    assert!(
+        sr.cached_subject("orders-value").is_none(),
+        "the claim that this subject points at that id has expired",
+    );
+    assert!(
+        sr.cached_schema(9).is_some(),
+        "the id itself is immutable, so its entry stands",
+    );
 }
 
 #[tokio::test]
@@ -206,7 +416,7 @@ async fn scan_topic(
         .await
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
-    let found = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let found = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let msg = stream
                 .next()

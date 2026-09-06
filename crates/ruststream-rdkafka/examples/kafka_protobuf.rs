@@ -3,6 +3,11 @@
 //! publish layer puts framed Protobuf on the wire because the reply topic's subject holds a
 //! Protobuf schema. No code generation anywhere.
 //!
+//! That last part is what this path is for: a service that must not carry generated types. It
+//! costs a JSON hop and a dynamic message per delivery, and it cannot decode anything while the
+//! registry is unreachable. `kafka_lanes_testing` shows the canonical path, where a generated
+//! message reads itself and only the publish side resolves a subject.
+//!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_protobuf --features protobuf -- run

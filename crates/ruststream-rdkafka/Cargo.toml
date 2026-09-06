@@ -27,9 +27,10 @@ schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
 # Avro transcoding for the registry middleware: apache-avro's serde path plus the AvroSchema
 # derive for registering subjects from types.
 avro = ["schema-registry", "dep:apache-avro"]
-# Protobuf transcoding for the registry middleware: dynamic messages (prost-reflect) with
-# descriptors compiled from the registry's .proto sources (protox).
-protobuf = ["schema-registry", "dep:prost-reflect", "dep:protox"]
+# Protobuf: the byte-lane surface over prost-generated messages, plus the transcoding path for
+# the registry middleware - dynamic messages (prost-reflect) with descriptors compiled from the
+# registry's .proto sources (protox).
+protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
 # Ships the in-process test broker (`testing` module). The conformance harness is broker-author
 # tooling and stays in this repo's dev-dependencies, out of the user-facing feature.
 testing = ["ruststream/testing"]
@@ -55,6 +56,7 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 apache-avro = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 prost-reflect = { workspace = true, optional = true }
 protox = { workspace = true, optional = true }
 
@@ -63,6 +65,7 @@ ruststream = { workspace = true, features = ["conformance", "testing", "macros",
 serde = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
+schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }
 
 # The vendored librdkafka build makes docs.rs shy away from the TLS/SASL backends; the API
 # surface is identical either way, so document with just the `testing` module enabled.
@@ -109,8 +112,28 @@ name = "kafka_avro"
 required-features = ["avro"]
 
 [[example]]
+name = "kafka_third_party_registry"
+required-features = ["avro"]
+
+[[example]]
+name = "kafka_avro_codec"
+required-features = ["avro"]
+
+[[example]]
+name = "kafka_avro_lanes"
+required-features = ["avro"]
+
+[[example]]
 name = "kafka_protobuf"
 required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_lanes_testing"
+required-features = ["protobuf", "testing"]
+
+[[example]]
+name = "kafka_lanes_manual"
+required-features = ["protobuf", "testing"]
 
 [[example]]
 name = "kafka_testing"

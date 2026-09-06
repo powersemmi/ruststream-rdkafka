@@ -16,21 +16,28 @@
 //! and the typed shorthands), mirroring Confluent's production guidance of not
 //! auto-registering schemas from producers.
 
+mod cache;
+mod client;
+
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use ruststream::Publisher;
+pub use cache::{MemorySchemaCache, SchemaCache, SchemaCachePolicy};
+pub use client::{HttpRegistryClient, RegistryClient};
+
+use client::Auth;
+use ruststream::codec::{Codec, CodecError};
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
-use serde::Deserialize;
+use ruststream::{BytesMut, Publisher};
 
 pub use schemars::JsonSchema;
 
 use crate::error::KafkaError;
 
 /// The zero magic byte opening every Confluent-framed payload.
-const WIRE_MAGIC: u8 = 0;
+pub(crate) const WIRE_MAGIC: u8 = 0;
 
 /// The schema flavors the registry stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +78,16 @@ pub struct RegisteredSchema {
 }
 
 impl RegisteredSchema {
+    /// Builds one, for a [`RegistryClient`] implementation answering a lookup.
+    #[must_use]
+    pub fn new(id: u32, schema_type: SchemaType, definition: impl Into<String>) -> Self {
+        Self {
+            id,
+            schema_type,
+            definition: definition.into(),
+        }
+    }
+
     /// The registry-assigned schema id (what the wire-format envelope carries).
     #[must_use]
     pub fn id(&self) -> u32 {
@@ -119,18 +136,84 @@ impl SubjectStrategy {
     }
 }
 
-enum Auth {
-    None,
-    Basic { user: String, password: String },
-    Bearer(String),
+/// A message type that names its own registry subject.
+///
+/// The subject a type is registered under is a fact about the type, not about the place it is
+/// mounted, and repeating it as a string literal at every mount site is how a producer and a
+/// consumer come to disagree about it. Declared here, it is written once:
+///
+/// ```
+/// use ruststream_rdkafka::schema_registry::RegistrySubject;
+///
+/// # #[derive(serde::Serialize)]
+/// struct Order {
+///     id: i64,
+/// }
+///
+/// impl RegistrySubject for Order {
+///     const SUBJECT: &'static str = "orders-value";
+/// }
+///
+/// # fn check() {
+/// assert_eq!(Order::SUBJECT, "orders-value");
+/// # }
+/// # check();
+/// ```
+///
+/// Every mount site then names the type rather than the string:
+/// [`AvroCodec::for_type`](crate::avro::AvroCodec::for_type) on the codec path, and
+/// [`avro::Subject::resolve_declared`](crate::avro::Subject::resolve_declared) on the byte-lane
+/// one.
+///
+/// # Which name to write
+///
+/// Whatever the deployment's naming strategy produces, spelled out. Under Confluent's default
+/// [`TopicName`](SubjectStrategy::TopicName) that is `{topic}-value`; under the record
+/// strategies it is the record's fully qualified name, or `{topic}-{record}`.
+/// [`SubjectStrategy::subject`] renders any of them rather than writing one by hand.
+///
+/// The strategy is deliberately not a second associated constant. Two of the three need a topic,
+/// which is the mount site's to know and not the type's, so a strategy declared here could only
+/// describe the answer already written above it.
+///
+/// # What this does not check
+///
+/// Nothing verifies that the schema under `SUBJECT` is this type's schema. That exposure is
+/// exactly the one a hand-written subject string already had - mount a codec against the wrong
+/// message type and the format rejects the first message against the wrong schema, loudly - so
+/// declaring the subject here removes a way to mistype it and introduces no failure of its own.
+/// Checking the pairing before the first message is the compile-time validation layer of issue
+/// #54, which is a separate piece of work.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not declare a registry subject",
+    note = "implement `RegistrySubject` for `{Self}` with one associated constant, `const \
+            SUBJECT: &'static str`, naming the registry subject its schema lives under"
+)]
+pub trait RegistrySubject {
+    /// The registry subject this type's schema lives under.
+    const SUBJECT: &'static str;
+
+    /// For Protobuf, the fully qualified name of the message within the subject's `.proto`
+    /// schema, package included. The other formats need no name beyond the subject and leave
+    /// this empty.
+    ///
+    /// A `prost`-generated type carries no descriptor to read this from, which is why it is
+    /// declared rather than derived; [`protobuf::Subject`](crate::protobuf::Subject) reports an
+    /// empty one when it resolves, rather than framing against a message it cannot address.
+    const MESSAGE: &'static str = "";
 }
 
 struct RegistryInner {
-    base_url: String,
-    http: reqwest::Client,
-    auth: Auth,
-    by_id: Mutex<HashMap<u32, Arc<RegisteredSchema>>>,
-    by_subject: Mutex<HashMap<String, u32>>,
+    /// What answers a registry question, and what remembers the answer. Both are seams: a
+    /// service that wants a different HTTP stack, a published client crate, a binding to a
+    /// non-Rust client, or a cache of its own replaces one without touching anything above.
+    client: Arc<dyn RegistryClient>,
+    cache: Arc<dyn SchemaCache>,
+    /// The endpoint of the shipped HTTP client, when that is what sits behind this facade, so
+    /// `basic_auth` and `bearer_token` can rebuild it. `None` for a caller-supplied client.
+    shipped_at: Option<String>,
+    /// The parsed forms of what the cache holds, which belong to the format features rather than
+    /// to the registry conversation, and are dropped alongside the entries they came from.
     #[cfg(feature = "avro")]
     parsed_avro: Mutex<HashMap<u32, Arc<apache_avro::Schema>>>,
     #[cfg(feature = "protobuf")]
@@ -141,6 +224,12 @@ struct RegistryInner {
 ///
 /// Construction is synchronous and does no I/O (the broker contract's lazy-startup shape);
 /// every lookup caches, so a schema id or subject resolves over the network once per process.
+///
+/// It is a facade over two seams, and everything else in this crate is written against it rather
+/// than against either: [`RegistryClient`] answers the registry's questions asynchronously, and
+/// [`SchemaCache`] remembers the answers synchronously. Replacing one - a different HTTP stack, a
+/// published client crate, a binding to a non-Rust client, a cache with different bounds - leaves
+/// the codecs, the byte-lane subjects, the prefetch and the transcoding middleware untouched.
 ///
 /// # Examples
 ///
@@ -159,30 +248,8 @@ pub struct SchemaRegistry {
 
 impl fmt::Debug for SchemaRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SchemaRegistry")
-            .field("base_url", &self.inner.base_url)
-            .finish_non_exhaustive()
+        f.debug_struct("SchemaRegistry").finish_non_exhaustive()
     }
-}
-
-#[derive(Deserialize)]
-struct SchemaByIdResponse {
-    schema: String,
-    #[serde(rename = "schemaType")]
-    schema_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RegisterResponse {
-    id: u32,
-}
-
-#[derive(Deserialize)]
-struct LatestVersionResponse {
-    id: u32,
-    schema: String,
-    #[serde(rename = "schemaType")]
-    schema_type: Option<String>,
 }
 
 impl SchemaRegistry {
@@ -194,23 +261,53 @@ impl SchemaRegistry {
         while base_url.ends_with('/') {
             base_url.pop();
         }
-        Self {
-            inner: Arc::new(RegistryInner {
-                base_url,
-                http: reqwest::Client::new(),
-                auth: Auth::None,
-                by_id: Mutex::new(HashMap::new()),
-                by_subject: Mutex::new(HashMap::new()),
-                #[cfg(feature = "avro")]
-                parsed_avro: Mutex::new(HashMap::new()),
-                #[cfg(feature = "protobuf")]
-                parsed_proto: Mutex::new(HashMap::new()),
-            }),
+        Self::assembled(
+            Arc::new(HttpRegistryClient::new(base_url.clone(), Auth::None)),
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+        .shipped_at(base_url)
+    }
+
+    /// A client over a [`RegistryClient`] of your own and the default cache.
+    ///
+    /// This is the seam for a registry this crate does not speak to: a different HTTP stack, a
+    /// published client crate, a binding to a non-Rust client, a fake in a test.
+    #[must_use]
+    pub fn with_client(client: Arc<dyn RegistryClient>) -> Self {
+        Self::assembled(
+            client,
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+    }
+
+    /// Replaces what this client remembers with a [`SchemaCache`] of your own.
+    ///
+    /// Configure before handing the client out: clones share one cache.
+    #[must_use]
+    pub fn with_cache(self, cache: Arc<dyn SchemaCache>) -> Self {
+        let assembled = Self::assembled(Arc::clone(&self.inner.client), cache);
+        match self.inner.shipped_at.clone() {
+            Some(base_url) => assembled.shipped_at(base_url),
+            None => assembled,
         }
+    }
+
+    /// How much of what it resolves this client remembers; see [`SchemaCachePolicy`].
+    ///
+    /// Sugar for [`with_cache`](Self::with_cache) over the default cache. Configure before
+    /// handing the client out: clones share one cache and the configuration it was made with.
+    #[must_use]
+    pub fn cache_policy(self, policy: SchemaCachePolicy) -> Self {
+        self.with_cache(Arc::new(MemorySchemaCache::new(policy)))
     }
 
     /// HTTP basic authentication for every registry request. Configure before handing the
     /// client out: clones share the configuration they were made from.
+    ///
+    /// # Panics
+    ///
+    /// Panics when this client was built with [`with_client`](Self::with_client): the
+    /// credentials of a client this crate did not write are that client's own business.
     #[must_use]
     pub fn basic_auth(self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.with_auth(Auth::Basic {
@@ -221,19 +318,35 @@ impl SchemaRegistry {
 
     /// Bearer-token authentication for every registry request. Configure before handing the
     /// client out.
+    ///
+    /// # Panics
+    ///
+    /// As [`basic_auth`](Self::basic_auth).
     #[must_use]
     pub fn bearer_token(self, token: impl Into<String>) -> Self {
         self.with_auth(Auth::Bearer(token.into()))
     }
 
+    /// Rebuilds the shipped HTTP client with new credentials, and empties the caches: what the
+    /// previous credentials could see is not an answer these ones may give.
     fn with_auth(self, auth: Auth) -> Self {
+        let base_url = self.inner.shipped_at.clone().expect(
+            "basic_auth and bearer_token configure the HTTP client this crate ships; a \
+             RegistryClient supplied with `with_client` carries its own credentials",
+        );
+        Self::assembled(
+            Arc::new(HttpRegistryClient::new(base_url.clone(), auth)),
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+        .shipped_at(base_url)
+    }
+
+    fn assembled(client: Arc<dyn RegistryClient>, cache: Arc<dyn SchemaCache>) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
-                base_url: self.inner.base_url.clone(),
-                http: self.inner.http.clone(),
-                auth,
-                by_id: Mutex::new(HashMap::new()),
-                by_subject: Mutex::new(HashMap::new()),
+                client,
+                cache,
+                shipped_at: None,
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
                 #[cfg(feature = "protobuf")]
@@ -242,26 +355,23 @@ impl SchemaRegistry {
         }
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{path}", self.inner.base_url);
-        let request = self.inner.http.request(method, url);
-        match &self.inner.auth {
-            Auth::None => request,
-            Auth::Basic { user, password } => request.basic_auth(user, Some(password)),
-            Auth::Bearer(token) => request.bearer_auth(token),
-        }
+    /// Records that the client behind this facade is the shipped HTTP one, at `base_url`, so the
+    /// credential builders can rebuild it. Absent for a client the caller supplied.
+    fn shipped_at(self, base_url: String) -> Self {
+        let mut inner = self.inner;
+        let slot = Arc::get_mut(&mut inner).expect("freshly assembled, not yet shared");
+        slot.shipped_at = Some(base_url);
+        Self { inner }
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, KafkaError> {
-        let response = self
-            .request(reqwest::Method::GET, path)
-            .send()
-            .await
-            .map_err(KafkaError::schema_registry)?;
-        let response = response
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        response.json().await.map_err(KafkaError::schema_registry)
+    /// Records a freshly resolved schema, and drops the parsed forms of anything the cache let go
+    /// of to make room.
+    fn remember(&self, subject: Option<&str>, schema: &Arc<RegisteredSchema>) {
+        self.inner.cache.store(subject, schema);
+        let evicted = self.inner.cache.evicted_ids();
+        if !evicted.is_empty() {
+            self.purge_parsed(&evicted);
+        }
     }
 
     /// The schema registered under `id`, from the cache or the registry.
@@ -279,17 +389,9 @@ impl SchemaRegistry {
         if let Some(schema) = self.cached_schema(id) {
             return Ok(schema);
         }
-        let fetched: SchemaByIdResponse = self.get_json(&format!("/schemas/ids/{id}")).await?;
-        let schema = Arc::new(RegisteredSchema {
-            id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .insert(id, Arc::clone(&schema));
+        let schema = self.inner.client.schema_by_id(id).await?;
+        // No subject: a lookup by id says nothing about which subject points at it.
+        self.remember(None, &schema);
         Ok(schema)
     }
 
@@ -312,30 +414,41 @@ impl SchemaRegistry {
         definition: impl Into<String>,
     ) -> Result<u32, KafkaError> {
         let definition = definition.into();
-        let body = serde_json::json!({
-            "schema": definition,
-            "schemaType": schema_type.as_api(),
-        });
-        let response = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/subjects/{subject}/versions"),
-            )
-            .json(&body)
-            .send()
+        let id = self
+            .inner
+            .client
+            .register(subject, schema_type, definition.clone())
+            .await?;
+        self.remember(
+            Some(subject),
+            &Arc::new(RegisteredSchema::new(id, schema_type, definition)),
+        );
+        Ok(id)
+    }
+
+    /// The id the registry already gave exactly this schema under `subject`, registering
+    /// nothing.
+    ///
+    /// This is the lookup a producer that owns its schema needs and [`warm`](Self::warm) cannot
+    /// answer: `warm` resolves *the subject's latest* schema, while a byte-lane producer writes
+    /// datums under *its own*, and framing one with the other's id puts an unreadable record on
+    /// the topic. Nothing is cached, for the same reason: the answer is about a schema the
+    /// caller brought, not about what the subject currently holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable or rejects the
+    /// request, and [`KafkaError::InvalidOptions`] when the subject does not hold this schema.
+    pub async fn lookup_id(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        definition: impl Into<String>,
+    ) -> Result<u32, KafkaError> {
+        self.inner
+            .client
+            .lookup_id(subject, schema_type, definition.into())
             .await
-            .map_err(KafkaError::schema_registry)?
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        let registered: RegisterResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
-        let schema = Arc::new(RegisteredSchema {
-            id: registered.id,
-            schema_type,
-            definition,
-        });
-        self.cache(subject, &schema);
-        Ok(registered.id)
     }
 
     /// Resolves `subject`'s latest version and caches it - the warm-only alternative to
@@ -353,16 +466,9 @@ impl SchemaRegistry {
     /// Panics when the internal cache mutex is poisoned, which requires a prior panic inside
     /// the client (an invariant violation, not an operational failure).
     pub async fn warm(&self, subject: &str) -> Result<Arc<RegisteredSchema>, KafkaError> {
-        let fetched: LatestVersionResponse = self
-            .get_json(&format!("/subjects/{subject}/versions/latest"))
-            .await?;
-        let schema = Arc::new(RegisteredSchema {
-            id: fetched.id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.cache(subject, &schema);
-        Ok(schema)
+        self.latest(subject).await?.ok_or_else(|| {
+            KafkaError::SchemaRegistry(format!("the registry has no subject {subject:?}").into())
+        })
     }
 
     /// Like [`warm`](Self::warm), but a missing subject resolves to `None` instead of an
@@ -371,43 +477,37 @@ impl SchemaRegistry {
         &self,
         subject: &str,
     ) -> Result<Option<Arc<RegisteredSchema>>, KafkaError> {
-        let response = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/subjects/{subject}/versions/latest"),
-            )
-            .send()
-            .await
-            .map_err(KafkaError::schema_registry)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let Some(schema) = self.inner.client.latest(subject).await? else {
             return Ok(None);
-        }
-        let response = response
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        let fetched: LatestVersionResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
-        let schema = Arc::new(RegisteredSchema {
-            id: fetched.id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.cache(subject, &schema);
+        };
+        self.remember(Some(subject), &schema);
         Ok(Some(schema))
     }
 
-    fn cache(&self, subject: &str, schema: &Arc<RegisteredSchema>) {
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .insert(schema.id, Arc::clone(schema));
-        self.inner
-            .by_subject
-            .lock()
-            .expect("subject cache mutex poisoned")
-            .insert(subject.to_owned(), schema.id);
+    /// Drops the parsed forms of schemas the id cache has just evicted: they are derived from
+    /// the definitions that went with them, so keeping them would outlive their source.
+    #[cfg(any(feature = "avro", feature = "protobuf"))]
+    fn purge_parsed(&self, evicted: &[u32]) {
+        for id in evicted {
+            #[cfg(feature = "avro")]
+            self.inner
+                .parsed_avro
+                .lock()
+                .expect("parsed schema cache mutex poisoned")
+                .remove(id);
+            #[cfg(feature = "protobuf")]
+            self.inner
+                .parsed_proto
+                .lock()
+                .expect("descriptor cache mutex poisoned")
+                .remove(id);
+        }
     }
+
+    /// No parsed forms are kept without a format feature, so there is nothing to purge.
+    #[cfg(not(any(feature = "avro", feature = "protobuf")))]
+    #[allow(clippy::unused_self)]
+    fn purge_parsed(&self, _evicted: &[u32]) {}
 
     /// The cached schema for `id`, when an earlier lookup resolved it (the subscription's
     /// transcoding keeps ids it has seen warm).
@@ -418,12 +518,7 @@ impl SchemaRegistry {
     /// the client (an invariant violation, not an operational failure).
     #[must_use]
     pub fn cached_schema(&self, id: u32) -> Option<Arc<RegisteredSchema>> {
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .get(&id)
-            .cloned()
+        self.inner.cache.schema(id)
     }
 
     /// The cached schema for `subject`, when [`register`](Self::register), [`warm`](Self::warm),
@@ -435,13 +530,7 @@ impl SchemaRegistry {
     /// the client (an invariant violation, not an operational failure).
     #[must_use]
     pub fn cached_subject(&self, subject: &str) -> Option<Arc<RegisteredSchema>> {
-        let id = *self
-            .inner
-            .by_subject
-            .lock()
-            .expect("subject cache mutex poisoned")
-            .get(subject)?;
-        self.cached_schema(id)
+        self.inner.cache.subject(subject)
     }
 
     /// Registers the JSON Schema generated from `T` (via schemars) under `subject` - the
@@ -459,17 +548,22 @@ impl SchemaRegistry {
     /// Registers the Avro schema derived from `T` under `subject` - the typed shorthand for
     /// [`register`](Self::register) with `T::get_schema()`.
     ///
+    /// The full schema JSON is registered, not its Parsing Canonical Form: canonicalization
+    /// keeps only what makes two schemas *the same* and drops field defaults, aliases, docs and
+    /// logical types - and a field default is precisely what lets a later reader resolve an
+    /// earlier writer's datum, so a subject registered canonically can never carry an evolution.
+    ///
     /// # Errors
     ///
-    /// As [`register`](Self::register).
+    /// As [`register`](Self::register), plus [`KafkaError::WireFormat`] when the derived schema
+    /// cannot be serialized.
     #[cfg(feature = "avro")]
     pub async fn register_avro<T: apache_avro::AvroSchema>(
         &self,
         subject: &str,
     ) -> Result<u32, KafkaError> {
-        let schema = T::get_schema();
-        self.register(subject, SchemaType::Avro, schema.canonical_form())
-            .await
+        let definition = crate::avro::schema_json(&T::get_schema())?;
+        self.register(subject, SchemaType::Avro, definition).await
     }
 
     /// The parsed Avro schema for a cached registered schema, parsed once and shared.
@@ -655,6 +749,233 @@ fn outgoing_json_to_datum(
              not enabled on ruststream-rdkafka; enable it to publish to this topic",
             schema.id,
         ))),
+    }
+}
+
+/// The async half of a registry-backed codec: it resolves, on the broker's async edges, every
+/// schema the synchronous codec will read.
+///
+/// A [`Codec`] is synchronous on both ends and a registry lookup is
+/// not, and no amount of arranging makes those meet inside `encode` or `decode`: blocking a
+/// runtime worker from a sync function is not an option and guessing a schema is corruption. So
+/// the lookups move to the two places that are already `async` and already know when they have to
+/// happen - the broker's `connect`, for the subjects a codec publishes under, and each
+/// subscription's delivery path, for the writer schema an arriving envelope names. By the time a
+/// codec runs, what it needs is in the shared cache, and its own work is pure computation.
+///
+/// This is a distinct attachment from
+/// [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) on purpose. That one
+/// *rewrites* deliveries into JSON, which is the transcoding compatibility path; this one leaves
+/// every payload exactly as it arrived and only fills a cache. Attaching both to one broker is
+/// contradictory - the transcode would hand a JSON document to a codec expecting the Confluent
+/// wire format - and the prefetch runs first so it still sees the envelope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
+/// use ruststream_rdkafka::avro::AvroCodec;
+///
+/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+/// // Every codec built here records its subject, so `connect` resolves it and a subject that
+/// // is missing fails the app's startup rather than its first publish.
+/// let codec = AvroCodec::registry(&prefetch, "confirmations-value");
+/// let broker = KafkaBroker::new(["localhost:9092"]).schema_prefetch(prefetch);
+/// # let _ = (codec, broker);
+/// ```
+#[derive(Clone)]
+pub struct SchemaPrefetch {
+    registry: SchemaRegistry,
+    /// The subjects registry codecs were built against. Shared with the codecs' own clones, so
+    /// naming a subject once - at the codec - is what puts it on this list.
+    subjects: Arc<Mutex<HashSet<String>>>,
+}
+
+impl fmt::Debug for SchemaPrefetch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SchemaPrefetch")
+            .field("registry", &self.registry)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SchemaPrefetch {
+    /// Builds the prefetch over `registry`. Construction is synchronous and does no I/O; the
+    /// resolving happens on the broker's async edges.
+    #[must_use]
+    pub fn new(registry: SchemaRegistry) -> Self {
+        Self {
+            registry,
+            subjects: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// The client the codecs share a cache with.
+    #[must_use]
+    pub fn registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+
+    /// Records a subject a codec will publish under, so [`warm_subjects`](Self::warm_subjects)
+    /// resolves it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal mutex is poisoned, which requires a prior panic inside this
+    /// type (an invariant violation, not an operational failure).
+    pub(crate) fn record_subject(&self, subject: &str) {
+        self.subjects
+            .lock()
+            .expect("prefetch subjects mutex poisoned")
+            .insert(subject.to_owned());
+    }
+
+    /// Resolves every recorded subject. Called once, by the broker's `connect`, so a subject
+    /// that does not exist fails the app's startup instead of its first publish.
+    pub(crate) async fn warm_subjects(&self) -> Result<(), KafkaError> {
+        let subjects: Vec<String> = self
+            .subjects
+            .lock()
+            .expect("prefetch subjects mutex poisoned")
+            .iter()
+            .cloned()
+            .collect();
+        for subject in subjects {
+            self.registry.warm(&subject).await.map_err(|err| {
+                KafkaError::SchemaRegistry(
+                    format!(
+                        "the schema of subject {subject:?} could not be resolved at startup, so \
+                         a codec publishing under it would have no id to frame with: {err}"
+                    )
+                    .into(),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Resolves the writer schema an arriving envelope names, so the delivery's own decode finds
+    /// it in the cache. The payload is not touched.
+    ///
+    /// A payload carrying no envelope needs nothing, and a lookup that fails is only logged: the
+    /// decode that follows reports it as a decode failure, which the subscription's failure
+    /// policy settles - one delivery's fate decided in one place, rather than half of it here.
+    pub(crate) async fn warm_delivery(&self, payload: &[u8]) {
+        let Some((id, _)) = parse_envelope(payload) else {
+            return;
+        };
+        if self.registry.cached_schema(id).is_some() {
+            return;
+        }
+        if let Err(err) = self.registry.schema_by_id(id).await {
+            tracing::warn!(
+                target: "ruststream_rdkafka",
+                schema_id = id,
+                error = %err,
+                "the writer schema of an arriving delivery could not be resolved; its decode \
+                 will report the miss and the subscription's failure policy settles it",
+            );
+        }
+    }
+}
+
+/// The Confluent envelope around another codec, for a payload that does not need its schema to
+/// be read.
+///
+/// The envelope is separable exactly when the datum inside it is self-describing. A JSON
+/// document is: the id says which schema it claims to conform to, and the document parses
+/// without it, so framing decomposes cleanly into "put the envelope on, take the envelope off"
+/// with an inner codec doing the rest. An Avro datum is not: the id names the schema the datum
+/// *cannot be read without*, and no wrapper can hand that per-delivery schema through a
+/// [`Codec`] method - which is why [`AvroCodec`](crate::avro::AvroCodec) owns its envelope
+/// instead of riding this one. That line is the design rule, not an accident of the two formats.
+///
+/// The wrapper frames and does not validate. A registry's JSON Schema is a compatibility
+/// contract the registry itself enforces between versions, and checking every message against it
+/// would mean carrying a JSON Schema validator and paying it per delivery, which Confluent's own
+/// serializer makes optional for the same reason. Validation is the inner codec's business, and
+/// the inner codec is named right here at the call site: a service that wants it passes a codec
+/// that validates instead of a plain one.
+///
+/// Only encoding needs the registry, for the subject's id; decoding strips the envelope and
+/// hands the bytes on, so a consumer needs no [`SchemaPrefetch`] resolved for it at all.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream::codec::JsonCodec;
+/// use ruststream_rdkafka::{SchemaFramed, SchemaPrefetch, SchemaRegistry};
+///
+/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+/// // Confluent-framed JSON: the core's own codec, under the envelope of a registered subject.
+/// let codec = SchemaFramed::new(&prefetch, "orders-value", JsonCodec);
+/// # let _ = codec;
+/// ```
+#[derive(Debug, Clone)]
+pub struct SchemaFramed<C> {
+    registry: SchemaRegistry,
+    subject: String,
+    inner: C,
+}
+
+impl<C> SchemaFramed<C> {
+    /// Frames `inner`'s payloads under the envelope of `subject`.
+    ///
+    /// Construction is synchronous and does no I/O: `subject` is recorded on `prefetch`, which
+    /// resolves it when the broker connects.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the prefetch's internal mutex is poisoned, which requires a prior panic
+    /// inside it (an invariant violation, not an operational failure).
+    #[must_use]
+    pub fn new(prefetch: &SchemaPrefetch, subject: impl Into<String>, inner: C) -> Self {
+        let subject = subject.into();
+        prefetch.record_subject(&subject);
+        Self {
+            registry: prefetch.registry().clone(),
+            subject,
+            inner,
+        }
+    }
+
+    /// The codec whose payloads travel inside the envelope.
+    pub fn inner(&self) -> &C {
+        &self.inner
+    }
+}
+
+impl<C: Codec> Codec for SchemaFramed<C> {
+    fn encode<T: serde::Serialize>(&self, value: &T) -> Result<BytesMut, CodecError> {
+        let schema = self.registry.cached_subject(&self.subject).ok_or_else(|| {
+            CodecError::Encode(Box::new(KafkaError::malformed(format!(
+                "no schema is cached for subject {:?}: it was not resolved at startup. Attach \
+                 the SchemaPrefetch this codec was built from to the broker \
+                 (KafkaBroker::schema_prefetch), so connect resolves it",
+                self.subject,
+            ))))
+        })?;
+        let datum = self.inner.encode(value)?;
+        let mut framed = BytesMut::with_capacity(1 + 4 + datum.len());
+        framed.extend_from_slice(&[WIRE_MAGIC]);
+        framed.extend_from_slice(&schema.id().to_be_bytes());
+        framed.extend_from_slice(&datum);
+        Ok(framed)
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, CodecError> {
+        // A payload with no envelope is refused rather than passed through: on a registry-backed
+        // topic an unframed record is a producer that did not frame, and reading it anyway would
+        // make that look like it worked.
+        let (_, datum) = parse_envelope(bytes).ok_or_else(|| {
+            CodecError::Decode(Box::new(KafkaError::malformed(format!(
+                "the delivery does not carry the Confluent wire format (a zero magic byte and a \
+                 4-byte schema id) that subject {:?} publishes under; its first bytes are {:02x?}",
+                self.subject,
+                &bytes[..bytes.len().min(8)],
+            ))))
+        })?;
+        self.inner.decode(datum)
     }
 }
 
