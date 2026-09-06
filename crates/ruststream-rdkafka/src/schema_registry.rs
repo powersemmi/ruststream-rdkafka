@@ -140,7 +140,7 @@ enum Auth {
 ///
 /// So an id-keyed entry can never go stale and needs no expiry - a TTL over it could only cause
 /// a refetch that returns the identical bytes - while a subject-keyed entry can, and is the only
-/// thing [`subject_ttl`](Self::subject_ttl) governs. Confluent's own clients scope their
+/// thing the `subject_ttl` of [`Cached`](Self::Cached) governs. Confluent's own clients scope their
 /// `latest.cache.ttl.sec` to exactly the latest-version caches for the same reason.
 ///
 /// What ids still need is a bound. A consumer meets one id per writer version it is sent, which
@@ -912,7 +912,7 @@ fn outgoing_json_to_datum(
 /// The async half of a registry-backed codec: it resolves, on the broker's async edges, every
 /// schema the synchronous codec will read.
 ///
-/// A [`Codec`](ruststream::codec::Codec) is synchronous on both ends and a registry lookup is
+/// A [`Codec`] is synchronous on both ends and a registry lookup is
 /// not, and no amount of arranging makes those meet inside `encode` or `decode`: blocking a
 /// runtime worker from a sync function is not an option and guessing a schema is corruption. So
 /// the lookups move to the two places that are already `async` and already know when they have to
