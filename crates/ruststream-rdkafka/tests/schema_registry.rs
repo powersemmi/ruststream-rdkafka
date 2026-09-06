@@ -121,6 +121,85 @@ async fn lookup_id_names_the_subject_it_could_not_find() {
     assert!(err.to_string().contains("missing-value"));
 }
 
+/// The point of the seam: a client of the caller's own reaches everything written against
+/// `SchemaRegistry`, with no HTTP anywhere.
+#[tokio::test]
+async fn a_supplied_client_answers_for_the_whole_crate() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures::future::BoxFuture;
+    use ruststream_rdkafka::schema_registry::{RegisteredSchema, RegistryClient};
+
+    struct Counting {
+        calls: AtomicUsize,
+    }
+
+    impl RegistryClient for Counting {
+        fn schema_by_id(
+            &self,
+            id: u32,
+        ) -> BoxFuture<'_, Result<Arc<RegisteredSchema>, KafkaError>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                Ok(Arc::new(RegisteredSchema::new(
+                    id,
+                    SchemaType::Avro,
+                    ORDER_SCHEMA,
+                )))
+            })
+        }
+
+        fn latest(
+            &self,
+            _subject: &str,
+        ) -> BoxFuture<'_, Result<Option<Arc<RegisteredSchema>>, KafkaError>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                Ok(Some(Arc::new(RegisteredSchema::new(
+                    77,
+                    SchemaType::Avro,
+                    ORDER_SCHEMA,
+                ))))
+            })
+        }
+
+        fn register(
+            &self,
+            _subject: &str,
+            _schema_type: SchemaType,
+            _definition: String,
+        ) -> BoxFuture<'_, Result<u32, KafkaError>> {
+            Box::pin(async move { Ok(77) })
+        }
+
+        fn lookup_id(
+            &self,
+            _subject: &str,
+            _schema_type: SchemaType,
+            _definition: String,
+        ) -> BoxFuture<'_, Result<u32, KafkaError>> {
+            Box::pin(async move { Ok(77) })
+        }
+    }
+
+    let client = Arc::new(Counting {
+        calls: AtomicUsize::new(0),
+    });
+    let sr = SchemaRegistry::with_client(Arc::clone(&client) as Arc<dyn RegistryClient>);
+
+    assert_eq!(sr.schema_by_id(5).await.expect("by id").id(), 5);
+    assert_eq!(sr.warm("orders-value").await.expect("warm").id(), 77);
+    // And the facade's cache still sits in front of it: the repeat asks nobody.
+    assert_eq!(sr.schema_by_id(5).await.expect("cached").id(), 5);
+    assert_eq!(
+        client.calls.load(Ordering::Relaxed),
+        2,
+        "one call per distinct lookup, the cache absorbing the repeat",
+    );
+    assert!(sr.cached_subject("orders-value").is_some());
+}
+
 #[tokio::test]
 async fn a_disabled_cache_remembers_nothing() {
     let server = MockServer::start().await;
