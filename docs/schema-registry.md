@@ -60,6 +60,36 @@ delivery path, for the writer schema an arriving envelope names. A subject that 
 therefore fails startup rather than the first publish, and an id the prefetch could not resolve
 becomes a decode failure the subscription's failure policy settles, never a silent guess.
 
+### The subject on the type
+
+A subject is a fact about the message type, not about the place it is mounted, and repeating it as
+a string literal at every mount site is how a producer and a consumer come to disagree about it.
+`RegistrySubject` puts it on the type - one associated constant, written by hand in three lines,
+no derive and no macro crate:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:types"
+```
+
+Every mount site then names the type: `AvroCodec::for_type::<Order>(&prefetch)` on the codec path,
+`avro::Subject::<Order>::resolve_declared(&sr)` and
+`protobuf::Subject::<Order>::resolve_declared(&sr)` on the byte-lane one.
+
+The read happens at **construction**, and it has to. A codec is built once, per mount site, where
+the type is known, while `Codec::encode<T: Serialize>` is generic over every serde value and can
+require nothing of them; `for_type` bounds `T: RegistrySubject`, reads the constant, and keeps the
+subject as a field, so `encode` never needs the bound.
+
+Nothing checks that the schema under that subject is the type's schema - but nothing did before
+either. Mount a codec where another message type travels and the format rejects the first message
+against the wrong schema, loudly, exactly as a mistyped string would. Declaring the subject removes
+a way to mistype it and introduces no new failure of its own. Checking the pairing before the first
+message is issue #54's compile-time validation layer, which is separate work.
+
+Protobuf declares one thing more, `MESSAGE`: a `prost`-generated type carries no descriptor, and
+Protobuf frames a message by its position in the schema, so the fully qualified message name is
+declared beside the subject rather than derived.
+
 ### Naming the registry once
 
 The registry is named twice in an app and never at a mount site: once when the prefetch is built,
