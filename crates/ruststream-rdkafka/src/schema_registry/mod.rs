@@ -16,17 +16,21 @@
 //! and the typed shorthands), mirroring Confluent's production guidance of not
 //! auto-registering schemas from producers.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+mod cache;
+mod client;
+
+use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
+pub use cache::{MemorySchemaCache, SchemaCache, SchemaCachePolicy};
+pub use client::{HttpRegistryClient, RegistryClient};
+
+use client::Auth;
 use ruststream::codec::{Codec, CodecError};
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
 use ruststream::{BytesMut, Publisher};
-use serde::Deserialize;
 
 pub use schemars::JsonSchema;
 
@@ -74,6 +78,16 @@ pub struct RegisteredSchema {
 }
 
 impl RegisteredSchema {
+    /// Builds one, for a [`RegistryClient`] implementation answering a lookup.
+    #[must_use]
+    pub fn new(id: u32, schema_type: SchemaType, definition: impl Into<String>) -> Self {
+        Self {
+            id,
+            schema_type,
+            definition: definition.into(),
+        }
+    }
+
     /// The registry-assigned schema id (what the wire-format envelope carries).
     #[must_use]
     pub fn id(&self) -> u32 {
@@ -122,116 +136,17 @@ impl SubjectStrategy {
     }
 }
 
-#[derive(Clone)]
-enum Auth {
-    None,
-    Basic { user: String, password: String },
-    Bearer(String),
-}
-
-/// How a [`SchemaRegistry`] remembers what it has resolved.
-///
-/// The two halves of the registry's answer expire differently, and that is not a preference but
-/// a property of the service: **a schema id is immutable**. The registry assigns an id per
-/// distinct schema definition, globally and by content - registering a new version of a subject
-/// mints a *new* id and leaves the old one resolving to the old schema for ever, and registering
-/// an identical schema under a different subject hands back the id it already had. A subject's
-/// *latest version*, by contrast, moves whenever someone registers one.
-///
-/// So an id-keyed entry can never go stale and needs no expiry - a TTL over it could only cause
-/// a refetch that returns the identical bytes - while a subject-keyed entry can, and is the only
-/// thing the `subject_ttl` of [`Cached`](Self::Cached) governs. Confluent's own clients scope their
-/// `latest.cache.ttl.sec` to exactly the latest-version caches for the same reason.
-///
-/// What ids still need is a bound. A consumer meets one id per writer version it is sent, which
-/// is small in a healthy topology and unbounded in a broken one (a producer registering a schema
-/// per message), so the cache is capped and evicts in insertion order. Evicting an id that is
-/// still in use costs one refetch and never a wrong answer, which is what makes plain insertion
-/// order enough here and a recency policy not worth its bookkeeping.
-///
-/// # Examples
-///
-/// ```
-/// use std::num::NonZeroUsize;
-/// use std::time::Duration;
-///
-/// use ruststream_rdkafka::{SchemaCachePolicy, SchemaRegistry};
-///
-/// // The default: ids kept, up to a bound, and subjects never re-resolved.
-/// let sr = SchemaRegistry::new("http://localhost:8081");
-///
-/// // A producer that should notice a newly registered version without a restart.
-/// let refreshing = SchemaRegistry::new("http://localhost:8081").cache_policy(
-///     SchemaCachePolicy::Cached {
-///         capacity: NonZeroUsize::new(256).expect("non-zero"),
-///         subject_ttl: Some(Duration::from_secs(300)),
-///     },
-/// );
-///
-/// // Nothing remembered at all: every lookup reaches the registry.
-/// let uncached = SchemaRegistry::new("http://localhost:8081")
-///     .cache_policy(SchemaCachePolicy::Disabled);
-/// # let _ = (sr, refreshing, uncached);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SchemaCachePolicy {
-    /// Nothing is remembered: every lookup reaches the registry.
-    ///
-    /// This is a real configuration, not a zero TTL wearing a disguise - for a process that must
-    /// hold no schema state, or a test that wants every call observable. It has one consequence
-    /// worth knowing before choosing it: a synchronous [`Codec`] reads the cache and cannot
-    /// await a miss, so [`AvroCodec::registry`](crate::avro::AvroCodec::registry) and
-    /// [`SchemaFramed`] cannot work under it. The transcoding path, whose lookups are all
-    /// `async`, works unchanged.
-    Disabled,
-    /// Ids are remembered up to `capacity`, and a subject's resolved version for `subject_ttl`.
-    Cached {
-        /// The most id-keyed schemas held at once; the oldest is dropped past it.
-        capacity: NonZeroUsize,
-        /// How long a subject's resolved version is trusted before the next `async` lookup
-        /// re-resolves it. `None` never re-resolves, which is Confluent's own default.
-        ///
-        /// This governs the `async` lookups only ([`warm`](SchemaRegistry::warm) and the
-        /// publish-side transcode). A codec's subject is resolved once, when the broker
-        /// connects, and stays put: its `encode` is synchronous and cannot re-resolve, and a
-        /// producer changing the schema it writes mid-process is a deliberate act, not something
-        /// to absorb silently between two messages.
-        subject_ttl: Option<Duration>,
-    },
-}
-
-impl SchemaCachePolicy {
-    /// The bound Confluent's own clients default to.
-    const DEFAULT_CAPACITY: usize = 1000;
-}
-
-impl Default for SchemaCachePolicy {
-    /// Ids kept up to 1000 (Confluent's own default bound), subjects never re-resolved
-    /// (Confluent's own default TTL).
-    fn default() -> Self {
-        Self::Cached {
-            capacity: NonZeroUsize::new(Self::DEFAULT_CAPACITY).expect("a non-zero constant"),
-            subject_ttl: None,
-        }
-    }
-}
-
-/// A subject's resolved id, with the moment it was resolved, so a TTL can be applied to it.
-struct SubjectEntry {
-    id: u32,
-    resolved: Instant,
-}
-
 struct RegistryInner {
-    base_url: String,
-    http: reqwest::Client,
-    auth: Auth,
-    policy: SchemaCachePolicy,
-    by_id: Mutex<HashMap<u32, Arc<RegisteredSchema>>>,
-    /// The ids in `by_id`, in the order they were inserted, so the cap can drop the oldest.
-    id_order: Mutex<VecDeque<u32>>,
-    by_subject: Mutex<HashMap<String, SubjectEntry>>,
+    /// What answers a registry question, and what remembers the answer. Both are seams: a
+    /// service that wants a different HTTP stack, a published client crate, a binding to a
+    /// non-Rust client, or a cache of its own replaces one without touching anything above.
+    client: Arc<dyn RegistryClient>,
+    cache: Arc<dyn SchemaCache>,
+    /// The endpoint of the shipped HTTP client, when that is what sits behind this facade, so
+    /// `basic_auth` and `bearer_token` can rebuild it. `None` for a caller-supplied client.
+    shipped_at: Option<String>,
+    /// The parsed forms of what the cache holds, which belong to the format features rather than
+    /// to the registry conversation, and are dropped alongside the entries they came from.
     #[cfg(feature = "avro")]
     parsed_avro: Mutex<HashMap<u32, Arc<apache_avro::Schema>>>,
     #[cfg(feature = "protobuf")]
@@ -242,6 +157,12 @@ struct RegistryInner {
 ///
 /// Construction is synchronous and does no I/O (the broker contract's lazy-startup shape);
 /// every lookup caches, so a schema id or subject resolves over the network once per process.
+///
+/// It is a facade over two seams, and everything else in this crate is written against it rather
+/// than against either: [`RegistryClient`] answers the registry's questions asynchronously, and
+/// [`SchemaCache`] remembers the answers synchronously. Replacing one - a different HTTP stack, a
+/// published client crate, a binding to a non-Rust client, a cache with different bounds - leaves
+/// the codecs, the byte-lane subjects, the prefetch and the transcoding middleware untouched.
 ///
 /// # Examples
 ///
@@ -260,30 +181,8 @@ pub struct SchemaRegistry {
 
 impl fmt::Debug for SchemaRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SchemaRegistry")
-            .field("base_url", &self.inner.base_url)
-            .finish_non_exhaustive()
+        f.debug_struct("SchemaRegistry").finish_non_exhaustive()
     }
-}
-
-#[derive(Deserialize)]
-struct SchemaByIdResponse {
-    schema: String,
-    #[serde(rename = "schemaType")]
-    schema_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RegisterResponse {
-    id: u32,
-}
-
-#[derive(Deserialize)]
-struct LatestVersionResponse {
-    id: u32,
-    schema: String,
-    #[serde(rename = "schemaType")]
-    schema_type: Option<String>,
 }
 
 impl SchemaRegistry {
@@ -295,35 +194,53 @@ impl SchemaRegistry {
         while base_url.ends_with('/') {
             base_url.pop();
         }
-        Self {
-            inner: Arc::new(RegistryInner {
-                base_url,
-                http: reqwest::Client::new(),
-                auth: Auth::None,
-                policy: SchemaCachePolicy::default(),
-                by_id: Mutex::new(HashMap::new()),
-                id_order: Mutex::new(VecDeque::new()),
-                by_subject: Mutex::new(HashMap::new()),
-                #[cfg(feature = "avro")]
-                parsed_avro: Mutex::new(HashMap::new()),
-                #[cfg(feature = "protobuf")]
-                parsed_proto: Mutex::new(HashMap::new()),
-            }),
+        Self::assembled(
+            Arc::new(HttpRegistryClient::new(base_url.clone(), Auth::None)),
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+        .shipped_at(base_url)
+    }
+
+    /// A client over a [`RegistryClient`] of your own and the default cache.
+    ///
+    /// This is the seam for a registry this crate does not speak to: a different HTTP stack, a
+    /// published client crate, a binding to a non-Rust client, a fake in a test.
+    #[must_use]
+    pub fn with_client(client: Arc<dyn RegistryClient>) -> Self {
+        Self::assembled(
+            client,
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+    }
+
+    /// Replaces what this client remembers with a [`SchemaCache`] of your own.
+    ///
+    /// Configure before handing the client out: clones share one cache.
+    #[must_use]
+    pub fn with_cache(self, cache: Arc<dyn SchemaCache>) -> Self {
+        let assembled = Self::assembled(Arc::clone(&self.inner.client), cache);
+        match self.inner.shipped_at.clone() {
+            Some(base_url) => assembled.shipped_at(base_url),
+            None => assembled,
         }
     }
 
     /// How much of what it resolves this client remembers; see [`SchemaCachePolicy`].
     ///
-    /// Configure before handing the client out: clones share one cache and the configuration it
-    /// was made with.
+    /// Sugar for [`with_cache`](Self::with_cache) over the default cache. Configure before
+    /// handing the client out: clones share one cache and the configuration it was made with.
     #[must_use]
     pub fn cache_policy(self, policy: SchemaCachePolicy) -> Self {
-        let auth = self.inner.auth.clone();
-        self.rebuilt(auth, policy)
+        self.with_cache(Arc::new(MemorySchemaCache::new(policy)))
     }
 
     /// HTTP basic authentication for every registry request. Configure before handing the
     /// client out: clones share the configuration they were made from.
+    ///
+    /// # Panics
+    ///
+    /// Panics when this client was built with [`with_client`](Self::with_client): the
+    /// credentials of a client this crate did not write are that client's own business.
     #[must_use]
     pub fn basic_auth(self, user: impl Into<String>, password: impl Into<String>) -> Self {
         self.with_auth(Auth::Basic {
@@ -334,31 +251,35 @@ impl SchemaRegistry {
 
     /// Bearer-token authentication for every registry request. Configure before handing the
     /// client out.
+    ///
+    /// # Panics
+    ///
+    /// As [`basic_auth`](Self::basic_auth).
     #[must_use]
     pub fn bearer_token(self, token: impl Into<String>) -> Self {
         self.with_auth(Auth::Bearer(token.into()))
     }
 
+    /// Rebuilds the shipped HTTP client with new credentials, and empties the caches: what the
+    /// previous credentials could see is not an answer these ones may give.
     fn with_auth(self, auth: Auth) -> Self {
-        let policy = self.inner.policy;
-        self.rebuilt(auth, policy)
+        let base_url = self.inner.shipped_at.clone().expect(
+            "basic_auth and bearer_token configure the HTTP client this crate ships; a \
+             RegistryClient supplied with `with_client` carries its own credentials",
+        );
+        Self::assembled(
+            Arc::new(HttpRegistryClient::new(base_url.clone(), auth)),
+            Arc::new(MemorySchemaCache::new(SchemaCachePolicy::default())),
+        )
+        .shipped_at(base_url)
     }
 
-    /// A client with the same endpoint and a new configuration, and empty caches.
-    ///
-    /// The caches are not carried over: what the credentials could see and what the policy would
-    /// have kept are both part of how an entry got there, so an entry from the previous
-    /// configuration is not an answer this one may give.
-    fn rebuilt(self, auth: Auth, policy: SchemaCachePolicy) -> Self {
+    fn assembled(client: Arc<dyn RegistryClient>, cache: Arc<dyn SchemaCache>) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
-                base_url: self.inner.base_url.clone(),
-                http: self.inner.http.clone(),
-                auth,
-                policy,
-                by_id: Mutex::new(HashMap::new()),
-                id_order: Mutex::new(VecDeque::new()),
-                by_subject: Mutex::new(HashMap::new()),
+                client,
+                cache,
+                shipped_at: None,
                 #[cfg(feature = "avro")]
                 parsed_avro: Mutex::new(HashMap::new()),
                 #[cfg(feature = "protobuf")]
@@ -367,26 +288,23 @@ impl SchemaRegistry {
         }
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let url = format!("{}{path}", self.inner.base_url);
-        let request = self.inner.http.request(method, url);
-        match &self.inner.auth {
-            Auth::None => request,
-            Auth::Basic { user, password } => request.basic_auth(user, Some(password)),
-            Auth::Bearer(token) => request.bearer_auth(token),
-        }
+    /// Records that the client behind this facade is the shipped HTTP one, at `base_url`, so the
+    /// credential builders can rebuild it. Absent for a client the caller supplied.
+    fn shipped_at(self, base_url: String) -> Self {
+        let mut inner = self.inner;
+        let slot = Arc::get_mut(&mut inner).expect("freshly assembled, not yet shared");
+        slot.shipped_at = Some(base_url);
+        Self { inner }
     }
 
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, KafkaError> {
-        let response = self
-            .request(reqwest::Method::GET, path)
-            .send()
-            .await
-            .map_err(KafkaError::schema_registry)?;
-        let response = response
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        response.json().await.map_err(KafkaError::schema_registry)
+    /// Records a freshly resolved schema, and drops the parsed forms of anything the cache let go
+    /// of to make room.
+    fn remember(&self, subject: Option<&str>, schema: &Arc<RegisteredSchema>) {
+        self.inner.cache.store(subject, schema);
+        let evicted = self.inner.cache.evicted_ids();
+        if !evicted.is_empty() {
+            self.purge_parsed(&evicted);
+        }
     }
 
     /// The schema registered under `id`, from the cache or the registry.
@@ -404,13 +322,9 @@ impl SchemaRegistry {
         if let Some(schema) = self.cached_schema(id) {
             return Ok(schema);
         }
-        let fetched: SchemaByIdResponse = self.get_json(&format!("/schemas/ids/{id}")).await?;
-        let schema = Arc::new(RegisteredSchema {
-            id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.cache_by_id(&schema);
+        let schema = self.inner.client.schema_by_id(id).await?;
+        // No subject: a lookup by id says nothing about which subject points at it.
+        self.remember(None, &schema);
         Ok(schema)
     }
 
@@ -433,30 +347,16 @@ impl SchemaRegistry {
         definition: impl Into<String>,
     ) -> Result<u32, KafkaError> {
         let definition = definition.into();
-        let body = serde_json::json!({
-            "schema": definition,
-            "schemaType": schema_type.as_api(),
-        });
-        let response = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/subjects/{subject}/versions"),
-            )
-            .json(&body)
-            .send()
-            .await
-            .map_err(KafkaError::schema_registry)?
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        let registered: RegisterResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
-        let schema = Arc::new(RegisteredSchema {
-            id: registered.id,
-            schema_type,
-            definition,
-        });
-        self.cache(subject, &schema);
-        Ok(registered.id)
+        let id = self
+            .inner
+            .client
+            .register(subject, schema_type, definition.clone())
+            .await?;
+        self.remember(
+            Some(subject),
+            &Arc::new(RegisteredSchema::new(id, schema_type, definition)),
+        );
+        Ok(id)
     }
 
     /// The id the registry already gave exactly this schema under `subject`, registering
@@ -478,28 +378,10 @@ impl SchemaRegistry {
         schema_type: SchemaType,
         definition: impl Into<String>,
     ) -> Result<u32, KafkaError> {
-        let body = serde_json::json!({
-            "schema": definition.into(),
-            "schemaType": schema_type.as_api(),
-        });
-        let response = self
-            .request(reqwest::Method::POST, &format!("/subjects/{subject}"))
-            .json(&body)
-            .send()
+        self.inner
+            .client
+            .lookup_id(subject, schema_type, definition.into())
             .await
-            .map_err(KafkaError::schema_registry)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(KafkaError::InvalidOptions(format!(
-                "the registry holds no such schema under subject {subject:?}; register it there \
-                 first (the typed shorthands do it in one call) or point the producer at the \
-                 subject that carries this schema",
-            )));
-        }
-        let response = response
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        let found: RegisterResponse = response.json().await.map_err(KafkaError::schema_registry)?;
-        Ok(found.id)
     }
 
     /// Resolves `subject`'s latest version and caches it - the warm-only alternative to
@@ -517,16 +399,9 @@ impl SchemaRegistry {
     /// Panics when the internal cache mutex is poisoned, which requires a prior panic inside
     /// the client (an invariant violation, not an operational failure).
     pub async fn warm(&self, subject: &str) -> Result<Arc<RegisteredSchema>, KafkaError> {
-        let fetched: LatestVersionResponse = self
-            .get_json(&format!("/subjects/{subject}/versions/latest"))
-            .await?;
-        let schema = Arc::new(RegisteredSchema {
-            id: fetched.id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.cache(subject, &schema);
-        Ok(schema)
+        self.latest(subject).await?.ok_or_else(|| {
+            KafkaError::SchemaRegistry(format!("the registry has no subject {subject:?}").into())
+        })
     }
 
     /// Like [`warm`](Self::warm), but a missing subject resolves to `None` instead of an
@@ -535,88 +410,11 @@ impl SchemaRegistry {
         &self,
         subject: &str,
     ) -> Result<Option<Arc<RegisteredSchema>>, KafkaError> {
-        let response = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/subjects/{subject}/versions/latest"),
-            )
-            .send()
-            .await
-            .map_err(KafkaError::schema_registry)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let Some(schema) = self.inner.client.latest(subject).await? else {
             return Ok(None);
-        }
-        let response = response
-            .error_for_status()
-            .map_err(KafkaError::schema_registry)?;
-        let fetched: LatestVersionResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
-        let schema = Arc::new(RegisteredSchema {
-            id: fetched.id,
-            schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
-            definition: fetched.schema,
-        });
-        self.cache(subject, &schema);
-        Ok(Some(schema))
-    }
-
-    /// The bound on id-keyed entries, or `None` when nothing is remembered at all.
-    fn capacity(&self) -> Option<NonZeroUsize> {
-        match self.inner.policy {
-            SchemaCachePolicy::Disabled => None,
-            SchemaCachePolicy::Cached { capacity, .. } => Some(capacity),
-        }
-    }
-
-    fn cache(&self, subject: &str, schema: &Arc<RegisteredSchema>) {
-        self.cache_by_id(schema);
-        if self.capacity().is_none() {
-            return;
-        }
-        self.inner
-            .by_subject
-            .lock()
-            .expect("subject cache mutex poisoned")
-            .insert(
-                subject.to_owned(),
-                SubjectEntry {
-                    id: schema.id,
-                    resolved: Instant::now(),
-                },
-            );
-    }
-
-    /// Remembers one schema by its id, dropping the oldest once the bound is reached.
-    fn cache_by_id(&self, schema: &Arc<RegisteredSchema>) {
-        let Some(capacity) = self.capacity() else {
-            return;
         };
-        // The two schema maps are taken together and released before the parsed-schema maps are
-        // touched, so no two of these locks are ever held at once.
-        let mut by_id = self
-            .inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned");
-        let mut order = self
-            .inner
-            .id_order
-            .lock()
-            .expect("schema cache order mutex poisoned");
-        if by_id.insert(schema.id, Arc::clone(schema)).is_none() {
-            order.push_back(schema.id);
-        }
-        let mut evicted = Vec::new();
-        while order.len() > capacity.get() {
-            let Some(oldest) = order.pop_front() else {
-                break;
-            };
-            by_id.remove(&oldest);
-            evicted.push(oldest);
-        }
-        drop(order);
-        drop(by_id);
-        self.purge_parsed(&evicted);
+        self.remember(Some(subject), &schema);
+        Ok(Some(schema))
     }
 
     /// Drops the parsed forms of schemas the id cache has just evicted: they are derived from
@@ -653,12 +451,7 @@ impl SchemaRegistry {
     /// the client (an invariant violation, not an operational failure).
     #[must_use]
     pub fn cached_schema(&self, id: u32) -> Option<Arc<RegisteredSchema>> {
-        self.inner
-            .by_id
-            .lock()
-            .expect("schema cache mutex poisoned")
-            .get(&id)
-            .cloned()
+        self.inner.cache.schema(id)
     }
 
     /// The cached schema for `subject`, when [`register`](Self::register), [`warm`](Self::warm),
@@ -670,24 +463,7 @@ impl SchemaRegistry {
     /// the client (an invariant violation, not an operational failure).
     #[must_use]
     pub fn cached_subject(&self, subject: &str) -> Option<Arc<RegisteredSchema>> {
-        let ttl = match self.inner.policy {
-            SchemaCachePolicy::Disabled => return None,
-            SchemaCachePolicy::Cached { subject_ttl, .. } => subject_ttl,
-        };
-        // A subject's latest version moves, so an entry past its time is not an answer. The id it
-        // named stays valid for ever and stays in its own cache; what expired is the claim that
-        // this subject still points at it. The guard is released before the id cache is taken.
-        let by_subject = self
-            .inner
-            .by_subject
-            .lock()
-            .expect("subject cache mutex poisoned");
-        let fresh = by_subject.get(subject).and_then(|entry| {
-            ttl.is_none_or(|ttl| entry.resolved.elapsed() < ttl)
-                .then_some(entry.id)
-        });
-        drop(by_subject);
-        self.cached_schema(fresh?)
+        self.inner.cache.subject(subject)
     }
 
     /// Registers the JSON Schema generated from `T` (via schemars) under `subject` - the
