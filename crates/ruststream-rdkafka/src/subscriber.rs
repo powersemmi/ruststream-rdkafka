@@ -58,6 +58,8 @@ pub struct KafkaSubscriber {
     seeker: Arc<KafkaSeeker>,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
     /// error of an episode warns, repeats are debug, recovery closes the episode.
     in_transient_episode: bool,
@@ -86,6 +88,8 @@ impl KafkaSubscriber {
             seeker,
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: None,
             in_transient_episode: false,
         }
     }
@@ -96,6 +100,15 @@ impl KafkaSubscriber {
         registry: Option<crate::schema_registry::SchemaRegistry>,
     ) -> Self {
         self.schema_registry = registry;
+        self
+    }
+
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn with_schema_prefetch(
+        mut self,
+        prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    ) -> Self {
+        self.schema_prefetch = prefetch;
         self
     }
 
@@ -149,6 +162,17 @@ impl KafkaSubscriber {
                 .await
         {
             item.replace_payload(Bytes::from(json));
+        }
+    }
+
+    /// The registry-codec prefetch: resolves the writer schema this delivery's envelope names,
+    /// on the async consume path, so the synchronous codec that decodes it finds the schema in
+    /// the cache. The payload is left exactly as it arrived. A no-op without an attached
+    /// prefetch or for a payload carrying no envelope.
+    #[cfg(feature = "schema-registry")]
+    async fn prefetch(&self, item: &KafkaMessage) {
+        if let Some(prefetch) = &self.schema_prefetch {
+            prefetch.warm_delivery(IncomingMessage::payload(item)).await;
         }
     }
 
@@ -251,6 +275,10 @@ impl Subscriber for KafkaSubscriber {
                         #[allow(unused_mut)] // mutated by the registry transcode only
                         let mut item = sub.map_delivery(&delivery);
                         drop(delivery);
+                        // The prefetch first: it reads the envelope, which the transcode would
+                        // have replaced with a JSON document. The two are alternatives anyway.
+                        #[cfg(feature = "schema-registry")]
+                        sub.prefetch(&item).await;
                         #[cfg(feature = "schema-registry")]
                         sub.transcode(&mut item).await;
                         sub.note_recovered();

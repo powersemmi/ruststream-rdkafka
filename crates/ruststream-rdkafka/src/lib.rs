@@ -94,7 +94,8 @@ pub use publisher::{
 };
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
-    RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,
+    RegisteredSchema, SchemaCachePolicy, SchemaFrame, SchemaFramed, SchemaPrefetch, SchemaRegistry,
+    SchemaType, SubjectStrategy,
 };
 pub use seek::{KafkaPosition, KafkaSeeker};
 
