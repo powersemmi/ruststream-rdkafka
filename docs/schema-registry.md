@@ -99,10 +99,26 @@ instead, which covers the same ground per field.
 A subject can be deleted from a registry while a producer is running, so the reaction is a policy
 rather than a fixed answer: `SchemaPrefetch::on_missing_subject`, an enum whose default is
 **`Refuse`**. Creating subjects in someone else's registry as a side effect of starting up is worse
-than not starting. `RegisterAgain` puts the type's own schema back and warns - which is what
-Confluent's own producers do by default - and `PublishUnframed` writes the bare datum and warns.
-Each warning names the subject, the flavour and the schema, because a bare "schema missing" tells
-an operator nothing.
+than not starting. `AutoRegister` puts the type's own schema back and warns, and `PublishUnframed`
+writes the bare datum and warns. Each warning names the subject, the flavour and the schema,
+because a bare "schema missing" tells an operator nothing.
+
+The vocabulary is Confluent's on purpose. Their serializers cover this ground with three settings,
+and two of them describe this crate's normal path rather than the policy: encoding always writes
+with the schema the framed id names, which is `use.latest.version`, and `check_compatibility` is
+`latest.compatibility.strict`. What is left for the enum is the question those two answer between
+them - when the subject is not there at all, does the producer create it (`AutoRegister`, their
+`auto.register.schemas=true`), refuse (`Refuse`, their `auto.register.schemas=false` with
+`use.latest.version=true`), or go without (`PublishUnframed`, which has no Confluent counterpart).
+It is an enum rather than three booleans because the booleans are not independent -
+`use.latest.version` means nothing while auto-registration is on - and a combination that means
+nothing is what an enum keeps unrepresentable.
+
+`check_compatibility` is on by default, as it is at Confluent, and it closes the gap the earlier
+subject-on-the-type design could not: at `connect` each registered type's schema is checked against
+the version its subject already holds, and a model that has drifted stops the app with the
+registry's own account of the difference - down to the field - rather than surfacing as a consumer
+that cannot read what was written.
 
 The two deletions differ, and this was checked against a live registry rather than assumed. A
 **soft** delete hides the subject - its `versions/latest` answers 404 - while `GET /schemas/ids/{id}`
@@ -123,7 +139,7 @@ so.
 
 `SchemaFramed::new(&prefetch, JsonCodec).register::<Order>("orders-value")` is the same builder over
 the same name-keyed map, for the same reason. Registration captures the type's JSON Schema through
-`schemars`, so `RegisterAgain` has something to put back.
+`schemars`, so `AutoRegister` has something to put back.
 
 ### Naming the registry once
 

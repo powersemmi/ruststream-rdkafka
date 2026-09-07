@@ -403,9 +403,9 @@ async fn live_missing_subject_policies_do_what_they_say() {
         .expect_err("the subject is gone, so the app must not come up");
     assert!(err.to_string().contains(&subject), "{err}");
 
-    // RegisterAgain: the schema the type carries goes back under the same subject, at connect.
+    // AutoRegister: the schema the type carries goes back under the same subject, at connect.
     let repairing = SchemaPrefetch::new(SchemaRegistry::new(&registry))
-        .on_missing_subject(MissingSubject::RegisterAgain);
+        .on_missing_subject(MissingSubject::AutoRegister);
     let codec = AvroCodec::registry(&repairing).register::<OrderV1>(&subject);
     let broker = KafkaBroker::new([kafka])
         .schema_prefetch(repairing)
@@ -428,4 +428,53 @@ async fn live_missing_subject_policies_do_what_they_say() {
     let (id, _) = ruststream_rdkafka::schema_registry::parse_envelope(&framed).expect("framed");
     assert_eq!(id, restored.id());
     broker.shutdown().await.expect("shutdown");
+}
+
+/// The same record name with an incompatible field type: what a model looks like after someone
+/// changed it without touching the registry.
+#[derive(Debug, Serialize, Deserialize, AvroSchema)]
+#[serde(rename = "CodecOrder")]
+struct Drifted {
+    id: String,
+    item: String,
+}
+
+/// `latest.compatibility.strict`: a model that has drifted from its subject stops the app at
+/// connect, with the registry's own account of the difference in the error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_a_drifted_model_is_caught_at_connect() {
+    let Some((registry, kafka)) = live() else {
+        return;
+    };
+    let subject = unique("codec-drift");
+    SchemaRegistry::new(&registry)
+        .register_avro::<OrderV1>(&subject)
+        .await
+        .expect("register the agreed schema");
+
+    let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    let _codec = AvroCodec::registry(&prefetch).register::<Drifted>(&subject);
+    let err = KafkaBroker::new([kafka.clone()])
+        .schema_prefetch(prefetch)
+        .connect()
+        .await
+        .expect_err("the drifted model must not reach a topic");
+    assert!(err.to_string().contains(&subject), "{err}");
+    assert!(
+        err.to_string().contains("not compatible"),
+        "the registry's own account travels in the error: {err}",
+    );
+
+    // Turned off, the same wiring comes up: a registry set to NONE, or a client that cannot
+    // answer the question, must not be blocked by this check.
+    let lenient = SchemaPrefetch::new(SchemaRegistry::new(&registry)).check_compatibility(false);
+    let _lenient_codec = AvroCodec::registry(&lenient).register::<Drifted>(&subject);
+    KafkaBroker::new([kafka])
+        .schema_prefetch(lenient)
+        .connect()
+        .await
+        .expect("the check is what refused, and it is off")
+        .shutdown()
+        .await
+        .expect("shutdown");
 }

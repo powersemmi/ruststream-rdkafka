@@ -91,10 +91,18 @@ pub trait SchemaCache: Send + Sync + 'static {
 ///
 /// The two halves of the registry's answer expire differently, and that is not a preference but
 /// a property of the service: **a schema id is immutable**. The registry assigns an id per
-/// distinct schema definition, globally and by content - registering a new version of a subject
-/// mints a *new* id and leaves the old one resolving to the old schema for ever, and registering
-/// an identical schema under a different subject hands back the id it already had. A subject's
-/// *latest version*, by contrast, moves whenever someone registers one.
+/// distinct schema definition, by content - registering a new version of a subject mints a *new*
+/// id and leaves the old one resolving to the old schema for ever, and registering an identical
+/// schema under a different subject hands back the id it already had. A subject's *latest
+/// version*, by contrast, moves whenever someone registers one.
+///
+/// "Per registry" is really per **schema context**: a registry can carry several, and each numbers
+/// its ids from one, so the same id means different schemas in two of them. This was checked
+/// against a live registry - the same schema registered in the default context and in a named one
+/// both came back as id 1. It bounds what this cache is: keyed by id, it is correct for a client
+/// that stays inside one context, which is what a client addressing plain subject names does. An
+/// app that reaches across contexts through one client, by writing `:.context:subject` subject
+/// names, needs a client per context rather than one cache spanning them.
 ///
 /// So an id-keyed entry can never go stale and needs no expiry - a TTL over it could only cause
 /// a refetch that returns the identical bytes - while a subject-keyed entry can, and is the only

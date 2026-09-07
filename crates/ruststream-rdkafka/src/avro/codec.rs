@@ -248,7 +248,7 @@ impl AvroCodec {
     /// `Serialize` alone.
     ///
     /// `T::get_schema()` is captured too, and used for exactly one thing: putting the subject
-    /// back under [`MissingSubject::RegisterAgain`]. What a datum is *written* with is always
+    /// back under [`MissingSubject::AutoRegister`]. What a datum is *written* with is always
     /// the schema the framed id names, so a drifted local model cannot silently produce records
     /// the id contradicts.
     ///

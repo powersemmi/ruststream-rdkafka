@@ -129,6 +129,27 @@ pub trait RegistryClient: Send + Sync + 'static {
         schema_type: SchemaType,
         definition: String,
     ) -> BoxFuture<'_, Result<u32, KafkaError>>;
+
+    /// Whether `definition` is compatible with `subject`'s latest version, under whatever
+    /// compatibility level the subject is configured with.
+    ///
+    /// This is what Confluent's `latest.compatibility.strict` checks. The default answers `None`,
+    /// meaning "this client cannot tell", and the caller then skips the check rather than reading
+    /// silence as either answer - so a client written before this method existed keeps working.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable or rejects the
+    /// request.
+    fn is_compatible(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        definition: String,
+    ) -> BoxFuture<'_, Result<Option<bool>, KafkaError>> {
+        let _ = (subject, schema_type, definition);
+        Box::pin(async { Ok(None) })
+    }
 }
 
 #[derive(Clone)]
@@ -148,6 +169,14 @@ struct SchemaByIdResponse {
 #[derive(Deserialize)]
 struct RegisterResponse {
     id: u32,
+}
+
+#[derive(Deserialize)]
+struct CompatibilityResponse {
+    is_compatible: bool,
+    /// Present with `?verbose=true`: the registry's own account of what differs.
+    #[serde(default)]
+    messages: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -296,5 +325,50 @@ impl RegistryClient for HttpRegistryClient {
              subject that carries this schema",
         );
         Box::pin(self.post_schema(path, schema_type, definition, Some(missing)))
+    }
+
+    fn is_compatible(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        definition: String,
+    ) -> BoxFuture<'_, Result<Option<bool>, KafkaError>> {
+        let path = format!("/compatibility/subjects/{subject}/versions/latest?verbose=true");
+        let subject = subject.to_owned();
+        Box::pin(async move {
+            let body = serde_json::json!({
+                "schema": definition,
+                "schemaType": schema_type.as_api(),
+            });
+            let response = self
+                .request(reqwest::Method::POST, &path)
+                .json(&body)
+                .send()
+                .await
+                .map_err(KafkaError::schema_registry)?;
+            // A subject with no versions cannot be checked against one; that is the missing
+            // subject case, which the caller has already settled by its own policy.
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let response = response
+                .error_for_status()
+                .map_err(KafkaError::schema_registry)?;
+            let verdict: CompatibilityResponse =
+                response.json().await.map_err(KafkaError::schema_registry)?;
+            if !verdict.is_compatible {
+                // The registry names the offending field; passing it through is the difference
+                // between a usable startup failure and "incompatible".
+                return Err(KafkaError::SchemaRegistry(
+                    format!(
+                        "the schema a codec publishes under subject {subject:?} is not \
+                         compatible with the version the registry holds: {}",
+                        verdict.messages.join(" "),
+                    )
+                    .into(),
+                ));
+            }
+            Ok(Some(true))
+        })
     }
 }

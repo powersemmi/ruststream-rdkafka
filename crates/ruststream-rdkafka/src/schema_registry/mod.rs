@@ -361,6 +361,26 @@ impl SchemaRegistry {
         Ok(id)
     }
 
+    /// Whether `definition` is compatible with `subject`'s latest version, or `None` when the
+    /// client behind this facade cannot answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable, rejects the
+    /// request, or reports the schemas incompatible - that message carries the registry's own
+    /// account of what differs.
+    pub async fn is_compatible(
+        &self,
+        subject: &str,
+        schema_type: SchemaType,
+        definition: impl Into<String>,
+    ) -> Result<Option<bool>, KafkaError> {
+        self.inner
+            .client
+            .is_compatible(subject, schema_type, definition.into())
+            .await
+    }
+
     /// The id the registry already gave exactly this schema under `subject`, registering
     /// nothing.
     ///
@@ -725,6 +745,7 @@ pub struct SchemaPrefetch {
     /// with. Shared with those codecs' clones, so registering a type once puts it on this list.
     registrations: Arc<Mutex<Vec<Registration>>>,
     on_missing: MissingSubject,
+    check_compatibility: bool,
 }
 
 /// One `register::<T>(subject)` call: what to resolve at connect, and what to put back if the
@@ -734,16 +755,29 @@ pub(crate) struct Registration {
     pub(crate) subject: String,
     pub(crate) schema_type: SchemaType,
     /// The schema the registering type carries. Kept so
-    /// [`MissingSubject::RegisterAgain`] has something to register, and never used to encode:
+    /// [`MissingSubject::AutoRegister`] has something to register, and never used to encode:
     /// what a datum is written with is the schema the framed id names.
     pub(crate) definition: String,
 }
 
 /// What a registered subject's absence from the registry means, and what to do about it.
 ///
-/// A subject can be deleted from a registry while a producer is running, and the reaction is a
-/// deployment's decision rather than this crate's. It is an enum because the three answers carry
-/// different consequences and no combination of them means anything.
+/// The vocabulary is Confluent's, because an operator who knows Kafka already has these settings
+/// in their head. Their serializers cover this ground with three: `auto.register.schemas`
+/// (register the local schema when the subject does not have it), `use.latest.version` (only
+/// when auto-registration is off - serialize against the subject's latest registered version
+/// rather than the local schema), and `latest.compatibility.strict` (check the local schema
+/// against that latest version).
+///
+/// Two of those describe this crate's *normal* path rather than this enum. Encoding always
+/// writes with the schema the framed id names, which is `use.latest.version` semantics, and
+/// [`SchemaPrefetch::check_compatibility`] is `latest.compatibility.strict`. What is left for
+/// this enum is the one question those settings answer between them: when the subject is not
+/// there at all, does the producer create it, refuse, or go without.
+///
+/// It is an enum rather than the three booleans Confluent uses because the booleans are not
+/// independent - `use.latest.version` means nothing while auto-registration is on - and a
+/// combination that means nothing is exactly what an enum keeps unrepresentable.
 ///
 /// # What a deletion actually does
 ///
@@ -759,19 +793,22 @@ pub(crate) struct Registration {
 pub enum MissingSubject {
     /// Fail, and say which subject is gone. The default.
     ///
+    /// Confluent's `auto.register.schemas=false` with `use.latest.version=true`: the producer
+    /// writes only what the registry already holds, so a subject that is not there stops it.
     /// Creating subjects in someone else's registry as a side effect of starting up is worse
     /// than not starting: a schema registry is a shared contract, and a producer that quietly
     /// writes into it takes a decision that belongs to whoever owns the topic.
     #[default]
     Refuse,
-    /// Register the schema the type carries again, under the same subject, and warn.
+    /// Register the schema the type carries under the subject, and warn.
     ///
-    /// This is Confluent's own producer default (`auto.register.schemas`), for a deployment
-    /// where the producer does own its subjects and an absent one is an accident to repair
-    /// rather than a signal to stop.
-    RegisterAgain,
+    /// Confluent's `auto.register.schemas=true`, which is their own producer default, for a
+    /// deployment where the producer does own its subjects and an absent one is an accident to
+    /// repair rather than a signal to stop.
+    AutoRegister,
     /// Publish the datum with no envelope, and warn.
     ///
+    /// No Confluent counterpart: their serializers have no "carry on without the registry" mode.
     /// For a topic that is expected to survive its registry being unavailable, at the cost of
     /// records that no registry-backed consumer can decode.
     PublishUnframed,
@@ -795,7 +832,25 @@ impl SchemaPrefetch {
             registry,
             registrations: Arc::new(Mutex::new(Vec::new())),
             on_missing: MissingSubject::default(),
+            check_compatibility: true,
         }
+    }
+
+    /// Whether `connect` checks each registered type's schema against the version its subject
+    /// already holds, and refuses to start when the registry says they are incompatible.
+    ///
+    /// This is Confluent's `latest.compatibility.strict`, and on for the same reason it is on by
+    /// default there: a model that has drifted from its subject is a fact worth learning while
+    /// the app is starting rather than from a consumer that cannot read what it wrote. The
+    /// registry's own account of what differs, down to the field, travels in the error.
+    ///
+    /// Turn it off for a registry whose compatibility level is deliberately `NONE`, or a client
+    /// that cannot answer the question - a [`RegistryClient`] that does not implement
+    /// `is_compatible` skips it regardless.
+    #[must_use]
+    pub fn check_compatibility(mut self, check: bool) -> Self {
+        self.check_compatibility = check;
+        self
     }
 
     /// What to do about a registered subject the registry does not hold; see
@@ -844,6 +899,15 @@ impl SchemaPrefetch {
         for registration in registrations {
             let subject = &registration.subject;
             if self.registry.latest(subject).await?.is_some() {
+                if self.check_compatibility {
+                    self.registry
+                        .is_compatible(
+                            subject,
+                            registration.schema_type,
+                            registration.definition.clone(),
+                        )
+                        .await?;
+                }
                 continue;
             }
             match self.on_missing {
@@ -859,7 +923,7 @@ impl SchemaPrefetch {
                         .into(),
                     ));
                 }
-                MissingSubject::RegisterAgain => {
+                MissingSubject::AutoRegister => {
                     let id = self
                         .registry
                         .register(
@@ -986,7 +1050,7 @@ impl<C> SchemaFramed<C> {
     /// Records that values of `T` publish under `subject`.
     ///
     /// The JSON Schema of `T` is captured with it, via `schemars`, for the one thing that needs
-    /// it: putting the subject back under [`MissingSubject::RegisterAgain`]. A self-describing
+    /// it: putting the subject back under [`MissingSubject::AutoRegister`]. A self-describing
     /// payload under this envelope is a JSON Schema subject in practice, which is why that is
     /// the bound; a wrapper over some other self-describing codec registers its subject
     /// separately and this one still frames it.
