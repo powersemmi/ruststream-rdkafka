@@ -94,7 +94,7 @@ pub use publisher::{
 };
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
-    HttpRegistryClient, MemorySchemaCache, RegisteredSchema, RegistryClient, RegistrySubject,
+    HttpRegistryClient, MemorySchemaCache, MissingSubject, RegisteredSchema, RegistryClient,
     SchemaCache, SchemaCachePolicy, SchemaFrame, SchemaFramed, SchemaPrefetch, SchemaRegistry,
     SchemaType, SubjectStrategy,
 };

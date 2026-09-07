@@ -26,8 +26,8 @@ use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Subscriber};
 use ruststream_rdkafka::avro::AvroCodec;
 use ruststream_rdkafka::{
-    ConnectedKafkaBroker, KafkaBroker, KafkaPublish, KafkaTopic, SchemaFramed, SchemaPrefetch,
-    SchemaRegistry, StartOffset,
+    ConnectedKafkaBroker, KafkaBroker, KafkaPublish, KafkaTopic, MissingSubject, SchemaFramed,
+    SchemaPrefetch, SchemaRegistry, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -50,7 +50,9 @@ struct OrderV2 {
     note: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Serialize, Deserialize, ruststream_rdkafka::schema_registry::JsonSchema,
+)]
 struct JsonOrder {
     id: i64,
     item: String,
@@ -195,7 +197,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
     // The producer still writes version 1, so its codec is pinned to that schema and frames with
     // the id the registry gave it.
     let writer_prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
-    let writer_codec = AvroCodec::registry(&writer_prefetch, &subject);
+    let writer_codec = AvroCodec::registry(&writer_prefetch).register::<OrderV1>(&subject);
     let writer_broker = KafkaBroker::new([kafka.clone()])
         .schema_prefetch(writer_prefetch)
         .connect()
@@ -216,7 +218,8 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
     let probe = Probe::<OrderV2>::new();
     let app_probe = probe.clone();
     let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
-    let codec = AvroCodec::registry(&prefetch, &subject)
+    let codec = AvroCodec::registry(&prefetch)
+        .register::<OrderV2>(&subject)
         .resolve_onto(OrderV2::get_schema())
         .expect("reader schema");
     let broker = KafkaBroker::new([kafka]).schema_prefetch(prefetch);
@@ -297,7 +300,8 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
         .expect("register");
 
     let writer_prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
-    let writer_codec = SchemaFramed::new(&writer_prefetch, &subject, JsonCodec);
+    let writer_codec =
+        SchemaFramed::new(&writer_prefetch, JsonCodec).register::<JsonOrder>(&subject);
     let writer_broker = KafkaBroker::new([kafka.clone()])
         .schema_prefetch(writer_prefetch)
         .connect()
@@ -330,7 +334,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
     let app_probe = probe.clone();
     // A cold client: nothing warm in its cache when the app starts.
     let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
-    let codec = SchemaFramed::new(&prefetch, &subject, JsonCodec);
+    let codec = SchemaFramed::new(&prefetch, JsonCodec).register::<JsonOrder>(&subject);
     let broker = KafkaBroker::new([kafka]).schema_prefetch(prefetch);
     let app = RustStream::new(AppInfo::new("codec-json", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(JsonApp { probe: app_probe }))
@@ -361,4 +365,67 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
 struct JsonOrderSchema {
     id: i64,
     item: String,
+}
+
+/// The missing-subject policy, against a registry the subject is really deleted from, driven
+/// through the broker's own `connect` - which is where the policy runs.
+///
+/// The two deletions differ and the behaviour hangs on it: a soft delete hides the subject while
+/// `GET /schemas/ids/{id}` still answers, so consumers keep working and only the producer is
+/// stuck; a permanent delete takes the id too, and then no policy here helps a consumer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_missing_subject_policies_do_what_they_say() {
+    let Some((registry, kafka)) = live() else {
+        return;
+    };
+    let subject = unique("codec-missing");
+    let sr = SchemaRegistry::new(&registry);
+    sr.register_avro::<OrderV1>(&subject)
+        .await
+        .expect("register");
+
+    // Soft delete: the subject is gone for a producer resolving it.
+    reqwest::Client::new()
+        .delete(format!("{registry}/subjects/{subject}"))
+        .send()
+        .await
+        .expect("soft delete")
+        .error_for_status()
+        .expect("deleted");
+
+    // Refuse, the default: connect stops and the message names the subject.
+    let refusing = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    let _refused = AvroCodec::registry(&refusing).register::<OrderV1>(&subject);
+    let err = KafkaBroker::new([kafka.clone()])
+        .schema_prefetch(refusing)
+        .connect()
+        .await
+        .expect_err("the subject is gone, so the app must not come up");
+    assert!(err.to_string().contains(&subject), "{err}");
+
+    // RegisterAgain: the schema the type carries goes back under the same subject, at connect.
+    let repairing = SchemaPrefetch::new(SchemaRegistry::new(&registry))
+        .on_missing_subject(MissingSubject::RegisterAgain);
+    let codec = AvroCodec::registry(&repairing).register::<OrderV1>(&subject);
+    let broker = KafkaBroker::new([kafka])
+        .schema_prefetch(repairing)
+        .connect()
+        .await
+        .expect("the policy repaired the subject");
+
+    let restored = SchemaRegistry::new(&registry)
+        .warm(&subject)
+        .await
+        .expect("the subject is back");
+
+    // And the codec frames with the restored id.
+    let framed = codec
+        .encode(&OrderV1 {
+            id: 1,
+            item: "anvil".to_owned(),
+        })
+        .expect("encode");
+    let (id, _) = ruststream_rdkafka::schema_registry::parse_envelope(&framed).expect("framed");
+    assert_eq!(id, restored.id());
+    broker.shutdown().await.expect("shutdown");
 }

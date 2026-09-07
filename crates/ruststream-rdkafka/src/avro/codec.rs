@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use apache_avro::Schema;
 use apache_avro::reader::datum::GenericDatumReader;
 use apache_avro::writer::datum::GenericDatumWriter;
+use apache_avro::{AvroSchema, Schema};
 use bytes::BufMut;
 use ruststream::BytesMut;
 use ruststream::codec::{Codec, CodecError};
@@ -14,7 +14,8 @@ use serde::de::DeserializeOwned;
 
 use crate::error::KafkaError;
 use crate::schema_registry::{
-    RegistrySubject, SchemaPrefetch, SchemaRegistry, WIRE_MAGIC, parse_envelope,
+    MissingSubject, Registration, SchemaPrefetch, SchemaRegistry, SchemaType, WIRE_MAGIC,
+    parse_envelope, serde_name,
 };
 
 /// One schema prepared for both directions, built once and borrowed for the process's life.
@@ -58,16 +59,50 @@ impl Prepared {
 enum SchemaSource {
     /// One schema, known at construction. A bare datum on the wire, and no registry anywhere.
     Local(&'static Prepared),
-    /// The subject a message is published under, and the envelope's id on the way back.
+    /// The subjects this codec publishes under, and the envelope's id on the way back.
     Registry {
         registry: SchemaRegistry,
-        subject: String,
-        /// The schemas met so far, keyed by registry id (the subject's own included). Keyed per
-        /// codec rather than per process, because an id means nothing outside the registry that
-        /// issued it - and shared by clones, because the mount machinery clones a codec once per
-        /// registration and those are the same codec by every measure that matters here.
+        /// Subject by message type, keyed by the name serde gives the type.
+        ///
+        /// **Publish only.** Decoding needs nothing from it: the writer schema comes from the
+        /// id in the envelope, so one codec decodes every type a subscription carries without
+        /// being told about any of them. That asymmetry is what lets a router full of handlers
+        /// share one codec on the consume side and register per type only on the publish side.
+        subjects: Arc<HashMap<&'static str, Registered>>,
+        /// The schemas met so far, keyed by registry id. Keyed per codec rather than per
+        /// process, because an id means nothing outside the registry that issued it - and shared
+        /// by clones, because the mount machinery clones a codec once per registration and those
+        /// are the same codec by every measure that matters here.
         prepared: Arc<Mutex<HashMap<u32, &'static Prepared>>>,
+        on_missing: MissingSubject,
     },
+}
+
+/// What one `register::<T>(subject)` left on the codec.
+struct Registered {
+    subject: String,
+    /// `T`'s own schema, prepared. Used only when the policy says to publish unframed: a framed
+    /// datum is always written with the schema its id names, never with this one.
+    local: &'static Prepared,
+}
+
+impl Clone for Registered {
+    fn clone(&self) -> Self {
+        Self {
+            subject: self.subject.clone(),
+            local: self.local,
+        }
+    }
+}
+
+/// The record name an Avro schema carries, which is what registration can read from a type with
+/// no value of it - and, for every type whose Avro name comes from serde, the same string the
+/// publish-side probe reads off a value.
+fn avro_record_name(schema: &Schema) -> Option<&'static str> {
+    match schema {
+        Schema::Record(record) => Some(String::leak(record.name.name().to_string())),
+        _ => None,
+    }
 }
 
 /// An Avro [`Codec`]: the schema lives in the codec, and the messages riding it are ordinary
@@ -129,6 +164,8 @@ pub struct AvroCodec {
     /// The schema the reading side expects, when it is not the writer's. Applies to decoding
     /// only: encoding always writes the schema the wire is supposed to carry.
     reader_schema: Option<Arc<Schema>>,
+    /// Kept so `register` can record on it. Dropped from a local codec, which registers nothing.
+    prefetch: Option<SchemaPrefetch>,
 }
 
 impl std::fmt::Debug for AvroCodec {
@@ -136,7 +173,10 @@ impl std::fmt::Debug for AvroCodec {
         let mut out = f.debug_struct("AvroCodec");
         match &self.source {
             SchemaSource::Local(_) => out.field("source", &"local"),
-            SchemaSource::Registry { subject, .. } => out.field("subject", subject),
+            SchemaSource::Registry { subjects, .. } => out.field(
+                "subjects",
+                &subjects.values().map(|r| &r.subject).collect::<Vec<_>>(),
+            ),
         };
         out.finish_non_exhaustive()
     }
@@ -157,74 +197,116 @@ impl AvroCodec {
         Ok(Self {
             source: SchemaSource::Local(Box::leak(Box::new(Prepared::build(schema, None)?))),
             reader_schema: None,
+            prefetch: None,
         })
     }
 
-    /// A codec on the Confluent wire format, publishing under `subject`.
+    /// A codec on the Confluent wire format, publishing what
+    /// [`register`](Self::register) records.
     ///
-    /// Construction is synchronous and does no I/O: it records `subject` on `prefetch`, which
-    /// resolves it when the broker connects. Reading takes the writer schema from whatever
-    /// envelope arrives, which the same prefetch resolves on the delivery path.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the prefetch's internal mutex is poisoned, which requires a prior panic
-    /// inside it (an invariant violation, not an operational failure).
-    #[must_use]
-    pub fn registry(prefetch: &SchemaPrefetch, subject: impl Into<String>) -> Self {
-        let subject = subject.into();
-        prefetch.record_subject(&subject);
-        Self {
-            source: SchemaSource::Registry {
-                registry: prefetch.registry().clone(),
-                subject,
-                prepared: Arc::new(Mutex::new(HashMap::new())),
-            },
-            reader_schema: None,
-        }
-    }
-
-    /// A codec on the Confluent wire format, publishing under the subject `T` declares.
-    ///
-    /// This is [`registry`](Self::registry) with the subject taken from the type instead of
-    /// written out, and construction is where a type's declaration can be read at all: a codec is
-    /// built once, per mount site, where `T` is known - while [`Codec::encode`] is generic over
-    /// every `Serialize` value and can require nothing of them. Reading `T::SUBJECT` here and
-    /// keeping it as a field is what lets the mount site name the type instead of a string.
+    /// Construction is synchronous and does no I/O; the subjects are resolved when the broker
+    /// connects, and each delivery's writer schema on its consume path, both by the `prefetch`
+    /// this is built from.
     ///
     /// ```no_run
     /// # use apache_avro::AvroSchema;
     /// # use ruststream_rdkafka::avro::AvroCodec;
-    /// # use ruststream_rdkafka::schema_registry::RegistrySubject;
     /// # use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
     /// # use serde::{Deserialize, Serialize};
-    /// #[derive(Serialize, Deserialize, AvroSchema)]
-    /// struct Order {
-    ///     id: i64,
-    /// }
-    ///
-    /// impl RegistrySubject for Order {
-    ///     const SUBJECT: &'static str = "orders-value";
-    /// }
-    ///
+    /// # #[derive(Serialize, Deserialize, AvroSchema)]
+    /// # struct Order { id: i64 }
+    /// # #[derive(Serialize, Deserialize, AvroSchema)]
+    /// # struct Shipment { id: i64 }
     /// # fn check() {
     /// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-    /// let codec = AvroCodec::for_type::<Order>(&prefetch);
+    /// let codec = AvroCodec::registry(&prefetch)
+    ///     .register::<Order>("orders-value")
+    ///     .register::<Shipment>("shipments-value");
     /// # let _ = codec;
     /// # }
     /// ```
+    #[must_use]
+    pub fn registry(prefetch: &SchemaPrefetch) -> Self {
+        Self {
+            source: SchemaSource::Registry {
+                registry: prefetch.registry().clone(),
+                subjects: Arc::new(HashMap::new()),
+                prepared: Arc::new(Mutex::new(HashMap::new())),
+                on_missing: prefetch.missing_subject(),
+            },
+            reader_schema: None,
+            prefetch: Some(prefetch.clone()),
+        }
+    }
+
+    /// Records that values of `T` publish under `subject`.
     ///
-    /// Nothing binds the codec to `T` afterwards: it encodes whatever the handlers mounted under
-    /// it hand over, as any codec does. Mounting it where another message type travels fails on
-    /// the first message, against the wrong schema, exactly as a mistyped subject string would -
-    /// see [`RegistrySubject`] for what that does and does not check.
+    /// One codec serves as many message types as a router mounts through it, so this is a list
+    /// rather than a second codec each time. The subject is looked up per publish by the name
+    /// serde gives the value's type, which is the only identity
+    /// [`Codec::encode`] can recover - `TypeId` needs `T: 'static`, and `encode` bounds `T` by
+    /// `Serialize` alone.
+    ///
+    /// `T::get_schema()` is captured too, and used for exactly one thing: putting the subject
+    /// back under [`MissingSubject::RegisterAgain`]. What a datum is *written* with is always
+    /// the schema the framed id names, so a drifted local model cannot silently produce records
+    /// the id contradicts.
     ///
     /// # Panics
     ///
-    /// As [`registry`](Self::registry).
+    /// Panics when two registered types share a serde name, which would make the subject of a
+    /// publish ambiguous. That is a startup failure by design: the alternative is picking one of
+    /// them per message and writing records under the wrong subject. Rename one with
+    /// `#[serde(rename = "..")]`. Also panics when the prefetch's internal mutex is poisoned, or
+    /// when `T`'s own schema cannot be serialized.
     #[must_use]
-    pub fn for_type<T: RegistrySubject>(prefetch: &SchemaPrefetch) -> Self {
-        Self::registry(prefetch, T::SUBJECT)
+    pub fn register<T: Serialize + AvroSchema>(mut self, subject: impl Into<String>) -> Self {
+        let subject = subject.into();
+        let schema = T::get_schema();
+        let name = avro_record_name(&schema).unwrap_or_else(|| {
+            panic!(
+                "the Avro schema of a registered type is not a named record, so nothing \
+                 identifies its values on the publish path; register a record type under \
+                 {subject:?}"
+            )
+        });
+        let definition = crate::avro::schema_json(&schema).unwrap_or_else(|err| {
+            panic!(
+                "the schema of the type registered under {subject:?} \
+                                          cannot be serialized: {err}"
+            )
+        });
+
+        let SchemaSource::Registry { subjects, .. } = &mut self.source else {
+            panic!("register is for a registry codec; a local one publishes a bare datum");
+        };
+        let table = Arc::get_mut(subjects).expect("not yet shared with a mount");
+        let local = Box::leak(Box::new(Prepared::build(schema, None).unwrap_or_else(
+            |err| panic!("the schema registered under {subject:?}: {err}"),
+        )));
+        if let Some(existing) = table.insert(
+            name,
+            Registered {
+                subject: subject.clone(),
+                local,
+            },
+        ) && existing.subject != subject
+        {
+            panic!(
+                "two types registered on this codec are both called {name:?} to serde, so a \
+                 publish could not tell {:?} from {subject:?}; give one of them a distinct \
+                 `#[serde(rename = \"..\")]`",
+                existing.subject,
+            );
+        }
+        if let Some(prefetch) = &self.prefetch {
+            prefetch.record(Registration {
+                subject,
+                schema_type: SchemaType::Avro,
+                definition,
+            });
+        }
+        self
     }
 
     /// Reads every delivery onto `schema` instead of the schema it was written with, so Avro's
@@ -298,19 +380,52 @@ impl Codec for AvroCodec {
         let prepared = match &self.source {
             SchemaSource::Local(prepared) => *prepared,
             SchemaSource::Registry {
-                registry, subject, ..
+                registry,
+                subjects,
+                on_missing,
+                ..
             } => {
-                let schema = registry.cached_subject(subject).ok_or_else(|| {
+                // The one identity `encode` can recover from `T: Serialize`; see `serde_name`.
+                let name = serde_name(value).ok_or_else(|| {
+                    encode_error(
+                        "this codec frames by the name serde gives a value's type, and this \
+                         value has none - a bare number, a sequence or a map. Publish a named \
+                         struct, or use a codec that needs no subject"
+                            .to_owned(),
+                    )
+                })?;
+                let registered = subjects.get(name).ok_or_else(|| {
                     encode_error(format!(
-                        "no schema is cached for subject {subject:?}: it was not resolved at \
-                         startup. Attach the SchemaPrefetch this codec was built from to the \
-                         broker (KafkaBroker::schema_prefetch), so connect resolves it"
+                        "no subject is registered for messages named {name:?}, so this codec has \
+                         no id to frame them with. Add `.register::<{name}>(\"..\")` to it; the \
+                         types it does carry are {:?}. A type that sets an Avro record name \
+                         differing from its serde name registers under the Avro one and arrives \
+                         here under the serde one, which also looks like this",
+                        subjects.keys().collect::<Vec<_>>(),
                     ))
                 })?;
-                buf.put_u8(WIRE_MAGIC);
-                buf.put_u32(schema.id());
-                self.prepared_for(schema.id())
-                    .map_err(|err| encode_error(err.to_string()))?
+                match registry.cached_subject(&registered.subject) {
+                    Some(schema) => {
+                        buf.put_u8(WIRE_MAGIC);
+                        buf.put_u32(schema.id());
+                        self.prepared_for(schema.id())
+                            .map_err(|err| encode_error(err.to_string()))?
+                    }
+                    // Startup already applied the policy to a subject the registry did not hold;
+                    // reaching here means it went missing afterwards, or was never resolved.
+                    None if *on_missing == MissingSubject::PublishUnframed => registered.local,
+                    None => {
+                        return Err(encode_error(format!(
+                            "no schema is cached for subject {:?}, which messages named \
+                             {name:?} publish under, so there is no id to frame them with. \
+                             Attach the SchemaPrefetch this codec was built from to the broker \
+                             (KafkaBroker::schema_prefetch) so connect resolves it; if it was \
+                             resolved and has since gone, the subject was deleted from the \
+                             registry and MissingSubject says what to do about that",
+                            registered.subject,
+                        )));
+                    }
+                }
             }
         };
         // Through the format's dynamic value: serde produces it, the schema resolves it, and the
@@ -396,11 +511,6 @@ mod tests {
         item: String,
         #[avro(default = r#""none""#)]
         note: String,
-    }
-
-    // The declaration `for_type` reads, written once on the type.
-    impl RegistrySubject for Order {
-        const SUBJECT: &'static str = "orders-value";
     }
 
     fn order() -> Order {
@@ -493,7 +603,7 @@ mod tests {
     #[tokio::test]
     async fn a_registry_codec_frames_with_the_subjects_id() {
         let (_server, prefetch) = registry_with_order(11).await;
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
         prefetch.warm_subjects().await.expect("warm");
 
         let bytes = codec.encode(&order()).expect("encode");
@@ -505,25 +615,77 @@ mod tests {
         assert_eq!(codec.decode::<Order>(&bytes).expect("decode"), order());
     }
 
-    /// The read happens at construction, where `T` is known - which is what makes a declaration
-    /// on the type usable at all from a `Codec` whose `encode` can require nothing of `T`.
+    /// One codec, two message types, each under its own subject - which is the shape a router
+    /// full of handlers needs and a codec per type could not give.
     #[tokio::test]
-    async fn for_type_takes_the_subject_off_the_type() {
-        let (_server, prefetch) = registry_with_order(11).await;
-        let codec = AvroCodec::for_type::<Order>(&prefetch);
+    async fn one_codec_frames_each_registered_type_under_its_own_subject() {
+        #[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
+        #[serde(rename = "CodecShipment")]
+        struct Shipment {
+            id: i64,
+        }
+
+        let (server, prefetch) = registry_with_order(11).await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/shipments-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 12,
+                "version": 1,
+                "schema": crate::avro::schema_json(&Shipment::get_schema()).expect("json"),
+                "schemaType": "AVRO",
+            })))
+            .mount(&server)
+            .await;
+
+        let codec = AvroCodec::registry(&prefetch)
+            .register::<Order>("orders-value")
+            .register::<Shipment>("shipments-value");
         prefetch.warm_subjects().await.expect("warm");
 
-        let bytes = codec.encode(&order()).expect("encode");
-        let (id, _) = parse_envelope(&bytes).expect("the wire format");
-        assert_eq!(id, 11, "framed under the subject the type declared");
-        assert_eq!(codec.decode::<Order>(&bytes).expect("decode"), order());
+        let (id, _) = parse_envelope(&codec.encode(&order()).expect("encode")).expect("framed");
+        assert_eq!(id, 11);
+        let shipped = codec.encode(&Shipment { id: 3 }).expect("encode");
+        let (id, _) = parse_envelope(&shipped).expect("framed");
+        assert_eq!(id, 12, "the second type framed under its own subject");
+        assert_eq!(
+            codec.decode::<Shipment>(&shipped).expect("decode"),
+            Shipment { id: 3 },
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_type_names_itself_and_what_the_codec_carries() {
+        #[derive(Serialize)]
+        #[serde(rename = "Stranger")]
+        struct Stranger {
+            id: i64,
+        }
+
+        let (_server, prefetch) = registry_with_order(11).await;
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
+        prefetch.warm_subjects().await.expect("warm");
+
+        let err = codec
+            .encode(&Stranger { id: 1 })
+            .expect_err("not registered");
+        assert!(err.to_string().contains("Stranger"));
+        assert!(err.to_string().contains("CodecOrder"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unnamed_value_is_refused_rather_than_guessed_at() {
+        let (_server, prefetch) = registry_with_order(11).await;
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
+
+        let err = codec.encode(&7i64).expect_err("no name to key by");
+        assert!(err.to_string().contains("has none"));
     }
 
     #[tokio::test]
     async fn an_unresolved_subject_names_the_attachment_it_is_missing() {
         let (_server, prefetch) = registry_with_order(11).await;
         // Never warmed: the codec was built, but the prefetch never reached a broker's connect.
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
 
         let err = codec.encode(&order()).expect_err("cold subject");
         assert!(err.to_string().contains("schema_prefetch"));
@@ -532,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn an_unresolved_id_names_the_attachment_it_is_missing() {
         let (_server, prefetch) = registry_with_order(11).await;
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
         let framed = [0u8, 0, 0, 0, 99, 1];
 
         let err = codec.decode::<Order>(&framed).expect_err("cold id");
@@ -543,7 +705,7 @@ mod tests {
     #[tokio::test]
     async fn an_unframed_delivery_on_a_registry_codec_is_refused() {
         let (_server, prefetch) = registry_with_order(11).await;
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
 
         let err = codec
             .decode::<Order>(br#"{"id":42}"#)
@@ -565,7 +727,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
         let framed = [0u8, 0, 0, 0, 11, 84, 10, 97, 110, 118, 105, 108];
 
         // Cold: the sync codec refuses rather than reaching for the network.
@@ -585,7 +747,7 @@ mod tests {
             .mount(&server)
             .await;
         let prefetch = SchemaPrefetch::new(SchemaRegistry::new(server.uri()));
-        let _codec = AvroCodec::registry(&prefetch, "absent-value");
+        let _codec = AvroCodec::registry(&prefetch).register::<Order>("absent-value");
 
         let err = prefetch.warm_subjects().await.expect_err("absent subject");
         assert!(err.to_string().contains("absent-value"));
@@ -596,13 +758,16 @@ mod tests {
     /// `long` a registered schema declares. It is reported, not silently mis-encoded.
     #[tokio::test]
     async fn an_unsigned_field_against_a_long_schema_is_reported() {
+        // Named as the registered type, so the publish reaches the schema rather than stopping
+        // at the subject lookup.
         #[derive(Serialize)]
+        #[serde(rename = "CodecOrder")]
         struct Wide {
             id: u64,
             item: String,
         }
         let (_server, prefetch) = registry_with_order(11).await;
-        let codec = AvroCodec::registry(&prefetch, "orders-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
         prefetch.warm_subjects().await.expect("warm");
 
         let err = codec
@@ -628,7 +793,7 @@ mod tests {
             .mount(&server)
             .await;
         let prefetch = SchemaPrefetch::new(SchemaRegistry::new(server.uri()));
-        let codec = AvroCodec::registry(&prefetch, "json-value");
+        let codec = AvroCodec::registry(&prefetch).register::<Order>("json-value");
         prefetch.warm_subjects().await.expect("warm");
 
         // A JSON Schema document is not an Avro schema, and the parse says so.

@@ -18,6 +18,7 @@
 
 mod cache;
 mod client;
+mod name;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
@@ -28,6 +29,7 @@ pub use cache::{MemorySchemaCache, SchemaCache, SchemaCachePolicy};
 pub use client::{HttpRegistryClient, RegistryClient};
 
 use client::Auth;
+pub(crate) use name::serde_name;
 use ruststream::codec::{Codec, CodecError};
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
 use ruststream::{BytesMut, Publisher};
@@ -134,73 +136,6 @@ impl SubjectStrategy {
             Self::TopicRecordName => format!("{topic}-{record}"),
         }
     }
-}
-
-/// A message type that names its own registry subject.
-///
-/// The subject a type is registered under is a fact about the type, not about the place it is
-/// mounted, and repeating it as a string literal at every mount site is how a producer and a
-/// consumer come to disagree about it. Declared here, it is written once:
-///
-/// ```
-/// use ruststream_rdkafka::schema_registry::RegistrySubject;
-///
-/// # #[derive(serde::Serialize)]
-/// struct Order {
-///     id: i64,
-/// }
-///
-/// impl RegistrySubject for Order {
-///     const SUBJECT: &'static str = "orders-value";
-/// }
-///
-/// # fn check() {
-/// assert_eq!(Order::SUBJECT, "orders-value");
-/// # }
-/// # check();
-/// ```
-///
-/// Every mount site then names the type rather than the string:
-/// [`AvroCodec::for_type`](crate::avro::AvroCodec::for_type) on the codec path, and
-/// [`avro::Subject::resolve_declared`](crate::avro::Subject::resolve_declared) on the byte-lane
-/// one.
-///
-/// # Which name to write
-///
-/// Whatever the deployment's naming strategy produces, spelled out. Under Confluent's default
-/// [`TopicName`](SubjectStrategy::TopicName) that is `{topic}-value`; under the record
-/// strategies it is the record's fully qualified name, or `{topic}-{record}`.
-/// [`SubjectStrategy::subject`] renders any of them rather than writing one by hand.
-///
-/// The strategy is deliberately not a second associated constant. Two of the three need a topic,
-/// which is the mount site's to know and not the type's, so a strategy declared here could only
-/// describe the answer already written above it.
-///
-/// # What this does not check
-///
-/// Nothing verifies that the schema under `SUBJECT` is this type's schema. That exposure is
-/// exactly the one a hand-written subject string already had - mount a codec against the wrong
-/// message type and the format rejects the first message against the wrong schema, loudly - so
-/// declaring the subject here removes a way to mistype it and introduces no failure of its own.
-/// Checking the pairing before the first message is the compile-time validation layer of issue
-/// #54, which is a separate piece of work.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` does not declare a registry subject",
-    note = "implement `RegistrySubject` for `{Self}` with one associated constant, `const \
-            SUBJECT: &'static str`, naming the registry subject its schema lives under"
-)]
-pub trait RegistrySubject {
-    /// The registry subject this type's schema lives under.
-    const SUBJECT: &'static str;
-
-    /// For Protobuf, the fully qualified name of the message within the subject's `.proto`
-    /// schema, package included. The other formats need no name beyond the subject and leave
-    /// this empty.
-    ///
-    /// A `prost`-generated type carries no descriptor to read this from, which is why it is
-    /// declared rather than derived; [`protobuf::Subject`](crate::protobuf::Subject) reports an
-    /// empty one when it resolves, rather than framing against a message it cannot address.
-    const MESSAGE: &'static str = "";
 }
 
 struct RegistryInner {
@@ -777,24 +712,76 @@ fn outgoing_json_to_datum(
 /// use ruststream_rdkafka::avro::AvroCodec;
 ///
 /// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-/// // Every codec built here records its subject, so `connect` resolves it and a subject that
-/// // is missing fails the app's startup rather than its first publish.
-/// let codec = AvroCodec::registry(&prefetch, "confirmations-value");
+/// // Every type a codec registers records its subject here, so `connect` resolves it and a
+/// // subject that is missing is settled by the prefetch's policy rather than at first publish.
+/// let codec = AvroCodec::registry(&prefetch);
 /// let broker = KafkaBroker::new(["localhost:9092"]).schema_prefetch(prefetch);
 /// # let _ = (codec, broker);
 /// ```
 #[derive(Clone)]
 pub struct SchemaPrefetch {
     registry: SchemaRegistry,
-    /// The subjects registry codecs were built against. Shared with the codecs' own clones, so
-    /// naming a subject once - at the codec - is what puts it on this list.
-    subjects: Arc<Mutex<HashSet<String>>>,
+    /// What the codecs built from this prefetch publish, and the schema each was registered
+    /// with. Shared with those codecs' clones, so registering a type once puts it on this list.
+    registrations: Arc<Mutex<Vec<Registration>>>,
+    on_missing: MissingSubject,
+}
+
+/// One `register::<T>(subject)` call: what to resolve at connect, and what to put back if the
+/// registry no longer holds it.
+#[derive(Debug, Clone)]
+pub(crate) struct Registration {
+    pub(crate) subject: String,
+    pub(crate) schema_type: SchemaType,
+    /// The schema the registering type carries. Kept so
+    /// [`MissingSubject::RegisterAgain`] has something to register, and never used to encode:
+    /// what a datum is written with is the schema the framed id names.
+    pub(crate) definition: String,
+}
+
+/// What a registered subject's absence from the registry means, and what to do about it.
+///
+/// A subject can be deleted from a registry while a producer is running, and the reaction is a
+/// deployment's decision rather than this crate's. It is an enum because the three answers carry
+/// different consequences and no combination of them means anything.
+///
+/// # What a deletion actually does
+///
+/// Confluent's two deletions differ, and this was checked against a live registry rather than
+/// assumed. A **soft** delete (`DELETE /subjects/{s}`) hides the subject - its `versions/latest`
+/// answers 404 - while `GET /schemas/ids/{id}` still returns the schema, so **consumers keep
+/// working** and only the producer is stuck. A **permanent** delete (`?permanent=true`) removes
+/// the id too, and then nothing can decode a record that names it: no policy here helps a
+/// consumer, because the schema is gone for everyone. Re-registering the same schema afterwards
+/// mints a *new* id, so records already on the topic stay unreadable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum MissingSubject {
+    /// Fail, and say which subject is gone. The default.
+    ///
+    /// Creating subjects in someone else's registry as a side effect of starting up is worse
+    /// than not starting: a schema registry is a shared contract, and a producer that quietly
+    /// writes into it takes a decision that belongs to whoever owns the topic.
+    #[default]
+    Refuse,
+    /// Register the schema the type carries again, under the same subject, and warn.
+    ///
+    /// This is Confluent's own producer default (`auto.register.schemas`), for a deployment
+    /// where the producer does own its subjects and an absent one is an accident to repair
+    /// rather than a signal to stop.
+    RegisterAgain,
+    /// Publish the datum with no envelope, and warn.
+    ///
+    /// For a topic that is expected to survive its registry being unavailable, at the cost of
+    /// records that no registry-backed consumer can decode.
+    PublishUnframed,
 }
 
 impl fmt::Debug for SchemaPrefetch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SchemaPrefetch")
             .field("registry", &self.registry)
+            .field("on_missing", &self.on_missing)
             .finish_non_exhaustive()
     }
 }
@@ -806,8 +793,19 @@ impl SchemaPrefetch {
     pub fn new(registry: SchemaRegistry) -> Self {
         Self {
             registry,
-            subjects: Arc::new(Mutex::new(HashSet::new())),
+            registrations: Arc::new(Mutex::new(Vec::new())),
+            on_missing: MissingSubject::default(),
         }
+    }
+
+    /// What to do about a registered subject the registry does not hold; see
+    /// [`MissingSubject`]. Defaults to [`Refuse`](MissingSubject::Refuse).
+    ///
+    /// Configure before building codecs from it: each copies the policy as it is built.
+    #[must_use]
+    pub fn on_missing_subject(mut self, policy: MissingSubject) -> Self {
+        self.on_missing = policy;
+        self
     }
 
     /// The client the codecs share a cache with.
@@ -816,40 +814,84 @@ impl SchemaPrefetch {
         &self.registry
     }
 
-    /// Records a subject a codec will publish under, so [`warm_subjects`](Self::warm_subjects)
-    /// resolves it.
+    /// The policy codecs built from this prefetch carry.
+    pub(crate) fn missing_subject(&self) -> MissingSubject {
+        self.on_missing
+    }
+
+    /// Records what a `register::<T>(subject)` call published, so
+    /// [`warm_subjects`](Self::warm_subjects) resolves it.
     ///
     /// # Panics
     ///
     /// Panics when the internal mutex is poisoned, which requires a prior panic inside this
     /// type (an invariant violation, not an operational failure).
-    pub(crate) fn record_subject(&self, subject: &str) {
-        self.subjects
+    pub(crate) fn record(&self, registration: Registration) {
+        self.registrations
             .lock()
-            .expect("prefetch subjects mutex poisoned")
-            .insert(subject.to_owned());
+            .expect("prefetch registrations mutex poisoned")
+            .push(registration);
     }
 
-    /// Resolves every recorded subject. Called once, by the broker's `connect`, so a subject
-    /// that does not exist fails the app's startup instead of its first publish.
+    /// Resolves every registered subject. Called once, by the broker's `connect`, so an absent
+    /// subject is settled while the app is still starting rather than at its first publish.
     pub(crate) async fn warm_subjects(&self) -> Result<(), KafkaError> {
-        let subjects: Vec<String> = self
-            .subjects
+        let registrations: Vec<Registration> = self
+            .registrations
             .lock()
-            .expect("prefetch subjects mutex poisoned")
-            .iter()
-            .cloned()
-            .collect();
-        for subject in subjects {
-            self.registry.warm(&subject).await.map_err(|err| {
-                KafkaError::SchemaRegistry(
-                    format!(
-                        "the schema of subject {subject:?} could not be resolved at startup, so \
-                         a codec publishing under it would have no id to frame with: {err}"
-                    )
-                    .into(),
-                )
-            })?;
+            .expect("prefetch registrations mutex poisoned")
+            .clone();
+        for registration in registrations {
+            let subject = &registration.subject;
+            if self.registry.latest(subject).await?.is_some() {
+                continue;
+            }
+            match self.on_missing {
+                MissingSubject::Refuse => {
+                    return Err(KafkaError::SchemaRegistry(
+                        format!(
+                            "subject {subject:?} is registered by a codec in this app but the \
+                             registry does not hold it, so there is no id to frame its records \
+                             with. It was most likely deleted; re-register it, point the codec \
+                             at the subject that carries this schema, or choose a \
+                             MissingSubject policy that repairs or bypasses it."
+                        )
+                        .into(),
+                    ));
+                }
+                MissingSubject::RegisterAgain => {
+                    let id = self
+                        .registry
+                        .register(
+                            subject,
+                            registration.schema_type,
+                            registration.definition.clone(),
+                        )
+                        .await?;
+                    tracing::warn!(
+                        target: "ruststream_rdkafka",
+                        subject = %subject,
+                        schema_id = id,
+                        schema_type = ?registration.schema_type,
+                        definition = %registration.definition,
+                        "the registry did not hold a subject this app publishes under, so it \
+                         was registered again from the schema the message type carries; records \
+                         written before the deletion keep the id they were framed with, which a \
+                         permanent delete has already made unreadable",
+                    );
+                }
+                MissingSubject::PublishUnframed => {
+                    tracing::warn!(
+                        target: "ruststream_rdkafka",
+                        subject = %subject,
+                        schema_type = ?registration.schema_type,
+                        definition = %registration.definition,
+                        "the registry did not hold a subject this app publishes under, so its \
+                         records go out with no Confluent envelope; a registry-backed consumer \
+                         cannot decode them",
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -908,35 +950,80 @@ impl SchemaPrefetch {
 ///
 /// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
 /// // Confluent-framed JSON: the core's own codec, under the envelope of a registered subject.
-/// let codec = SchemaFramed::new(&prefetch, "orders-value", JsonCodec);
+/// # #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+/// # struct Order { id: i64 }
+/// let codec = SchemaFramed::new(&prefetch, JsonCodec).register::<Order>("orders-value");
 /// # let _ = codec;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SchemaFramed<C> {
     registry: SchemaRegistry,
-    subject: String,
+    /// Subject by message type, keyed by the name serde gives it - the same shape and the same
+    /// key the Avro codec uses, and publish-only for the same reason: decoding strips the
+    /// envelope and hands the bytes on, so it needs to know no type at all.
+    subjects: Arc<HashMap<&'static str, String>>,
+    on_missing: MissingSubject,
+    prefetch: SchemaPrefetch,
     inner: C,
 }
 
 impl<C> SchemaFramed<C> {
-    /// Frames `inner`'s payloads under the envelope of `subject`.
+    /// Frames what [`register`](Self::register) records, with `inner` producing the payload.
     ///
-    /// Construction is synchronous and does no I/O: `subject` is recorded on `prefetch`, which
-    /// resolves it when the broker connects.
+    /// Construction is synchronous and does no I/O; the subjects are resolved when the broker
+    /// connects.
+    #[must_use]
+    pub fn new(prefetch: &SchemaPrefetch, inner: C) -> Self {
+        Self {
+            registry: prefetch.registry().clone(),
+            subjects: Arc::new(HashMap::new()),
+            on_missing: prefetch.missing_subject(),
+            prefetch: prefetch.clone(),
+            inner,
+        }
+    }
+
+    /// Records that values of `T` publish under `subject`.
+    ///
+    /// The JSON Schema of `T` is captured with it, via `schemars`, for the one thing that needs
+    /// it: putting the subject back under [`MissingSubject::RegisterAgain`]. A self-describing
+    /// payload under this envelope is a JSON Schema subject in practice, which is why that is
+    /// the bound; a wrapper over some other self-describing codec registers its subject
+    /// separately and this one still frames it.
     ///
     /// # Panics
     ///
-    /// Panics when the prefetch's internal mutex is poisoned, which requires a prior panic
-    /// inside it (an invariant violation, not an operational failure).
+    /// Panics when two registered types share a serde name, which would make the subject of a
+    /// publish ambiguous - a startup failure by design, since the alternative is writing records
+    /// under the wrong subject. Rename one with `#[serde(rename = "..")]`.
     #[must_use]
-    pub fn new(prefetch: &SchemaPrefetch, subject: impl Into<String>, inner: C) -> Self {
+    pub fn register<T: serde::Serialize + JsonSchema>(
+        mut self,
+        subject: impl Into<String>,
+    ) -> Self {
         let subject = subject.into();
-        prefetch.record_subject(&subject);
-        Self {
-            registry: prefetch.registry().clone(),
-            subject,
-            inner,
+        let name: &'static str = String::leak(T::schema_name().to_string());
+        let definition = serde_json::to_string(
+            &schemars::SchemaGenerator::default().into_root_schema_for::<T>(),
+        )
+        .unwrap_or_else(|err| panic!("the JSON Schema of the type under {subject:?}: {err}"));
+
+        let table = Arc::get_mut(&mut self.subjects).expect("not yet shared with a mount");
+        if let Some(existing) = table.insert(name, subject.clone())
+            && existing != subject
+        {
+            panic!(
+                "two types registered on this codec are both called {name:?} to serde, so a \
+                 publish could not tell {existing:?} from {subject:?}; give one of them a \
+                 distinct `#[serde(rename = \"..\")]`"
+            );
         }
+        self.prefetch.record(Registration {
+            subject,
+            schema_type: SchemaType::Json,
+            definition,
+        });
+        self
     }
 
     /// The codec whose payloads travel inside the envelope.
@@ -947,15 +1034,37 @@ impl<C> SchemaFramed<C> {
 
 impl<C: Codec> Codec for SchemaFramed<C> {
     fn encode<T: serde::Serialize>(&self, value: &T) -> Result<BytesMut, CodecError> {
-        let schema = self.registry.cached_subject(&self.subject).ok_or_else(|| {
+        let name = serde_name(value).ok_or_else(|| {
+            CodecError::Encode(Box::new(KafkaError::malformed(
+                "this codec frames by the name serde gives a value's type, and this value has \
+                 none - a bare number, a sequence or a map. Publish a named struct, or use a \
+                 codec that needs no subject"
+                    .to_owned(),
+            )))
+        })?;
+        let subject = self.subjects.get(name).ok_or_else(|| {
             CodecError::Encode(Box::new(KafkaError::malformed(format!(
-                "no schema is cached for subject {:?}: it was not resolved at startup. Attach \
-                 the SchemaPrefetch this codec was built from to the broker \
-                 (KafkaBroker::schema_prefetch), so connect resolves it",
-                self.subject,
+                "no subject is registered for messages named {name:?}, so this codec has no id \
+                 to frame them with; add `.register::<{name}>(\"..\")` to it. The types it does \
+                 carry are {:?}",
+                self.subjects.keys().collect::<Vec<_>>(),
             ))))
         })?;
         let datum = self.inner.encode(value)?;
+        let Some(schema) = self.registry.cached_subject(subject) else {
+            if self.on_missing == MissingSubject::PublishUnframed {
+                return Ok(datum);
+            }
+            return Err(CodecError::Encode(Box::new(KafkaError::malformed(
+                format!(
+                    "no schema is cached for subject {subject:?}, which messages named {name:?} \
+                 publish under. Attach the SchemaPrefetch this codec was built from to the \
+                 broker (KafkaBroker::schema_prefetch) so connect resolves it; if it was \
+                 resolved and has since gone, the subject was deleted from the registry and \
+                 MissingSubject says what to do about that"
+                ),
+            ))));
+        };
         let mut framed = BytesMut::with_capacity(1 + 4 + datum.len());
         framed.extend_from_slice(&[WIRE_MAGIC]);
         framed.extend_from_slice(&schema.id().to_be_bytes());
@@ -970,8 +1079,8 @@ impl<C: Codec> Codec for SchemaFramed<C> {
         let (_, datum) = parse_envelope(bytes).ok_or_else(|| {
             CodecError::Decode(Box::new(KafkaError::malformed(format!(
                 "the delivery does not carry the Confluent wire format (a zero magic byte and a \
-                 4-byte schema id) that subject {:?} publishes under; its first bytes are {:02x?}",
-                self.subject,
+                 4-byte schema id) that a registry-backed topic publishes under; its first bytes \
+                 are {:02x?}",
                 &bytes[..bytes.len().min(8)],
             ))))
         })?;

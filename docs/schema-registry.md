@@ -43,9 +43,10 @@ and no I/O anywhere on the path - a fixed-schema topic, and every unit test.
 --8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:local"
 ```
 
-`AvroCodec::registry(&prefetch, subject)` speaks the Confluent wire format: encoding frames with
-the id its subject holds, and decoding reads each delivery with the writer schema that delivery's
-envelope names - so a producer still on an older version stays readable.
+`AvroCodec::registry(&prefetch)` speaks the Confluent wire format, and `register::<T>(subject)`
+says what it publishes: encoding frames each value with the id of its type's subject, and decoding
+reads every delivery with the writer schema that delivery's envelope names - so a producer still on
+an older version stays readable.
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:wiring"
@@ -56,39 +57,73 @@ while a registry lookup is not. That meeting cannot be arranged inside `encode` 
 blocking a runtime worker from a sync function is not an option, and guessing a schema is
 corruption. So the lookups move to the two places that are already async and already know when
 they must happen - the broker's `connect`, for the subjects the codecs publish under, and the
-delivery path, for the writer schema an arriving envelope names. A subject that does not exist
-therefore fails startup rather than the first publish, and an id the prefetch could not resolve
-becomes a decode failure the subscription's failure policy settles, never a silent guess.
+delivery path, for the writer schema an arriving envelope names. A subject that does not exist is
+therefore settled while the app is starting rather than at its first publish, and an id the
+prefetch could not resolve becomes a decode failure the subscription's failure policy settles,
+never a silent guess.
 
-### The subject on the type
+### Registration is the publish side only
 
-A subject is a fact about the message type, not about the place it is mounted, and repeating it as
-a string literal at every mount site is how a producer and a consumer come to disagree about it.
-`RegistrySubject` puts it on the type - one associated constant, written by hand in three lines,
-no derive and no macro crate:
+**One codec, as many message types as a router mounts through it.** Registration says which subject
+a type's values are framed under, and decoding needs none of it: the writer schema comes off the
+envelope's id, so a subscription carrying five types decodes all five through a codec that was told
+about none of them. That asymmetry is the reason one codec serves a whole scope; it is also why
+`register` lives on the publish half of the story and nothing on the consume half mirrors it.
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:types"
-```
+The subject is looked up per publish by **the name serde gives the value's type**. `TypeId` would be
+the obvious key and is unavailable - it needs `T: 'static`, and `Codec::encode` bounds `T` by
+`Serialize` alone - while every derived `Serialize` hands the name to `serialize_struct` before
+touching a field, so a probing serializer reads it and stops there. It is the right key on merit
+too: it is the same name `AvroSchema` writes into the Avro record, which is what registration reads
+when it has a type but no value. `std::any::type_name` is deliberately not used, since the standard
+library promises neither uniqueness nor stability for it.
 
-Every mount site then names the type: `AvroCodec::for_type::<Order>(&prefetch)` on the codec path,
-`avro::Subject::<Order>::resolve_declared(&sr)` and
-`protobuf::Subject::<Order>::resolve_declared(&sr)` on the byte-lane one.
+Two registered types with the same serde name would make a publish ambiguous, so that is **rejected
+at registration**, before the app runs. Give one of them a distinct `#[serde(rename = "..")]`.
 
-The read happens at **construction**, and it has to. A codec is built once, per mount site, where
-the type is known, while `Codec::encode<T: Serialize>` is generic over every serde value and can
-require nothing of them; `for_type` bounds `T: RegistrySubject`, reads the constant, and keeps the
-subject as a field, so `encode` never needs the bound.
+The cost that remains: a type you forgot to register is a **runtime error at its first publish**,
+naming the type and listing the ones the codec does carry. Making it a compile error would mean the
+codec's type carrying its message list, which is the type-parameter-per-mount-site shape this design
+exists to avoid.
 
-Nothing checks that the schema under that subject is the type's schema - but nothing did before
-either. Mount a codec where another message type travels and the format rejects the first message
-against the wrong schema, loudly, exactly as a mistyped string would. Declaring the subject removes
-a way to mistype it and introduces no new failure of its own. Checking the pairing before the first
-message is issue #54's compile-time validation layer, which is separate work.
+### A reader schema is tuning, not a requirement
 
-Protobuf declares one thing more, `MESSAGE`: a `prost`-generated type carries no descriptor, and
-Protobuf frames a message by its position in the schema, so the fully qualified message name is
-declared beside the subject rather than derived.
+`resolve_onto(schema)` turns on Avro's own resolution, so a field the writer never had is filled
+from a reader schema's default. It applies to **every** delivery this codec decodes - decode has a
+type but no value, so there is no name to key a per-type reader schema by - which makes it a setting
+for a codec that reads one type. A codec serving several uses `#[serde(default)]` on the Rust side
+instead, which covers the same ground per field.
+
+### When the subject is gone
+
+A subject can be deleted from a registry while a producer is running, so the reaction is a policy
+rather than a fixed answer: `SchemaPrefetch::on_missing_subject`, an enum whose default is
+**`Refuse`**. Creating subjects in someone else's registry as a side effect of starting up is worse
+than not starting. `RegisterAgain` puts the type's own schema back and warns - which is what
+Confluent's own producers do by default - and `PublishUnframed` writes the bare datum and warns.
+Each warning names the subject, the flavour and the schema, because a bare "schema missing" tells
+an operator nothing.
+
+The two deletions differ, and this was checked against a live registry rather than assumed. A
+**soft** delete hides the subject - its `versions/latest` answers 404 - while `GET /schemas/ids/{id}`
+still returns the schema, so **consumers keep working** and only the producer is stuck. A
+**permanent** delete removes the id too, and then nothing decodes a record naming it: no policy here
+helps a consumer, because the schema is gone for everyone. Re-registering afterwards mints a *new*
+id, so records already on the topic stay unreadable.
+
+This is where the codec path and `SchemaFrame` part company, and deliberately. The transcoding
+layer treats a subject the registry does not know as "this topic is not registry-backed" and
+publishes untouched, because there the condition is genuinely ambiguous - it resolves subjects for
+every topic an app publishes to, most of which are not registry-backed at all. On the codec path
+the ambiguity is gone: writing `register::<Order>("orders-value")` *declares* the topic
+registry-backed, so an absent subject is an anomaly rather than a plain topic, and the default says
+so.
+
+### JSON takes the same shape
+
+`SchemaFramed::new(&prefetch, JsonCodec).register::<Order>("orders-value")` is the same builder over
+the same name-keyed map, for the same reason. Registration captures the type's JSON Schema through
+`schemars`, so `RegisterAgain` has something to put back.
 
 ### Naming the registry once
 

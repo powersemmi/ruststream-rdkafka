@@ -36,7 +36,7 @@ use ruststream::BytesMut;
 
 use crate::error::KafkaError;
 use crate::frame::{IncomingFrame, OutgoingFrame};
-use crate::schema_registry::{RegisteredSchema, RegistrySubject, SchemaRegistry, SchemaType};
+use crate::schema_registry::{RegisteredSchema, SchemaRegistry, SchemaType};
 
 /// Reads a Confluent-framed delivery into a `prost`-generated message.
 ///
@@ -203,31 +203,6 @@ impl<T: prost::Message> Subject<T> {
     #[must_use]
     pub fn schema_id(&self) -> u32 {
         self.schema_id
-    }
-}
-
-impl<T: prost::Message + RegistrySubject> Subject<T> {
-    /// [`resolve`](Self::resolve) at the subject and message name `T` declares.
-    ///
-    /// Protobuf needs both, and a `prost`-generated type carries neither in a form this crate can
-    /// read, so [`RegistrySubject::MESSAGE`] declares the message name beside the subject and
-    /// this constructor reads the pair.
-    ///
-    /// # Errors
-    ///
-    /// As [`resolve`](Self::resolve), plus [`KafkaError::InvalidOptions`] when `T` declares no
-    /// message name - Protobuf cannot address a message without one, and framing against a guess
-    /// would put a mis-addressed index path on the wire.
-    pub async fn resolve_declared(registry: &SchemaRegistry) -> Result<Self, KafkaError> {
-        if T::MESSAGE.is_empty() {
-            return Err(KafkaError::InvalidOptions(format!(
-                "the type published under subject {:?} declares no `RegistrySubject::MESSAGE`; \
-                 Protobuf frames a message by its position in the schema, so the fully qualified \
-                 message name (package included) has to be declared with the subject",
-                T::SUBJECT,
-            )));
-        }
-        Self::resolve(registry, T::SUBJECT, T::MESSAGE).await
     }
 }
 
