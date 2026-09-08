@@ -151,13 +151,19 @@ The scoping is the core's own codec cascade, and it already does what schemas ne
 for a broker scope covers every handler in it, and a router mounted inside overrides it for the
 handlers it carries. Most specific wins, exactly as for any other codec.
 
+One codec now serves a whole scope, so the override is for the settings that cannot be shared. The
+reader schema is the clearest: it applies to every delivery its codec decodes, so a codec carrying
+one can only serve a single reading type, and the handler that wants Avro's resolution gets its own
+codec in its own router while the scope's keeps serving the rest. A subtree publishing to a
+different registry, or under a different `MissingSubject` policy, is minted the same way.
+
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:cascade"
 ```
 
 There is no app-wide level, because the core scopes codecs at the broker and the router, and a
 registry is a per-cluster thing in any case. What the core does not offer is a *partial* override -
-"take the scope's codec and change only its subject" - since a codec is an opaque value to it. The
+"take the scope's codec and change only one setting" - since a codec is an opaque value to it. The
 prefetch minting a second codec is that override, and it costs one line.
 
 ### Schema evolution

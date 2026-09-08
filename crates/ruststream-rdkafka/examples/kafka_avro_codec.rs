@@ -11,7 +11,7 @@
 //! ```
 
 use apache_avro::AvroSchema;
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, Router, RustStream};
 use ruststream::subscriber;
 use ruststream_rdkafka::avro::AvroCodec;
 use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
@@ -60,9 +60,18 @@ fn app() -> impl App {
     // One codec for the whole scope. Registration is the publish side only: it says which subject
     // a type's values are framed under, and captures that type's schema so a subject that has
     // gone missing can be put back.
-    let codec = AvroCodec::registry(&prefetch)
-        .register::<Order>("orders-value")
-        .register::<Shipment>("shipments-value");
+    let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
+
+    // --8<-- [start:cascade]
+    // A reader schema applies to every delivery its codec decodes, so a codec carrying one can
+    // only serve a single reading type. This handler wants Avro's resolution to fill the fields
+    // older producers never wrote, so it gets its own codec, in its own router - and the scope's
+    // codec, which carries no reader schema, keeps serving everything else.
+    let shipments = AvroCodec::registry(&prefetch)
+        .register::<Shipment>("shipments-value")
+        .resolve_onto(Shipment::get_schema())
+        .expect("the reader schema resolves");
+    // --8<-- [end:cascade]
 
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
@@ -70,7 +79,8 @@ fn app() -> impl App {
 
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
         b.include(take_order);
-        b.include(take_shipment);
+        // Most specific wins, exactly as for any other codec.
+        b.include_router(Router::new().with_codec(shipments).include(take_shipment));
     })
     // --8<-- [end:wiring]
 }
