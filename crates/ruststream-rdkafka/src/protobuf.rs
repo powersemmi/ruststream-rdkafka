@@ -28,15 +28,22 @@
 //! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) transcodes every
 //! subscription it opens, so a frame-reading handler on it would be handed JSON.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
-use ruststream::BytesMut;
+use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
+use ruststream::{BytesMut, Publisher};
 
 use crate::error::KafkaError;
 use crate::frame::{IncomingFrame, OutgoingFrame};
-use crate::schema_registry::{RegisteredSchema, SchemaRegistry, SchemaType};
+use crate::schema_registry::{
+    RegisteredSchema, SchemaRegistry, SchemaType, SubjectMap, SubjectStrategy, WIRE_MAGIC,
+    parse_envelope,
+};
 
 /// Reads a Confluent-framed delivery into a `prost`-generated message.
 ///
@@ -79,11 +86,73 @@ use crate::schema_registry::{RegisteredSchema, SchemaRegistry, SchemaType};
 pub fn decode_framed<T: prost::Message + Default>(
     frame: &IncomingFrame<'_>,
 ) -> Result<T, KafkaError> {
-    let message = skip_indexes(frame.datum()).ok_or_else(|| {
+    decode_datum(frame.schema_id(), frame.datum())
+}
+
+/// Reads a Confluent-framed delivery into a `prost`-generated message, straight off the wire.
+///
+/// This is the function a generated type names in `#[wire(decode = ..)]`, so its handlers take
+/// the message itself and never see the envelope.
+///
+/// Everything the envelope carries in front of the message is parseable without asking anyone:
+/// the magic byte, the four-byte id, and the message-index path. The id is not needed to read
+/// the message at all, because Protobuf's compatibility model is the wire format's own - fields
+/// are tag-addressed, a field the reader does not know is kept as an unknown field and one the
+/// writer never wrote takes its default - so a delivery decodes against the reader's own
+/// generated type. That is what lets this be a synchronous function on the decode lane, where
+/// Avro needs the writer schema its id names and therefore an `await`.
+///
+/// A payload with no envelope is read as a bare message, so a topic that some producers frame
+/// and others do not still decodes. What is lost by not looking at the id is the *governance*
+/// half - which schema version a delivery claims - and a handler that needs it takes
+/// [`IncomingFrame`] and calls [`decode_framed`] instead.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::WireFormat`] when the message-index path is truncated, or when the
+/// bytes after it are not a message of `T`.
+///
+/// # Examples
+///
+/// ```
+/// use ruststream::prelude::*;
+///
+/// #[derive(Clone, PartialEq, prost::Message, Deserialized, Serialized)]
+/// #[wire(
+///     encode = ::prost::Message::encode,
+///     decode = ruststream_rdkafka::protobuf::decode_confluent
+/// )]
+/// struct Order {
+///     #[prost(int64, tag = "1")]
+///     id: i64,
+/// }
+///
+/// # fn check() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// // Schema id 42, the compact `[0]` index path, then `id = 7`.
+/// let payload = [0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x08, 0x07];
+/// let order = Order::from_payload(&payload)?;
+/// assert_eq!(order.id, 7);
+/// # Ok(())
+/// # }
+/// # check().unwrap();
+/// ```
+pub fn decode_confluent<T: prost::Message + Default>(payload: &[u8]) -> Result<T, KafkaError> {
+    match parse_envelope(payload) {
+        Some((schema_id, datum)) => decode_datum(schema_id, datum),
+        // An unframed payload is a bare message: no envelope means no index path either.
+        None => T::decode(payload).map_err(KafkaError::wire_format),
+    }
+}
+
+/// The shared half of both decode entry points: step over the index path, read the message.
+fn decode_datum<T: prost::Message + Default>(
+    schema_id: u32,
+    datum: &[u8],
+) -> Result<T, KafkaError> {
+    let message = skip_indexes(datum).ok_or_else(|| {
         KafkaError::malformed(format!(
-            "the message-index path of schema id {} is truncated, so the Protobuf message after \
-             it cannot be found",
-            frame.schema_id(),
+            "the message-index path of schema id {schema_id} is truncated, so the Protobuf \
+             message after it cannot be found",
         ))
     })?;
     T::decode(message).map_err(KafkaError::wire_format)
@@ -220,6 +289,245 @@ impl<T: prost::Message> Subject<T> {
         datum.extend_from_slice(&self.indexes);
         value.encode(&mut datum).map_err(KafkaError::wire_format)?;
         Ok(OutgoingFrame::new(self.schema_id, datum.to_vec()))
+    }
+}
+
+/// One topic's message-index prefix, kept with the schema id it was computed against so a
+/// re-registered subject recomputes it instead of framing behind a stale path.
+#[derive(Clone)]
+struct IndexPrefix {
+    schema_id: u32,
+    bytes: Arc<[u8]>,
+}
+
+/// The prefixes resolved so far, by topic.
+type IndexPrefixes = Arc<Mutex<HashMap<String, IndexPrefix>>>;
+
+/// Publish middleware putting the Confluent envelope on a `prost` message's own bytes.
+///
+/// It is the encode-side half of the pair [`decode_confluent`] completes on the read side: with
+/// both in place a Protobuf handler returns the message and nothing else. Added app-wide with
+/// `RustStream::publish_layer`.
+///
+/// The envelope needs a schema id, and a value cannot fetch one: `Serialized::wire_bytes` is
+/// synchronous and has only `&self` to work with. The publish path can, because it knows the
+/// destination topic, which is exactly what names the subject - so the value writes bare
+/// Protobuf through the core's own `#[wire(encode = ::prost::Message::encode)]` and this layer
+/// puts the id and the message-index path in front of it. That division is why nothing here
+/// needs a process-wide registry singleton keyed by message type, which is the other way a
+/// value could have reached an id.
+///
+/// # What it touches, and what it leaves alone
+///
+/// A publish is framed only when its topic's subject is registered **and holds a Protobuf
+/// schema**. Everything else passes through untouched: a topic with no subject (mixed
+/// registry/plain topologies need no configuration), and a topic whose subject is Avro or JSON,
+/// whose payload some other path already framed. That is what lets one app carry an Avro codec,
+/// a JSON codec and Protobuf lanes at once with this layer installed app-wide.
+///
+/// A payload that already carries an envelope also passes through, so a handler that framed its
+/// own message with [`Subject::frame`] is not framed twice. The check is exact rather than a
+/// guess: a bare `prost` message begins with a field tag, whose field number is at least 1, so
+/// its first byte is never the zero magic byte.
+///
+/// It is an alternative to [`SchemaFrame`](crate::SchemaFrame) rather than a companion. That
+/// layer's contract is "the payload is a JSON document, transcode it to the subject's flavor";
+/// this one's is "the payload is already the subject's datum, put the envelope on". Install one
+/// or the other.
+///
+/// # Reply through a slot, not through a `publish(..)` clause
+///
+/// A handler's outgoing message reaches this layer when it leaves through an
+/// [`Out`](ruststream::runtime::Out) slot, and **not** when it is returned as the reply of a
+/// `publish(..)` mount. That is the core's own division rather than a gap here: a byte-for-byte
+/// reply goes straight to its paired publisher, deliberately, so a value that owns its bytes
+/// leaves exactly as it wrote them. A `publish(..)` reply would therefore go out **unframed**,
+/// which a registry-backed consumer cannot read.
+///
+/// So a Protobuf handler publishes its answer through a slot, mounted with
+/// `b.include(confirm).out(DefaultSlot, KafkaPublish::default()).build()`:
+///
+/// ```no_run
+/// # use ruststream::prelude::*;
+/// # #[derive(Clone, PartialEq, prost::Message, Deserialized, Serialized)]
+/// # #[wire(encode = ::prost::Message::encode, decode = ruststream_rdkafka::protobuf::decode_confluent)]
+/// # struct Order { #[prost(int64, tag = "1")] id: i64 }
+/// # #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
+/// # #[wire(encode = ::prost::Message::encode)]
+/// # struct Confirmation { #[prost(int64, tag = "1")] id: i64 }
+/// #[subscriber("orders")]
+/// async fn confirm(order: &Order, Out(out): Out<impl Publisher>) -> HandlerOutcome {
+///     let sent = out
+///         .message(&Confirmation { id: order.id })
+///         .to("confirmations")
+///         .publish()
+///         .await;
+///     if sent.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
+/// # let _ = confirm;
+/// ```
+///
+/// Nothing in the body serializes anything either way; what changes is which publish surface the
+/// value leaves through.
+///
+/// # Examples
+///
+/// ```no_run
+/// use ruststream::runtime::{AppInfo, RustStream};
+/// use ruststream_rdkafka::{ProtobufFrame, SchemaRegistry};
+///
+/// let sr = SchemaRegistry::new("http://localhost:8081");
+/// let app = RustStream::new(AppInfo::new("orders", "1.0.0"))
+///     .publish_layer(ProtobufFrame::new(sr));
+/// # let _ = app;
+/// ```
+#[derive(Clone)]
+pub struct ProtobufFrame {
+    subjects: SubjectMap,
+    /// Per-topic message names (fully qualified), for schemas declaring several messages.
+    messages: HashMap<String, String>,
+    prefixes: IndexPrefixes,
+}
+
+impl fmt::Debug for ProtobufFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProtobufFrame")
+            .field("strategy", &self.subjects.strategy())
+            .field("subjects", self.subjects.pins())
+            .field("messages", &self.messages)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProtobufFrame {
+    /// Builds the framing middleware over `registry`. Subjects default to the Confluent
+    /// `TopicName` strategy (`{topic}-value`).
+    #[must_use]
+    pub fn new(registry: SchemaRegistry) -> Self {
+        Self {
+            subjects: SubjectMap::new(registry),
+            messages: HashMap::new(),
+            prefixes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// How destination topics map onto subjects (default: [`SubjectStrategy::TopicName`]).
+    #[must_use]
+    pub fn subject_strategy(mut self, strategy: SubjectStrategy) -> Self {
+        self.subjects.set_strategy(strategy);
+        self
+    }
+
+    /// Pins `topic`'s subject explicitly, overriding the strategy.
+    #[must_use]
+    pub fn subject(mut self, topic: impl Into<String>, subject: impl Into<String>) -> Self {
+        self.subjects.pin(topic.into(), subject.into());
+        self
+    }
+
+    /// Pins the message `topic`'s payloads are, by fully qualified name (package included).
+    ///
+    /// The message-index path says which message of the schema was written, so it has to be the
+    /// one the publishing type actually is. Without this pin the layer takes the schema's first
+    /// top-level message, which is the common case and the one Confluent optimises to a single
+    /// zero byte - so a single-message `.proto`, and a multi-message one whose published type
+    /// is declared first, need no pin. Anything else does: naming the wrong message puts a
+    /// mis-addressed path on the wire, which consumers report as a decode failure.
+    #[must_use]
+    pub fn message(mut self, topic: impl Into<String>, message: impl Into<String>) -> Self {
+        self.messages.insert(topic.into(), message.into());
+        self
+    }
+
+    /// The message-index prefix `topic`'s payloads ride behind, resolved once per schema id.
+    fn prefix_for(&self, topic: &str, schema: &RegisteredSchema) -> Result<Arc<[u8]>, KafkaError> {
+        if let Some(prefix) = self
+            .prefixes
+            .lock()
+            .expect("message-index prefix mutex poisoned")
+            .get(topic)
+            && prefix.schema_id == schema.id()
+        {
+            return Ok(Arc::clone(&prefix.bytes));
+        }
+        let pool = self.subjects.registry().parsed_proto(schema)?;
+        let descriptor = match self.messages.get(topic) {
+            Some(name) => pool.get_message_by_name(name).ok_or_else(|| {
+                KafkaError::InvalidOptions(format!(
+                    "message {name:?}, pinned for topic {topic:?}, is not in its subject's \
+                     schema (use the fully qualified name, package included)",
+                ))
+            })?,
+            None => registry_file(&pool)
+                .and_then(|file| file.messages().next())
+                .ok_or_else(|| {
+                    KafkaError::InvalidOptions(format!(
+                        "the subject of topic {topic:?} holds a Protobuf schema declaring no \
+                         messages, so there is no message-index path to frame with",
+                    ))
+                })?,
+        };
+        let indexes = message_indexes(&descriptor).ok_or_else(|| {
+            KafkaError::InvalidOptions(format!(
+                "message {:?} is not declared by the registered schema file of topic {topic:?}",
+                descriptor.full_name(),
+            ))
+        })?;
+        let bytes: Arc<[u8]> = Arc::from(encode_indexes(&indexes));
+        self.prefixes
+            .lock()
+            .expect("message-index prefix mutex poisoned")
+            .insert(
+                topic.to_owned(),
+                IndexPrefix {
+                    schema_id: schema.id(),
+                    bytes: Arc::clone(&bytes),
+                },
+            );
+        Ok(bytes)
+    }
+
+    /// Frames `out`'s payload in place when its topic publishes under a Protobuf subject.
+    async fn frame(&self, out: &mut Outgoing<'_>) -> Result<(), KafkaError> {
+        // A bare `prost` message opens with a field tag, whose field number is at least 1, so
+        // its first byte is at least 0x08 and never the zero magic byte. An envelope here is
+        // therefore a payload something already framed, not a message that happens to look
+        // like one.
+        if parse_envelope(out.payload()).is_some() {
+            return Ok(());
+        }
+        let topic = out.name().to_owned();
+        let Some(schema) = self.subjects.schema_for(&topic).await? else {
+            return Ok(());
+        };
+        if schema.schema_type() != SchemaType::Protobuf {
+            return Ok(());
+        }
+        let prefix = self.prefix_for(&topic, &schema)?;
+
+        let payload = out.payload_mut();
+        let mut framed = Vec::with_capacity(1 + 4 + prefix.len() + payload.len());
+        framed.push(WIRE_MAGIC);
+        framed.extend_from_slice(&schema.id().to_be_bytes());
+        framed.extend_from_slice(&prefix);
+        framed.extend_from_slice(payload);
+        payload.clear();
+        payload.extend_from_slice(&framed);
+        Ok(())
+    }
+}
+
+impl PublishLayer for ProtobufFrame {
+    async fn on_publish<'a, N: PublishPipeline, P: Publisher>(
+        &'a self,
+        out: &'a mut Outgoing<'a>,
+        next: PublishNext<'a, N, P>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.frame(out).await?;
+        next.run(out).await
     }
 }
 
@@ -601,5 +909,110 @@ message Order {
             assert_eq!(decoded, value);
             assert!(rest.is_empty());
         }
+    }
+
+    /// The shape a service declares: `prost` writes the bytes, this crate reads the envelope.
+    #[derive(
+        Clone, PartialEq, prost::Message, ruststream::Deserialized, ruststream::Serialized,
+    )]
+    #[wire(encode = ::prost::Message::encode, decode = decode_confluent)]
+    struct LaneOrder {
+        #[prost(int64, tag = "1")]
+        id: i64,
+        #[prost(string, tag = "2")]
+        item: String,
+    }
+
+    #[test]
+    fn a_generated_type_reads_a_framed_delivery_with_no_registry() {
+        use ruststream::runtime::{Deserialized, Serialized};
+
+        let order = LaneOrder {
+            id: 42,
+            item: "anvil".to_owned(),
+        };
+        // The encode half is bare prost: no envelope, no index path, no id.
+        let mut buf = BytesMut::new();
+        let bare = order.wire_bytes(&mut buf).expect("encode").to_vec();
+        assert_eq!(bare, order.encode_to_vec());
+
+        // The framing a publish layer would add: id 9, the compact `[0]` path.
+        let mut framed = vec![0x00, 0x00, 0x00, 0x00, 0x09, 0x00];
+        framed.extend_from_slice(&bare);
+        assert_eq!(LaneOrder::from_payload(&framed).expect("decode"), order);
+
+        // And the same bytes with no envelope at all, for a topic only some producers frame.
+        assert_eq!(LaneOrder::from_payload(&bare).expect("decode"), order);
+    }
+
+    #[test]
+    fn a_bare_message_never_looks_like_an_envelope() {
+        // The discriminator the publish layer relies on: a field number is at least 1, so the
+        // first byte of a non-empty message is at least 0x08 and never the zero magic byte.
+        for id in [i64::MIN, -1, 0, 1, i64::MAX] {
+            let bare = LaneOrder {
+                id,
+                item: String::new(),
+            }
+            .encode_to_vec();
+            assert!(parse_envelope(&bare).is_none(), "id {id} looked framed");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_layers_prefix_addresses_the_pinned_message() {
+        let (_server, sr, _) = registry_with_orders(11).await;
+        let layer = ProtobufFrame::new(sr).message("orders", "acme.Order");
+
+        let schema = layer
+            .subjects
+            .schema_for("orders")
+            .await
+            .expect("resolve")
+            .expect("registered");
+        let prefix = layer.prefix_for("orders", &schema).expect("prefix");
+
+        // `acme.Order` is the second top-level message, so the path is real, not the compact
+        // zero - and a second call is served from the cache.
+        assert_ne!(prefix[0], 0);
+        assert_eq!(
+            &*layer.prefix_for("orders", &schema).expect("cached"),
+            &*prefix
+        );
+        assert_eq!(decode_indexes(&prefix).expect("decodes").0, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_topic_takes_the_first_top_level_message() {
+        let (_server, sr, _) = registry_with_orders(12).await;
+        let layer = ProtobufFrame::new(sr);
+
+        let schema = layer
+            .subjects
+            .schema_for("orders")
+            .await
+            .expect("resolve")
+            .expect("registered");
+        let prefix = layer.prefix_for("orders", &schema).expect("prefix");
+
+        // `acme.Ignored` is declared first, and `[0]` is Confluent's single-zero form.
+        assert_eq!(&*prefix, &[0]);
+    }
+
+    #[tokio::test]
+    async fn a_message_the_schema_does_not_declare_is_named_in_the_error() {
+        let (_server, sr, _) = registry_with_orders(13).await;
+        let layer = ProtobufFrame::new(sr).message("orders", "acme.Missing");
+
+        let schema = layer
+            .subjects
+            .schema_for("orders")
+            .await
+            .expect("resolve")
+            .expect("registered");
+        let err = layer.prefix_for("orders", &schema).expect_err("unknown");
+        let message = err.to_string();
+        assert!(message.contains("acme.Missing"), "{message}");
+        assert!(message.contains("orders"), "{message}");
     }
 }

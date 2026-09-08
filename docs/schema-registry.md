@@ -42,6 +42,7 @@ reader to guess.
 | --- | --- | --- | --- |
 | Codec | `AvroCodec::local`, `AvroCodec::registry` | `SchemaFramed<JsonCodec>` | forced blank, see below |
 | Byte lanes | `avro::decode_framed`, `avro::Subject` | the frame types alone | `protobuf::decode_framed`, `protobuf::Subject` |
+| Handler over the message itself | the codec | the codec | `#[wire(..)]` + `ProtobufFrame` |
 | Transcode | yes | yes | yes |
 | Schema read off the type | `AvroSchema` | `schemars::JsonSchema` | **no** |
 | Subject registered from the type | `avro::Subject::register`, `register_avro::<T>` | `register_json::<T>` | **no** |
@@ -57,6 +58,12 @@ a `prost` message is not a serde type, so it cannot reach the codec position at 
 its only home, and that is a property of the format rather than an unfinished corner. Every
 Protobuf row that reads "forced blank" is the same fact one step removed: `SchemaPrefetch` warms
 what a codec registered, so with no codec there is nothing for it to warm.
+
+What the blank costs is smaller than it looks, because the row below it is filled. The *outcome* a
+codec buys - a handler over ordinary types, with nothing about the wire in its signature - Protobuf
+reaches by another route, described under [Protobuf without the envelope in the
+signature](#protobuf-without-the-envelope-in-the-signature). What it does not reach is the
+prefetch's machinery, which hangs off the codec position itself.
 
 **Why the prefetch rows read "codec" and not "Avro".** Nothing in that machinery is Avro-only.
 `MissingSubject`, the connect-time subject resolution and the startup compatibility check all live
@@ -296,6 +303,75 @@ call. Only the publish side resolves anything.
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:handler"
 ```
+
+## Protobuf without the envelope in the signature
+
+The lane handler above sees the envelope because it asked to. It does not have to: a generated
+type can carry the envelope on its own wire paths, and then the handler is an ordinary function
+over ordinary types, exactly as it is on the Avro codec.
+
+The two halves are asymmetric, and knowing why is what makes the shape read as one thing rather
+than two. **Reading needs no registry**, so it can happen in the type: Protobuf's compatibility
+model is the wire format's own - fields are tag-addressed, a field the reader does not know is
+kept as an unknown field, one the writer never wrote takes its default - so a delivery decodes
+against the reader's own generated type, and everything the envelope puts in front of the message
+(the magic byte, the id, the message-index path) parses without asking anyone. **Writing needs one
+number**, the subject's schema id, and a value cannot fetch it: `Serialized::wire_bytes` is
+synchronous and has only `&self` to work with. The publish path can, because it knows the
+destination topic, which is exactly what names the subject.
+
+So the type splits its wire paths - `prost` writes the message, this crate reads the envelope -
+and a publish layer puts the id and the index path on the way out.
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
+```
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:handler"
+```
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:wiring"
+```
+
+`ProtobufFrame` frames a publish only when its destination topic's subject is registered **and
+holds a Protobuf schema**, and passes everything else through untouched - a topic with no subject,
+and a topic whose subject is Avro or JSON, whose payload another path already framed. That is what
+lets one app carry an Avro codec, a JSON codec and Protobuf at once with the layer installed
+app-wide. A payload that already carries an envelope passes through too, so a handler that framed
+its own message with `Subject::frame` is not framed twice; the check is exact rather than a guess,
+because a bare `prost` message opens with a field tag whose field number is at least 1, so its
+first byte is never the zero magic byte. It is an alternative to `SchemaFrame` rather than a
+companion: that layer's contract is "this payload is a JSON document, transcode it", this one's is
+"this payload is already the datum, put the envelope on".
+
+### The message index, and the reply's publish surface
+
+Two details decide whether this works, and both are worth stating plainly.
+
+**Which message of the schema.** The envelope's index path says which message was written, so it
+has to be the one the publishing type actually is. The layer takes the schema's first top-level
+message by default, which is the common case and the one Confluent optimises to a single zero
+byte, so a single-message `.proto` needs nothing. Anything else pins it: `.message(topic,
+"pkg.Message")`, the same call `SchemaFrame` already takes, and it covers this path unchanged.
+
+**The reply leaves through a slot, not a `publish(..)` clause.** A handler's outgoing message
+reaches a publish layer when it leaves through an `Out` slot, and not when it is returned as the
+reply of a `publish(..)` mount: the core routes a byte-for-byte reply straight to its paired
+publisher, deliberately, so a value that owns its bytes leaves exactly as it wrote them. A
+`publish(..)` reply would therefore go out unframed, which a registry-backed consumer cannot read.
+Nothing in the handler body serializes anything either way; what changes is the mount, which names
+`.out(DefaultSlot, KafkaPublish::default())` and lets the body publish through the slot.
+
+### What the explicit path is still for
+
+`IncomingFrame` with `protobuf::decode_framed`, and `protobuf::Subject`, are unchanged and are not
+made redundant by this. Reach for them when the handler needs the **schema id** - to log which
+version produced a delivery, to route a topic carrying more than one schema, to forward frames it
+never decodes - since that is the one thing decoding past the envelope throws away. `Subject` is
+also the producer's path outside an app's publish pipeline (a seeding tool, a replay job, a test
+with no registry in front of it), where there is no layer to do the framing.
 
 ## Consuming: transcode on the way in
 

@@ -128,6 +128,10 @@ name = "kafka_protobuf"
 required-features = ["protobuf"]
 
 [[example]]
+name = "kafka_protobuf_plain"
+required-features = ["protobuf"]
+
+[[example]]
 name = "kafka_lanes_testing"
 required-features = ["protobuf", "testing"]
 
