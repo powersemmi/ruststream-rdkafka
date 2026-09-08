@@ -1,5 +1,5 @@
-//! Protobuf with nothing manual in the handler: a generated message arrives as itself and
-//! leaves as itself, and the Confluent envelope is put on and taken off around the body.
+//! Protobuf with nothing manual in the handler: a generated message arrives as itself, the
+//! handler returns its reply, and the Confluent envelope is put on and taken off around the body.
 //!
 //! Two halves make that work, and they are asymmetric on purpose. Reading needs no registry at
 //! all - Protobuf is tag-addressed, so a delivery decodes against the reader's own type - so the
@@ -7,7 +7,12 @@
 //! the signature. Writing does need one number, the subject's schema id, and a value cannot
 //! fetch it: `Serialized::wire_bytes` is synchronous and has only `&self`. The publish path can,
 //! because it knows the destination topic, so the value writes bare Protobuf through `prost` and
-//! `ProtobufFrame` puts the id and the message-index path in front of it.
+//! the reply's publisher puts the id and the message-index path in front of it.
+//!
+//! To set framing once for a whole app instead of per mount site, add `ProtobufFrame` as a
+//! `publish_layer`; it covers every publish that leaves through a slot or a publisher the mount
+//! never named. The two compose - whichever runs first frames the payload, and the other leaves
+//! the envelope it finds alone.
 //!
 //! ```text
 //! just brokers-up
@@ -15,18 +20,16 @@
 //! ```
 
 use ruststream::prelude::*;
-use ruststream::runtime::{App, AppInfo, DefaultSlot, RustStream};
-use ruststream_rdkafka::{KafkaBroker, KafkaPublish, ProtobufFrame, SchemaRegistry};
+use ruststream::runtime::{App, AppInfo, Reply, RustStream};
+use ruststream_rdkafka::{KafkaBroker, KafkaPublish, SchemaRegistry};
 
 // --8<-- [start:types]
-// What `prost-build` emits, plus the two lane derives. `#[wire(..)]` names the two halves
+// What `prost-build` emits, plus the lane derives. `#[wire(..)]` names the two halves
 // separately, because they are not symmetric: `prost` owns the bytes on the way out, and reading
-// has an envelope to step over first.
-#[derive(Clone, PartialEq, prost::Message, Deserialized, Serialized)]
-#[wire(
-    encode = ::prost::Message::encode,
-    decode = ruststream_rdkafka::protobuf::decode_confluent
-)]
+// has an envelope to step over first. The reply carries only its encode half and no destination
+// of its own - the address comes from the `publish(..)` clause.
+#[derive(Clone, PartialEq, prost::Message, Deserialized)]
+#[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
 struct Order {
     #[prost(int64, tag = "1")]
     id: i64,
@@ -34,9 +37,7 @@ struct Order {
     item: String,
 }
 
-// The reply also declares a destination, because it leaves through a slot rather than a
-// `publish(..)` clause - see the mount below for why.
-#[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
+#[derive(Clone, PartialEq, prost::Message, Serialized)]
 #[wire(encode = ::prost::Message::encode)]
 struct Confirmation {
     #[prost(int64, tag = "1")]
@@ -48,44 +49,31 @@ struct Confirmation {
 
 // --8<-- [start:handler]
 // An ordinary function over ordinary types: no `IncomingFrame`, no `decode_framed`, no
-// `Subject::frame`. The delivery arrived past its envelope and the reply leaves before one.
-#[subscriber("orders")]
-async fn confirm(order: &Order, Out(out): Out<impl Publisher>) -> HandlerOutcome {
-    let sent = out
-        .message(&Confirmation {
-            id: order.id,
-            accepted: !order.item.is_empty(),
-        })
-        .to("confirmations")
-        .publish()
-        .await;
-    if sent.is_err() {
-        return HandlerOutcome::retry();
+// `Subject::frame`, and no publish call. The delivery arrived past its envelope, and the reply
+// leaves before one.
+#[subscriber("orders", publish("confirmations"))]
+async fn confirm(order: &Order) -> Confirmation {
+    Confirmation {
+        id: order.id,
+        accepted: !order.item.is_empty(),
     }
-    HandlerOutcome::ack()
 }
 // --8<-- [end:handler]
 
 #[ruststream::app]
 fn app() -> impl App {
     // --8<-- [start:wiring]
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
 
-    RustStream::new(AppInfo::new("orders", "0.1.0"))
-        // Frames every publish whose destination topic has a Protobuf subject, and leaves the
-        // rest alone - so an Avro or JSON topic in the same app is untouched. The message index
-        // defaults to the schema's first top-level message; `.message(topic, "pkg.Message")`
-        // pins another.
-        .publish_layer(ProtobufFrame::new(sr))
-        .with_broker(
-            KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-            |b| {
-                // The reply goes out through a slot, not a `publish(..)` clause: the core routes a
-                // byte-for-byte reply straight to its publisher, so a publish layer never sees it.
-                b.include(confirm)
-                    .out(DefaultSlot, KafkaPublish::default())
-                    .build();
-            },
-        )
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+        KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+        |b| {
+            // The framing is named where the reply's publisher is named. The message index
+            // defaults to the schema's first top-level message, which Confluent optimises to a
+            // single zero byte; `.message(topic, "pkg.Message")` pins another.
+            b.include(confirm)
+                .out(Reply, KafkaPublish::framed(&registry));
+        },
+    )
     // --8<-- [end:wiring]
 }

@@ -27,7 +27,7 @@ default codec and never see the wire. It is the compatibility path: the right ch
 that must not carry generated types or Avro-derived models, at the cost of a JSON hop per message
 and of losing schema resolution, since a JSON handler has no reader schema to resolve onto.
 
-None of the three mix on one broker. `KafkaBroker::schema_registry(sr)` attaches the transcode to
+None of the three mix on one broker. `KafkaBroker::schema_registry(registry)` attaches the transcode to
 every subscription that broker opens, so a codec or a frame-reading handler on it would be handed
 JSON; the codec and the lanes take `KafkaBroker::schema_prefetch(..)` instead, which resolves
 schemas without touching a payload.
@@ -321,7 +321,7 @@ synchronous and has only `&self` to work with. The publish path can, because it 
 destination topic, which is exactly what names the subject.
 
 So the type splits its wire paths - `prost` writes the message, this crate reads the envelope -
-and a publish layer puts the id and the index path on the way out.
+and the reply's own publisher puts the id and the index path on the way out.
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
@@ -335,34 +335,62 @@ and a publish layer puts the id and the index path on the way out.
 --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:wiring"
 ```
 
-`ProtobufFrame` frames a publish only when its destination topic's subject is registered **and
-holds a Protobuf schema**, and passes everything else through untouched - a topic with no subject,
-and a topic whose subject is Avro or JSON, whose payload another path already framed. That is what
-lets one app carry an Avro codec, a JSON codec and Protobuf at once with the layer installed
-app-wide. A payload that already carries an envelope passes through too, so a handler that framed
-its own message with `Subject::frame` is not framed twice; the check is exact rather than a guess,
+The handler returns its reply and nothing else: no slot parameter, no `publish().await`, no error
+branch in the body. The reply type carries no destination of its own either, because the address
+comes from the `publish("confirmations")` clause; `#[derive(Serialized)]` and the encode half of
+`#[wire(..)]` are all it needs. The registry is named once, at the mount site, in the policy.
+
+`KafkaPublish::framed(&registry)` works wherever a publish policy is named, an `Out` slot
+included, so a handler that publishes several messages frames them all the same way.
+
+### Setting it once for a whole app
+
+`ProtobufFrame` is the same framing as a `publish_layer`, for an app that would otherwise repeat
+the policy at every mount site:
+
+<!-- inline-rust: one line of wiring; the compiled example shows the mount-site form, which is the one to reach for first -->
+```rust
+RustStream::new(info).publish_layer(ProtobufFrame::new(registry))
+```
+
+It frames a publish only when the destination topic's subject is registered **and holds a Protobuf
+schema**, and passes everything else through untouched - a topic with no subject, and a topic whose
+subject is Avro or JSON. That is what lets one app carry an Avro codec, a JSON codec and Protobuf
+at once with the layer installed app-wide, and it is why the layer is lenient where the policy is
+not: the layer sees every topic the app publishes to and most of them are not Protobuf, while
+naming the policy at a mount site *declares* that one destination registry-backed, so a missing
+subject there is an anomaly and fails the publish. That is the same argument `MissingSubject`'s
+`Refuse` default makes on the codec path.
+
+One thing the layer cannot do: **it never sees a `publish(..)` reply.** The core routes a
+byte-for-byte reply straight to its paired publisher, deliberately, so a value that owns its bytes
+leaves exactly as it wrote them - which is why the reply form takes the policy and the layer covers
+publishes leaving through slots and through publishers a mount site never named. The two compose
+rather than conflict: whichever runs first frames the payload, and the other finds an envelope
+already there and leaves it alone.
+
+A payload that already carries an envelope passes through on both paths, so a handler that framed
+its own message with `Subject::frame` is not framed twice. The check is exact rather than a guess,
 because a bare `prost` message opens with a field tag whose field number is at least 1, so its
-first byte is never the zero magic byte. It is an alternative to `SchemaFrame` rather than a
-companion: that layer's contract is "this payload is a JSON document, transcode it", this one's is
-"this payload is already the datum, put the envelope on".
+first byte is never the zero magic byte.
 
-### The message index, and the reply's publish surface
+Neither is a companion to `SchemaFrame`: that layer's contract is "this payload is a JSON document,
+transcode it to the subject's flavor", these say "this payload is already the datum, put the
+envelope on".
 
-Two details decide whether this works, and both are worth stating plainly.
+### Which message of the schema
 
-**Which message of the schema.** The envelope's index path says which message was written, so it
-has to be the one the publishing type actually is. The layer takes the schema's first top-level
-message by default, which is the common case and the one Confluent optimises to a single zero
-byte, so a single-message `.proto` needs nothing. Anything else pins it: `.message(topic,
-"pkg.Message")`, the same call `SchemaFrame` already takes, and it covers this path unchanged.
+The envelope's index path says which message was written, so it has to be the one the publishing
+type actually is. Both the policy and the layer take the schema's first top-level message by
+default, which is the common case and the one Confluent optimises to a single zero byte, so a
+single-message `.proto` needs nothing. Anything else pins it with `.message(topic, "pkg.Message")`,
+the same call `SchemaFrame` already takes.
 
-**The reply leaves through a slot, not a `publish(..)` clause.** A handler's outgoing message
-reaches a publish layer when it leaves through an `Out` slot, and not when it is returned as the
-reply of a `publish(..)` mount: the core routes a byte-for-byte reply straight to its paired
-publisher, deliberately, so a value that owns its bytes leaves exactly as it wrote them. A
-`publish(..)` reply would therefore go out unframed, which a registry-backed consumer cannot read.
-Nothing in the handler body serializes anything either way; what changes is the mount, which names
-`.out(DefaultSlot, KafkaPublish::default())` and lets the body publish through the slot.
+The subject is resolved on the first publish to each destination and cached from then on. It
+cannot happen at startup: a policy could do I/O when it pairs with the connected broker, but the
+destination topic is not known there - it comes from the mount's `publish(..)` clause, or from the
+call site of a slot publish, neither of which a policy is handed. So a missing subject surfaces as
+a failed publish, which the handler's failure policy settles.
 
 ### What the explicit path is still for
 
@@ -375,7 +403,7 @@ with no registry in front of it), where there is no layer to do the framing.
 
 ## Consuming: transcode on the way in
 
-`KafkaBroker::schema_registry(sr)` makes every subscription transcode Confluent-framed
+`KafkaBroker::schema_registry(registry)` makes every subscription transcode Confluent-framed
 deliveries to plain JSON while still on the async consume path: the JSON Schema flavor loses
 its envelope, Avro and Protobuf datums (with their features enabled) convert through the
 registry schema the envelope references. Handlers are ordinary subscribers on the default

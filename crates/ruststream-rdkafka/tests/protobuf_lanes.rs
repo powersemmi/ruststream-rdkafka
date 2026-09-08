@@ -695,3 +695,299 @@ message Confirmation {
         }
     }
 }
+
+/// The short reply form: the handler returns its reply, the mount site names the framing, and
+/// the reply type carries nothing but its encode half. Where `plain_handler` puts the framing on
+/// the app (a layer, and a slot to leave through), this puts it on the reply's own publisher.
+mod plain_reply {
+    use super::{ConfirmationJson, scan_topic, unique};
+
+    use ruststream::prelude::*;
+    use ruststream::runtime::{App, AppInfo, Reply, RustStream};
+    use ruststream::{Broker, ConnectedBroker, OutgoingMessage};
+    use ruststream_rdkafka::{
+        KafkaBroker, KafkaPublish, KafkaTopic, SchemaRegistry, SchemaType, StartOffset, protobuf,
+    };
+
+    /// The reply topic, fixed because the macro's `publish(..)` takes a string literal.
+    const REPLY_TOPIC: &str = "proto-reply-confirmations-placeholder";
+
+    /// Neither message is declared first, so a compact single-zero path would hide a wrong one.
+    const ORDERS_PROTO: &str = r#"
+syntax = "proto3";
+package rsreply;
+
+message Ignored {
+  string noise = 1;
+}
+
+message Order {
+  int64 id = 1;
+  string item = 2;
+}
+"#;
+
+    const CONFIRMATIONS_PROTO: &str = r#"
+syntax = "proto3";
+package rsreply;
+
+message AlsoIgnored {
+  string noise = 1;
+}
+
+message Confirmation {
+  int64 id = 1;
+  string item = 2;
+}
+"#;
+
+    #[derive(Clone, PartialEq, prost::Message, Deserialized)]
+    #[wire(decode = protobuf::decode_confluent)]
+    struct ReplyOrder {
+        #[prost(int64, tag = "1")]
+        id: i64,
+        #[prost(string, tag = "2")]
+        item: String,
+    }
+
+    // The reply carries its encode half and nothing else: no `Outgoing`, no destination of its
+    // own - the address comes from the `publish(..)` clause below.
+    #[derive(Clone, PartialEq, prost::Message, Serialized)]
+    #[wire(encode = ::prost::Message::encode)]
+    struct ReplyConfirmation {
+        #[prost(int64, tag = "1")]
+        id: i64,
+        #[prost(string, tag = "2")]
+        item: String,
+    }
+
+    // No slot parameter, no `.publish().await`, no error branch. The handler returns its reply.
+    #[subscriber(
+        KafkaTopic::new(std::env::var("PROTO_REPLY_TRIGGER").expect("trigger env"))
+            .group(std::env::var("PROTO_REPLY_GROUP").expect("group env"))
+            .start(StartOffset::Earliest),
+        publish("proto-reply-confirmations-placeholder")
+    )]
+    async fn confirm(order: &ReplyOrder) -> ReplyConfirmation {
+        ReplyConfirmation {
+            id: order.id,
+            item: order.item.clone(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_a_returned_protobuf_reply_lands_framed() {
+        let Some(registry_url) = std::env::var("SCHEMA_REGISTRY_TEST_URL").ok() else {
+            return;
+        };
+        let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+            return;
+        };
+        let trigger = unique("proto-reply-trigger");
+        unsafe {
+            std::env::set_var("PROTO_REPLY_TRIGGER", &trigger);
+            std::env::set_var("PROTO_REPLY_GROUP", unique("proto-reply-group"));
+        }
+        let marker = i64::from(std::process::id()) * 1000 + 11;
+
+        let registry = SchemaRegistry::new(&registry_url);
+        let orders_subject = unique("proto-reply-orders");
+        registry
+            .register(&orders_subject, SchemaType::Protobuf, ORDERS_PROTO)
+            .await
+            .expect("register orders");
+        registry
+            .register(
+                &format!("{REPLY_TOPIC}-value"),
+                SchemaType::Protobuf,
+                CONFIRMATIONS_PROTO,
+            )
+            .await
+            .expect("register confirmations");
+
+        let orders =
+            protobuf::Subject::<ReplyOrder>::resolve(&registry, &orders_subject, "rsreply.Order")
+                .await
+                .expect("resolve orders");
+        let seeded = orders
+            .frame(&ReplyOrder {
+                id: marker,
+                item: "anvil".to_owned(),
+            })
+            .expect("frame");
+        let mut buf = BytesMut::new();
+        let payload = seeded.wire_bytes(&mut buf).expect("infallible").to_vec();
+        let seed_broker = KafkaBroker::new([kafka.clone()])
+            .connect()
+            .await
+            .expect("connect seed");
+        seed_broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new(trigger.as_str(), payload.as_slice()))
+            .await
+            .expect("seed trigger");
+        seed_broker.shutdown().await.expect("seed shutdown");
+
+        let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0")).with_broker(
+            KafkaBroker::new([kafka.clone()]),
+            |b| {
+                // `rsreply.Confirmation` is the second message of its schema, so the index path
+                // is pinned; a single-message `.proto` needs nothing here.
+                b.include(confirm).out(
+                    Reply,
+                    KafkaPublish::framed(&registry).message(REPLY_TOPIC, "rsreply.Confirmation"),
+                );
+            },
+        );
+
+        let kafka_for_wait = kafka.clone();
+        let registry_for_wait = registry_url.clone();
+        let wait = async move {
+            // Straight to the wire assertion: a transcoding consumer resolves the reply's schema
+            // id and its index path through the registry's own compiled descriptor, so it only
+            // reaches `rsreply.Confirmation` if the reply's publisher framed it correctly.
+            let transcoding = KafkaBroker::new([kafka_for_wait])
+                .schema_registry(SchemaRegistry::new(&registry_for_wait))
+                .connect()
+                .await
+                .expect("connect transcoding");
+            let json = scan_topic(&transcoding, REPLY_TOPIC, |payload| {
+                serde_json::from_slice::<ConfirmationJson>(payload)
+                    .is_ok_and(|confirmation| confirmation.id == marker)
+            })
+            .await;
+            let confirmation: ConfirmationJson = serde_json::from_slice(&json).expect("json");
+            assert_eq!(
+                confirmation,
+                ConfirmationJson {
+                    id: marker,
+                    item: "anvil".to_owned(),
+                },
+            );
+            transcoding.shutdown().await.expect("transcoding shutdown");
+        };
+        App::run_until(app, wait).await.expect("run");
+    }
+
+    /// In process, with the registry mocked: the reply really carries the envelope, and the
+    /// layer and the policy together frame it exactly once rather than twice.
+    #[cfg(feature = "testing")]
+    mod in_process {
+        use ruststream::prelude::*;
+        use ruststream::runtime::{AppInfo, Reply, RustStream};
+        use ruststream::testing::TestApp;
+        use ruststream_rdkafka::testing::KafkaTestBroker;
+        use ruststream_rdkafka::{
+            IncomingFrame, KafkaPublish, ProtobufFrame, SchemaRegistry, protobuf,
+        };
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use super::{CONFIRMATIONS_PROTO, ReplyConfirmation, ReplyOrder};
+
+        const CONFIRMATIONS_ID: u32 = 31;
+        const REPLY_TOPIC: &str = "in-process-reply-confirmations";
+
+        #[subscriber("in-process-reply-orders", publish("in-process-reply-confirmations"))]
+        async fn confirm(order: &ReplyOrder) -> ReplyConfirmation {
+            ReplyConfirmation {
+                id: order.id,
+                item: order.item.clone(),
+            }
+        }
+
+        async fn registry() -> (MockServer, SchemaRegistry) {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/subjects/{REPLY_TOPIC}-value/versions/latest"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": CONFIRMATIONS_ID,
+                    "version": 1,
+                    "schema": CONFIRMATIONS_PROTO,
+                    "schemaType": "PROTOBUF",
+                })))
+                .mount(&server)
+                .await;
+            let registry = SchemaRegistry::new(server.uri());
+            (server, registry)
+        }
+
+        /// Drives one delivery through the app and returns the framed reply off the topic.
+        async fn framed_reply<S: Send + Sync + 'static>(tb: &TestApp<S>) -> Vec<u8> {
+            let seeded = protobuf::Subject::<ReplyOrder>::pinned(9, &[1])
+                .frame(&ReplyOrder {
+                    id: 42,
+                    item: "anvil".to_owned(),
+                })
+                .expect("frame");
+            tb.message(&seeded)
+                .to("in-process-reply-orders")
+                .publish()
+                .await
+                .expect("publish drives the handler to quiescence");
+            tb.broker::<KafkaTestBroker>()
+                .published::<()>(REPLY_TOPIC)
+                .assert_called_once()
+                .messages()[0]
+                .payload()
+                .to_vec()
+        }
+
+        fn assert_framed_once(wire: &[u8]) {
+            let frame = IncomingFrame::from_payload(wire).expect("the reply carries an envelope");
+            assert_eq!(frame.schema_id(), CONFIRMATIONS_ID);
+            // The pinned message is the second one, so the path is real rather than compact.
+            assert_ne!(frame.datum()[0], 0);
+            assert_eq!(
+                protobuf::decode_confluent::<ReplyConfirmation>(wire).expect("decode"),
+                ReplyConfirmation {
+                    id: 42,
+                    item: "anvil".to_owned(),
+                },
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_returned_reply_is_framed_by_the_mount_sites_policy() {
+            let (_server, registry) = registry().await;
+            let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0")).with_broker(
+                KafkaTestBroker::new(),
+                |b| {
+                    b.include(confirm).out(
+                        Reply,
+                        KafkaPublish::framed(&registry)
+                            .message(REPLY_TOPIC, "rsreply.Confirmation"),
+                    );
+                },
+            );
+            let tb = TestApp::start(app).await.expect("start");
+            assert_framed_once(&framed_reply(&tb).await);
+            tb.shutdown().await.expect("shutdown");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_layer_and_the_policy_together_frame_once() {
+            let (_server, registry) = registry().await;
+            let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0"))
+                .publish_layer(
+                    ProtobufFrame::new(registry.clone())
+                        .message(REPLY_TOPIC, "rsreply.Confirmation"),
+                )
+                .with_broker(KafkaTestBroker::new(), |b| {
+                    b.include(confirm).out(
+                        Reply,
+                        KafkaPublish::framed(&registry)
+                            .message(REPLY_TOPIC, "rsreply.Confirmation"),
+                    );
+                });
+            let tb = TestApp::start(app).await.expect("start");
+
+            // Whichever of the two runs first frames it; the other sees the envelope already
+            // there and leaves it alone. A double envelope would fail this decode.
+            assert_framed_once(&framed_reply(&tb).await);
+            tb.shutdown().await.expect("shutdown");
+        }
+    }
+}

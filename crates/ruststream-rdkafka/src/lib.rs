@@ -88,7 +88,7 @@ pub use error::KafkaError;
 pub use frame::{IncomingFrame, OutgoingFrame};
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 #[cfg(feature = "protobuf")]
-pub use protobuf::ProtobufFrame;
+pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};
 pub use publisher::{
     KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaRetryPublisher,
     KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
