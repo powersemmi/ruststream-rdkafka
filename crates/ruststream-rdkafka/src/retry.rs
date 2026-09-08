@@ -15,7 +15,7 @@ use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::FutureRecord;
 use rdkafka::util::Timeout;
 use rdkafka::{Offset, TopicPartitionList};
-use ruststream::Headers;
+use ruststream::HeaderMap;
 
 use crate::broker::ConnState;
 use crate::convert;
@@ -170,7 +170,7 @@ impl RetryContext {
         &self,
         topic: &str,
         payload: &[u8],
-        headers: &Headers,
+        headers: &HeaderMap,
     ) -> Result<(), KafkaError> {
         self.state.ensure_open(topic)?;
         let parts = convert::headers_for_publish(headers)?;

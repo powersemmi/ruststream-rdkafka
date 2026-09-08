@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
+use ruststream::runtime::{OutPipeline, Slot};
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
@@ -89,8 +91,11 @@ impl KafkaPublish {
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPublish {
     type Live = KafkaPublisher;
 
-    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
-        Ok(connected.publisher(self))
+    fn pair(
+        self,
+        connected: &ConnectedKafkaBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        ready(Ok(connected.publisher(self)))
     }
 }
 
@@ -539,26 +544,28 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
     /// and [`KafkaError::Publish`] when the begin call fails.
     // The guard intentionally spans the begin call: check-and-begin must be atomic so two
     // concurrent begins cannot both pass the check.
-    #[allow(clippy::significant_drop_tightening)]
-    async fn begin_transaction(&self) -> Result<(), Self::Error> {
-        self.inner.state.ensure_open(&self.inner.id)?;
-        let mut open = self
-            .inner
-            .open
-            .lock()
-            .expect("transaction state mutex poisoned");
-        if *open {
-            return Err(KafkaError::TransactionBusy {
-                id: self.inner.id.clone(),
-            });
+    fn begin_transaction(&self) -> impl Future<Output = Result<(), Self::Error>> {
+        if let Err(err) = self.inner.state.ensure_open(&self.inner.id) {
+            return ready(Err(err));
         }
-        // A rejected begin leaves the open transaction untouched, per the trait contract.
-        self.inner
-            .producer
-            .begin_transaction()
-            .map_err(KafkaError::publish)?;
-        *open = true;
-        Ok(())
+        {
+            let mut open = self
+                .inner
+                .open
+                .lock()
+                .expect("transaction state mutex poisoned");
+            if *open {
+                return ready(Err(KafkaError::TransactionBusy {
+                    id: self.inner.id.clone(),
+                }));
+            }
+            // A rejected begin leaves the open transaction untouched, per the trait contract.
+            if let Err(err) = self.inner.producer.begin_transaction() {
+                return ready(Err(KafkaError::publish(err)));
+            }
+            *open = true;
+        }
+        ready(Ok(()))
     }
 
     /// Commits the open transaction, making its records visible atomically.
@@ -631,14 +638,17 @@ pub struct KafkaPartitionedPublish {
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
     type Live = TransactionalPartitions;
 
-    async fn pair(self, connected: &ConnectedKafkaBroker) -> Result<Self::Live, PairError> {
-        Ok(TransactionalPartitions {
+    fn pair(
+        self,
+        connected: &ConnectedKafkaBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        ready(Ok(TransactionalPartitions {
             inner: Arc::new(PartitionsInner {
                 state: Arc::clone(connected.state()),
                 template: self.template,
                 publishers: Mutex::new(HashMap::new()),
             }),
-        })
+        }))
     }
 }
 
@@ -717,6 +727,81 @@ impl TransactionalPartitions {
         cell.get_or_try_init(|| open_transactional(&self.inner.state, &policy))
             .await
             .cloned()
+    }
+}
+
+/// The capability of handing out one transactional publisher per source partition.
+///
+/// A handler that drives per-partition transactions names this in its `Out` slot
+/// (`Out(lanes): Out<impl PartitionLanes>`) instead of a publisher type: the concrete value is
+/// [`TransactionalPartitions`], inferred from the [`KafkaTransactionalPublish::per_partition`]
+/// policy attached at the include site.
+///
+/// # Test capture
+///
+/// This is a router, not a publisher: it hands out a publisher of its own rather than sending a
+/// message. What a lane then publishes leaves through that publisher, so it lands in the
+/// broker's publish log and not in the slot's test record - the same boundary a settled owned
+/// transaction's buffer has. Assert on the publish log for lane traffic, and keep the slot
+/// record for handlers that publish through the slot itself.
+///
+/// # Examples
+///
+/// ```
+/// use ruststream::TransactionalPublisher;
+/// use ruststream_rdkafka::{KafkaError, PartitionLanes};
+///
+/// async fn ping<L: PartitionLanes>(lanes: &L, partition: i32) -> Result<(), KafkaError> {
+///     let publisher = lanes.for_partition(partition).await?;
+///     publisher.begin_transaction().await
+/// }
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not hand out per-partition transactional publishers",
+    note = "for an `Out<impl PartitionLanes, _>` slot, attach a \
+            `KafkaPublish::default().transactional_id(..).per_partition()` policy"
+)]
+pub trait PartitionLanes: Send + Sync {
+    /// The publisher owning `partition`'s transactional id.
+    ///
+    /// # Errors
+    ///
+    /// See [`TransactionalPartitions::for_partition`].
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send;
+}
+
+impl PartitionLanes for TransactionalPartitions {
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+        Self::for_partition(self, partition)
+    }
+}
+
+// The arena entry a handler's `Out` parameter binds. `Slot`'s `Deref` already routes method
+// calls to the wired value, but only this impl lets a body hand the entry to a function generic
+// over the capability (`fn issue<L: PartitionLanes>(lanes: &L, ..)`), which is the whole point of
+// bounding the slot with a trait instead of a concrete type. Both paths reach the same unwrapped
+// value, which is what puts a lane's publishes outside the slot's test capture (see the trait's
+// documentation).
+impl<M, L, EncodeCodec, Pipe, Body> PartitionLanes for Slot<M, L, EncodeCodec, Pipe, Body>
+where
+    L: PartitionLanes,
+    EncodeCodec: Send + Sync,
+    // The entry's publish path. A lane's traffic never travels it (it leaves through the
+    // unwrapped value), but naming the bound the mount site's entry already carries keeps this
+    // impl on exactly the slots the runtime builds.
+    Pipe: OutPipeline,
+{
+    fn for_partition(
+        &self,
+        partition: i32,
+    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+        (**self).for_partition(partition)
     }
 }
 

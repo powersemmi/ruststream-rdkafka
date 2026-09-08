@@ -2,7 +2,7 @@ name: Docs
 
 on:
   push:
-    branches: [main, "0.5.*"]
+    branches: [main]
     paths: &docs-paths
       - "docs/**"
       - "properdocs.yml"
@@ -11,7 +11,7 @@ on:
       - "scripts/lint_doc_fences.py"
       - ".github/workflows/docs.yml"
   pull_request:
-    branches: [main, "0.5.*"]
+    branches: [main]
     paths: *docs-paths
   workflow_dispatch:
 

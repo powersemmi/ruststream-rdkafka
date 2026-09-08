@@ -9,9 +9,7 @@
 //! `default_group` with librdkafka defaults. For transactional publishing and exactly-once
 //! pipelines, see the publishing guide.
 
-use ruststream::runtime::HandlerResult;
-use ruststream::subscriber;
-use ruststream_rdkafka::{Commit, KafkaTopic, Retry};
+use ruststream_rdkafka::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +34,7 @@ pub struct Confirmation {
 ///
 /// The `publish("confirmations")` clause makes the runtime encode the `Ok` value and publish
 /// it through the publisher wired in `routes` (the outgoing message name is the destination
-/// topic); an `Err` settles the delivery by its `HandlerResult` instead.
+/// topic); an `Err` settles the delivery by its `HandlerOutcome` instead.
 ///
 /// The descriptor wires the retry pipeline: `and_topic` puts the retry topic on the same
 /// subscription, so a `retry()` republishes there (with an attempt count riding in a header)
@@ -52,10 +50,10 @@ pub struct Confirmation {
         .dead_letter("orders.dlq"),
     publish("confirmations")
 )]
-pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerResult> {
+pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerOutcome> {
     if order.quantity == 0 {
         // Malformed input is not worth retrying: drop() dead-letters it right away.
-        return Err(HandlerResult::drop());
+        return Err(HandlerOutcome::drop());
     }
     Ok(Confirmation {
         id: order.id,
@@ -64,9 +62,9 @@ pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerResult> {
 }
 
 /// Logs cancellations from the `cancellations` topic. No reply, so it returns a plain
-/// `HandlerResult`; under the default auto-commit mode the `Ack` is advisory.
+/// `HandlerOutcome`; under the default auto-commit mode the `Ack` is advisory.
 #[subscriber("cancellations")]
-pub async fn on_cancel(order: &Order) -> HandlerResult {
+pub async fn on_cancel(order: &Order) -> HandlerOutcome {
     println!("order {} ({}) cancelled", order.id, order.item);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }

@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use rdkafka::message::{BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders};
-use ruststream::Headers;
+use ruststream::HeaderMap;
 
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
@@ -15,8 +15,8 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 /// foreign producer is skipped even when the record is keyless, so `key()` never reports a key
 /// Kafka did not partition by. Null-valued wire headers arrive with an empty value (presence
 /// preserved; core headers have no null representation).
-pub(crate) fn headers_from_message(msg: &BorrowedMessage<'_>) -> Headers {
-    let mut headers = Headers::new();
+pub(crate) fn headers_from_message(msg: &BorrowedMessage<'_>) -> HeaderMap {
+    let mut headers = HeaderMap::new();
     if let Some(native) = msg.headers() {
         for header in native.iter() {
             if header.key.eq_ignore_ascii_case(PARTITION_KEY_HEADER) {
@@ -52,7 +52,7 @@ pub(crate) struct PublishParts {
     pub(crate) partition: Option<i32>,
 }
 
-pub(crate) fn headers_for_publish(headers: &Headers) -> Result<PublishParts, KafkaError> {
+pub(crate) fn headers_for_publish(headers: &HeaderMap) -> Result<PublishParts, KafkaError> {
     let key = headers
         .get(PARTITION_KEY_HEADER)
         .map(Bytes::copy_from_slice);
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn publish_split_maps_key_and_skips_its_header() {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert("content-type", "application/json");
         headers.insert(PARTITION_KEY_HEADER, "order-1");
 
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn publish_split_without_headers_is_empty() {
-        let parts = headers_for_publish(&Headers::new()).expect("empty ok");
+        let parts = headers_for_publish(&HeaderMap::new()).expect("empty ok");
         assert!(parts.headers.is_none());
         assert!(parts.key.is_none());
         assert!(parts.partition.is_none());
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn publish_split_extracts_the_explicit_partition() {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_HEADER, "3");
 
         let parts = headers_for_publish(&headers).expect("valid headers");
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn publish_split_rejects_a_malformed_partition() {
-        let mut headers = Headers::new();
+        let mut headers = HeaderMap::new();
         headers.insert(PARTITION_HEADER, "three");
 
         let err = headers_for_publish(&headers).expect_err("must reject");

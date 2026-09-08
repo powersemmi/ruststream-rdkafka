@@ -16,13 +16,7 @@ use std::time::Duration;
 use futures::future::select_all;
 use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
-use ruststream::codec::Codec;
-#[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
-use ruststream::codec::DefaultCodec;
-use ruststream::runtime::{
-    Outgoing, PublishContext, PublishTransform, PublishTransformIdentity, PublishTransformStack,
-    TypedPublisher,
-};
+use ruststream::runtime::{Outgoing, PublishContext, PublishTransform};
 use ruststream::{
     OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
 };
@@ -159,7 +153,7 @@ struct PipelineInner {
 /// Wiring, all three naming the same id:
 ///
 /// 1. The policy: `KafkaEosPublish::new("pipeline-1")`, attached at the include site
-///    (`b.include(handler).publisher(policy)`) or bound for an `after_startup` hook.
+///    (`b.include(handler).out(Reply, policy)`) or bound for an `after_startup` hook.
 /// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
 ///    stops committing offsets on its own and registers with the pipeline instead.
 /// 3. The handler: it receives the paired [`EosPipeline`] and calls
@@ -786,8 +780,18 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 /// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
 /// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
 ///
-/// [`KafkaEosPublish::replies`] wires it for you; name it directly to keep the explicit
-/// `TypedPublisher` form: `TypedPublisher::new(policy).transform(EosReplies)`.
+/// A `publish("replies")` handler over an exactly-once pipeline names it as the mount site's
+/// transform step, right after the policy:
+/// `b.include(enrich).out(Reply, KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
+/// reply then joins the pipeline's open window paired with its delivery's consumed offset,
+/// making the publishing-handler form exactly-once end to end - the handler just returns the
+/// value. The chain takes the codec the same way, with a `.codec(..)` step.
+///
+/// This works only for subscriptions in `Commit::Transactional` mode naming that pipeline's id
+/// (they are what stamps the source coordinates being relayed); a reply from any other
+/// subscription fails with a clear error. The `retry_after` deferred-republish fallback does not
+/// apply to these replies either: a delayed copy would break the offset-record pairing.
+///
 /// Generic over the handler's context type, so bare handlers (no ctx parameter, no `Ctx`
 /// extractors) work.
 #[derive(Debug, Clone, Copy, Default)]
@@ -802,49 +806,6 @@ impl<C> PublishTransform<C> for EosReplies {
     }
 }
 
-impl KafkaEosPublish {
-    /// A reply publisher for `#[subscriber(.., publish("replies"))]` handlers: every reply
-    /// joins the pipeline's open window paired with its delivery's consumed offset, making the
-    /// publishing-handler form exactly-once end to end - the handler just returns the value.
-    ///
-    /// Pairs only with subscriptions in `Commit::Transactional` mode naming this pipeline's id
-    /// (they stamp the source coordinates the reply path relays); a reply from any other
-    /// subscription fails with a clear error. The `retry_after` deferred-republish fallback
-    /// does not apply to these replies: a delayed copy would break the offset-record pairing.
-    ///
-    /// Equivalent explicit form: `TypedPublisher::new(policy).transform(EosReplies)`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ruststream_rdkafka::KafkaEosPublish;
-    ///
-    /// let replies = KafkaEosPublish::new("enrich-1").replies();
-    /// // b.include(enrich).publisher(replies);
-    /// # let _ = replies;
-    /// ```
-    #[cfg(any(feature = "json", feature = "cbor", feature = "msgpack"))]
-    #[must_use]
-    pub fn replies(
-        self,
-    ) -> TypedPublisher<
-        Self,
-        DefaultCodec,
-        PublishTransformStack<PublishTransformIdentity, EosReplies>,
-    > {
-        TypedPublisher::new(self).transform(EosReplies)
-    }
-
-    /// Like [`replies`](Self::replies), with an explicit codec instead of the default one.
-    #[must_use]
-    pub fn replies_with<C: Codec>(
-        self,
-        codec: C,
-    ) -> TypedPublisher<Self, C, PublishTransformStack<PublishTransformIdentity, EosReplies>> {
-        TypedPublisher::with_codec(self, codec).transform(EosReplies)
-    }
-}
-
 impl Publisher for EosPipeline {
     type Error = KafkaError;
 
@@ -855,8 +816,7 @@ impl Publisher for EosPipeline {
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the header is missing or malformed - the
     /// originating subscription is not in `Commit::Transactional` mode for this pipeline, or
-    /// the reply publisher was wired without [`EosReplies`] (use
-    /// [`replies`](KafkaEosPublish::replies)); otherwise as
+    /// the mount site left the [`EosReplies`] transform off the chain; otherwise as
     /// [`EosPipeline::publish`](EosPipeline::publish).
     ///
     /// # Cancel safety
@@ -871,8 +831,8 @@ impl Publisher for EosPipeline {
             return Err(KafkaError::InvalidOptions(
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
-                 relay them (wire it with `KafkaEosPublish::replies()` or add the `EosReplies` \
-                 transform)"
+                 relay them (add the `EosReplies` transform to the mount site's chain, \
+                 `.out(Reply, KafkaEosPublish::new(id)).transform(EosReplies)`)"
                     .to_owned(),
             ));
         };

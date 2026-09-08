@@ -142,6 +142,17 @@ pub struct KafkaTopic {
     config: Vec<(String, String)>,
 }
 
+/// The owned half of a [`KafkaTopic`]: what a live subscription carries after the descriptor's
+/// configuration fields have been folded into the consumer's `ClientConfig`.
+pub(crate) struct SubscriptionParts {
+    pub(crate) name: String,
+    pub(crate) commit: Commit,
+    pub(crate) lane_key: LaneKey,
+    pub(crate) retry: Option<Retry>,
+    pub(crate) max_deliveries: Option<u32>,
+    pub(crate) dead_letter: Option<String>,
+}
+
 impl KafkaTopic {
     fn with_first(first: String, requires_pattern: bool) -> Self {
         Self {
@@ -350,6 +361,20 @@ impl KafkaTopic {
         &self.topics
     }
 
+    /// Moves out everything a live subscription keeps once the descriptor has finished
+    /// configuring the consumer, so opening one takes the ownership its signature announces
+    /// instead of cloning back out of a borrow.
+    pub(crate) fn into_parts(self) -> SubscriptionParts {
+        SubscriptionParts {
+            name: self.name,
+            commit: self.commit,
+            lane_key: self.lane_key,
+            retry: self.retry,
+            max_deliveries: self.max_deliveries,
+            dead_letter: self.dead_letter,
+        }
+    }
+
     pub(crate) fn validate(&self) -> Result<(), KafkaError> {
         if self.requires_pattern && !self.topics[0].starts_with('^') {
             return Err(KafkaError::InvalidOptions(format!(
@@ -392,22 +417,6 @@ impl KafkaTopic {
 
     pub(crate) fn assignment_strategy(&self) -> Option<Assignment> {
         self.assignment
-    }
-
-    pub(crate) fn lane_key_choice(&self) -> LaneKey {
-        self.lane_key
-    }
-
-    pub(crate) fn retry_policy(&self) -> Option<&Retry> {
-        self.retry.as_ref()
-    }
-
-    pub(crate) fn max_deliveries_cap(&self) -> Option<u32> {
-        self.max_deliveries
-    }
-
-    pub(crate) fn dead_letter_topic(&self) -> Option<&str> {
-        self.dead_letter.as_deref()
     }
 
     pub(crate) fn assigned_partitions(&self) -> &[i32] {

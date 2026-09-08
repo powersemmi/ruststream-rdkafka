@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, State, TypedPublisher};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, Reply, RustStream, State};
 use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
@@ -59,20 +59,20 @@ async fn avro_relay(order: &Order) -> Order {
         .group(std::env::var("AVRO_MW_GROUP").expect("group env"))
         .start(StartOffset::Earliest)
 )]
-async fn avro_mw(order: &Order, State(probe): State<AvroProbe>) -> HandlerResult {
+async fn avro_mw(order: &Order, State(probe): State<AvroProbe>) -> HandlerOutcome {
     let marker_range = probe.base..probe.base + i64::try_from(probe.expected).expect("small");
     if !marker_range.contains(&order.id) {
-        return HandlerResult::Ack; // an earlier run's message on the shared topic
+        return HandlerOutcome::ack(); // an earlier run's message on the shared topic
     }
     {
         let mut seen = probe.seen.lock().expect("seen mutex poisoned");
         seen.push(order.clone());
         if seen.len() < probe.expected {
-            return HandlerResult::Ack;
+            return HandlerOutcome::ack();
         }
     }
     probe.done.notify_waiters();
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -140,7 +140,6 @@ async fn live_avro_middleware_end_to_end() {
     };
     let app_probe = probe.clone();
     let broker = KafkaBroker::new([kafka]).schema_registry(consumer_sr.clone());
-    let replies = TypedPublisher::new(KafkaPublish::default());
     let app = RustStream::new(AppInfo::new("avro-mw", "0.0.0"))
         .publish_layer(
             SchemaFrame::new(SchemaRegistry::new(&registry)).subject(FRAMED_TOPIC, &subject),
@@ -148,7 +147,7 @@ async fn live_avro_middleware_end_to_end() {
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker(broker, |b| {
             b.include(avro_mw);
-            b.include(avro_relay).publisher(replies);
+            b.include(avro_relay).out(Reply, KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);

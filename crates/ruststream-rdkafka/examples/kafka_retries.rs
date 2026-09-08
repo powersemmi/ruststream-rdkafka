@@ -10,7 +10,7 @@
 
 use std::convert::Infallible;
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream, State};
+use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State};
 use ruststream::{FromRef, subscriber};
 use ruststream_rdkafka::{
     Commit, DLQ_SOURCE_TOPIC_HEADER, KafkaBroker, KafkaTopic, Retry, StartOffset,
@@ -61,19 +61,19 @@ struct AppState {
         .max_deliveries(5)
         .dead_letter("payments.dlq")
 )]
-async fn charge(payment: &Payment, State(gateway): State<PaymentGateway>) -> HandlerResult {
+async fn charge(payment: &Payment, State(gateway): State<PaymentGateway>) -> HandlerOutcome {
     if payment.amount_cents <= 0 {
         // Malformed input is not worth retrying: `drop()` takes the drop path straight to the
         // dead-letter topic.
-        return HandlerResult::drop();
+        return HandlerOutcome::drop();
     }
     match gateway.charge(payment).await {
-        Ok(()) => HandlerResult::Ack,
+        Ok(()) => HandlerOutcome::ack(),
         // A transient failure: republish to "payments.retry" and settle the original, so the
         // partition keeps flowing past it.
         Err(err) => {
             eprintln!("payment {} failed: {err}; retrying", payment.id);
-            HandlerResult::retry()
+            HandlerOutcome::retry()
         }
     }
 }
@@ -92,9 +92,9 @@ async fn charge(payment: &Payment, State(gateway): State<PaymentGateway>) -> Han
         .max_deliveries(3)
         .dead_letter("ledger.dlq")
 )]
-async fn post_entry(payment: &Payment) -> HandlerResult {
+async fn post_entry(payment: &Payment) -> HandlerOutcome {
     println!("posting ledger entry for payment {}", payment.id);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:seek_back]
 
@@ -103,13 +103,13 @@ async fn post_entry(payment: &Payment) -> HandlerResult {
 // delivery in the `kafka-dlq-source-*` headers, so alerting can trace them back without
 // parsing payloads.
 #[subscriber(KafkaTopic::new("payments.dlq").group("payments-dlq").start(StartOffset::Earliest))]
-async fn on_dead_letter(payment: &Payment, ctx: &mut Context<'_>) -> HandlerResult {
+async fn on_dead_letter(payment: &Payment, ctx: &mut Context<'_>) -> HandlerOutcome {
     let source = ctx
         .headers()
         .get_str(DLQ_SOURCE_TOPIC_HEADER)
         .unwrap_or("<unknown>");
     println!("payment {} dead-lettered from {source}", payment.id);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:dead_letter]
 

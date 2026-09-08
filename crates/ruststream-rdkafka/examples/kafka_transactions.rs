@@ -9,14 +9,12 @@
 //! cargo run --example kafka_transactions -- run
 //! ```
 
+// The fan-out below encodes and addresses its own records, so this file names the codec and the
+// message type on top of the prelude; the error type is named where it is handled.
+use ruststream::OutgoingMessage;
 use ruststream::codec::{Codec, JsonCodec};
-use ruststream::runtime::{App, AppInfo, Ctx, HandlerResult, Out, RustStream};
-use ruststream::{OutgoingMessage, Publisher, TransactionalPublisher, subscriber};
-use ruststream_rdkafka::context::keys::Partition;
-use ruststream_rdkafka::{
-    Commit, KafkaBroker, KafkaEosPublish, KafkaError, KafkaPublish, KafkaTopic,
-    KafkaTransactionalPublisher, TransactionalPartitions,
-};
+use ruststream_rdkafka::KafkaError;
+use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,10 +33,7 @@ struct ItemShipment {
 /// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch
 /// visible atomically to `read_committed` readers, and any failure aborts so shipments are
 /// never half-visible.
-async fn dispatch(
-    publisher: &KafkaTransactionalPublisher,
-    order: &Order,
-) -> Result<(), KafkaError> {
+async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Result<(), P::Error> {
     publisher.begin_transaction().await?;
     for item in &order.items {
         let command = ItemShipment {
@@ -61,12 +56,12 @@ async fn dispatch(
 // at the include site once the subscription opens, before the first delivery, so the handler
 // holds a live, already-fenced producer by construction.
 #[subscriber("orders")]
-async fn ship(order: &Order, Out(shipments): Out<KafkaTransactionalPublisher>) -> HandlerResult {
+async fn ship(order: &Order, Out(shipments): Out<impl TransactionalPublisher>) -> HandlerOutcome {
     if dispatch(shipments, order).await.is_err() {
         // Nothing became visible; ask for redelivery and try the whole fan-out again.
-        return HandlerResult::retry();
+        return HandlerOutcome::retry();
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:handler]
 
@@ -77,8 +72,8 @@ async fn ship(order: &Order, Out(shipments): Out<KafkaTransactionalPublisher>) -
 // lane, so a publisher per source partition gives every lane its own independent transaction -
 // and the id set follows the topic's partitions, not the worker count, so zombie fencing
 // survives `workers(n)` changes.
-async fn issue(
-    publishers: &TransactionalPartitions,
+async fn issue<L: PartitionLanes>(
+    publishers: &L,
     order: &Order,
     partition: i32,
 ) -> Result<(), KafkaError> {
@@ -108,12 +103,12 @@ async fn bill(
     // The delivery's source partition picks the lane's publisher; the key injects it as a
     // plain argument (the DI form of `ctx.context(keys::Partition)`).
     Ctx(partition): Ctx<Partition>,
-    Out(invoices): Out<TransactionalPartitions>,
-) -> HandlerResult {
+    Out(invoices): Out<impl PartitionLanes>,
+) -> HandlerOutcome {
     if issue(invoices, order, partition).await.is_err() {
-        return HandlerResult::retry();
+        return HandlerOutcome::retry();
     }
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:partitions]
 
@@ -149,21 +144,31 @@ fn app() -> impl App {
         // it is what fences a zombie instance. One id per service replica (pod ordinal,
         // instance id) is the usual scheme.
         b.include(ship)
-            .publisher(KafkaPublish::default().transactional_id("shipments-svc-1"));
+            .out(
+                DefaultSlot,
+                Publish::default().transactional_id("shipments-svc-1"),
+            )
+            .build();
         // --8<-- [end:id]
         // `per_partition` makes the id the base of one id per source partition
         // ("billing-svc-1-p{partition}"), pairing into `TransactionalPartitions`.
-        b.include(bill).publisher(
-            KafkaPublish::default()
-                .transactional_id("billing-svc-1")
-                .per_partition(),
-        );
+        b.include(bill)
+            .out(
+                DefaultSlot,
+                Publish::default()
+                    .transactional_id("billing-svc-1")
+                    .per_partition(),
+            )
+            .build();
         // --8<-- [start:eos_wiring]
         // Every reply of `enrich` rides the pipeline's window, paired with its offset. The
         // pipeline id doubles as the producer's transactional id, and the `enrich`
-        // subscription names the same id in its `Commit::Transactional` mode.
+        // subscription names the same id in its `Commit::Transactional` mode. `EosReplies` is
+        // what relays the delivery's source coordinates onto the reply, which is how the
+        // pipeline pairs the two.
         b.include(enrich)
-            .publisher(KafkaEosPublish::new("enrich-svc-1").replies());
+            .out(Reply, EosPublish::new("enrich-svc-1"))
+            .transform(EosReplies);
         // --8<-- [end:eos_wiring]
     })
 }

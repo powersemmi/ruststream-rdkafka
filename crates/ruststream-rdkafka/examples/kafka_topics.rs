@@ -6,9 +6,7 @@
 //! cargo run --example kafka_topics -- run
 //! ```
 
-use ruststream::runtime::{App, AppInfo, HandlerResult, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::{Assignment, Commit, KafkaBroker, KafkaTopic, StartOffset};
+use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -53,9 +51,9 @@ async fn confirm(order: &Order) -> Confirmation {
         .partitions([0])
         .start(StartOffset::Earliest)
 )]
-async fn audit_partition_zero(order: &Order) -> HandlerResult {
+async fn audit_partition_zero(order: &Order) -> HandlerOutcome {
     println!("partition 0 saw order {}", order.id);
-    HandlerResult::Ack
+    HandlerOutcome::ack()
 }
 // --8<-- [end:assign]
 
@@ -67,8 +65,7 @@ fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         // `confirm` replies through the broker's default publish policy, so the include site
-        // names no publisher; the explicit spelling is
-        // `.publisher(TypedPublisher::new(KafkaPublish::default()))`.
+        // names no publisher; the explicit spelling is `.out(Reply, Publish::default())`.
         b.include(confirm);
         b.include(audit_partition_zero);
     })

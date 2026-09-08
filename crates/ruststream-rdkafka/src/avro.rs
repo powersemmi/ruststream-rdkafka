@@ -10,6 +10,10 @@
 
 pub use apache_avro::AvroSchema;
 
+use apache_avro::reader::datum::GenericDatumReader;
+use apache_avro::types::Value as AvroValue;
+use apache_avro::writer::datum::GenericDatumWriter;
+
 use crate::error::KafkaError;
 use crate::schema_registry::{RegisteredSchema, SchemaRegistry};
 
@@ -21,7 +25,12 @@ pub(crate) fn avro_to_json(
 ) -> Result<Vec<u8>, KafkaError> {
     let writer = registry.parsed_avro(schema)?;
     let mut cursor = datum;
-    let value = apache_avro::from_avro_datum(&writer, &mut cursor, None)
+    // No reader schema: the registry hands back the schema the datum was written with, and the
+    // handler sees plain JSON, so there is nothing to resolve the value onto.
+    let value = GenericDatumReader::builder(&writer)
+        .build()
+        .map_err(KafkaError::schema_registry)?
+        .read_value(&mut cursor)
         .map_err(KafkaError::schema_registry)?;
     let json: serde_json::Value =
         apache_avro::from_value(&value).map_err(KafkaError::schema_registry)?;
@@ -37,11 +46,19 @@ pub(crate) fn json_to_avro(
     let parsed = registry.parsed_avro(schema)?;
     let json: serde_json::Value =
         serde_json::from_slice(payload).map_err(KafkaError::schema_registry)?;
-    let value = apache_avro::to_value(json)
+    // The direct JSON conversion, not the serde one: serde sees every non-negative JSON integer
+    // as a `u64`, which apache-avro encodes as its `org.apache.avro.rust.u64` logical type (a
+    // Fixed of 8 bytes) and which then resolves against no numeric Avro schema. This conversion
+    // picks `int` or `long` by magnitude, which is what a registry schema declares.
+    let value = AvroValue::try_from(json)
         .map_err(KafkaError::schema_registry)?
         .resolve(&parsed)
         .map_err(KafkaError::schema_registry)?;
-    apache_avro::to_avro_datum(&parsed, value).map_err(KafkaError::schema_registry)
+    GenericDatumWriter::builder(&parsed)
+        .build()
+        .map_err(KafkaError::schema_registry)?
+        .write_value_to_vec(value)
+        .map_err(KafkaError::schema_registry)
 }
 
 #[cfg(test)]

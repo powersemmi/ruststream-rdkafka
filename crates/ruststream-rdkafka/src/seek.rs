@@ -112,12 +112,37 @@ impl KafkaPosition {
     }
 }
 
+/// What a [`KafkaSeeker`] repositions.
+///
+/// The two transports this crate ships are different machines, not one machine with a flag: a
+/// live consumer moves its assigned partitions through librdkafka, while the in-process test
+/// transport replays the retained log of the topics the subscription reads. Encoding that as an
+/// enum is what keeps a seeker from ever holding half of each.
+#[derive(Clone)]
+enum Repositioner {
+    /// A librdkafka consumer: the reposition is a real seek over the partitions this member
+    /// holds, plus the offset bookkeeping the new read position invalidates.
+    Live {
+        consumer: Arc<StreamConsumer<TrackingContext>>,
+        tracker: Arc<CommitTracker>,
+    },
+    /// The in-process test transport: the reposition replays the retained publish log of the
+    /// subscribed topics from the target on.
+    #[cfg(feature = "testing")]
+    InProcess(Arc<crate::testing::seek::InProcessSeek>),
+}
+
 /// Repositions a live [`KafkaSubscriber`](crate::KafkaSubscriber), minted by
 /// [`Seekable::seeker`](ruststream::Seekable::seeker).
 ///
 /// Cheap to clone and usable while the subscription's stream runs, which is the point: the
-/// runtime owns the subscriber, so a handler reaches its subscription through an injected
-/// `Seek(seeker)` parameter or through a token minted at the mount site.
+/// runtime owns the subscriber, so a handler reaches its subscription through the `SeekHandle`
+/// context key ([`Ctx(seeker): Ctx<SeekHandle>`](crate::context::keys::SeekHandle)) or through a
+/// token minted at the mount site.
+///
+/// One type serves both transports: the in-process test broker mints the same seeker over its
+/// retained log, so a service that repositions is testable with `TestApp` unchanged. What differs
+/// is stated on each operation.
 ///
 /// # Scope
 ///
@@ -135,13 +160,19 @@ impl KafkaPosition {
 /// which reapplies it on every startup.
 #[derive(Clone)]
 pub struct KafkaSeeker {
-    consumer: Arc<StreamConsumer<TrackingContext>>,
-    tracker: Arc<CommitTracker>,
+    inner: Repositioner,
 }
 
 impl std::fmt::Debug for KafkaSeeker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KafkaSeeker").finish_non_exhaustive()
+        let transport = match &self.inner {
+            Repositioner::Live { .. } => "live",
+            #[cfg(feature = "testing")]
+            Repositioner::InProcess(_) => "in-process",
+        };
+        f.debug_struct("KafkaSeeker")
+            .field("transport", &transport)
+            .finish_non_exhaustive()
     }
 }
 
@@ -150,7 +181,16 @@ impl KafkaSeeker {
         consumer: Arc<StreamConsumer<TrackingContext>>,
         tracker: Arc<CommitTracker>,
     ) -> Self {
-        Self { consumer, tracker }
+        Self {
+            inner: Repositioner::Live { consumer, tracker },
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) const fn in_process(control: Arc<crate::testing::seek::InProcessSeek>) -> Self {
+        Self {
+            inner: Repositioner::InProcess(control),
+        }
     }
 }
 
@@ -165,6 +205,11 @@ impl Seeker for KafkaSeeker {
     /// seek replayed but nobody handled, and an exactly-once window that was open when the seek
     /// landed aborts instead of committing offsets from the position it replaced.
     ///
+    /// On the in-process test transport the reposition is a replay of the retained log instead,
+    /// applied before this call returns; see
+    /// [`KafkaTestSubscriber`](crate::testing::KafkaTestSubscriber) for which positions it
+    /// resolves.
+    ///
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the position names no partition this
@@ -174,16 +219,23 @@ impl Seeker for KafkaSeeker {
     ///
     /// # Cancel safety
     ///
-    /// Not cancel safe: dropping the future may leave the consumer repositioned, its
-    /// bookkeeping already reset.
+    /// Not cancel safe on a live consumer: dropping the future may leave the consumer
+    /// repositioned, its bookkeeping already reset. The in-process arm resolves without
+    /// suspending, so there is nothing to cancel.
     async fn seek(&self, to: Self::Position) -> Result<(), Self::Error> {
-        let consumer = Arc::clone(&self.consumer);
-        let tracker = Arc::clone(&self.tracker);
-        // Every librdkafka call on this path blocks (the assignment wait, the timestamp lookup,
-        // the seek itself), so the whole reposition runs on the blocking pool.
-        task::spawn_blocking(move || reposition(&consumer, &tracker, &to))
-            .await
-            .map_err(|err| KafkaError::Consume(Box::new(err)))?
+        match &self.inner {
+            Repositioner::Live { consumer, tracker } => {
+                let consumer = Arc::clone(consumer);
+                let tracker = Arc::clone(tracker);
+                // Every librdkafka call on this path blocks (the assignment wait, the timestamp
+                // lookup, the seek itself), so the whole reposition runs on the blocking pool.
+                task::spawn_blocking(move || reposition(&consumer, &tracker, &to))
+                    .await
+                    .map_err(|err| KafkaError::Consume(Box::new(err)))?
+            }
+            #[cfg(feature = "testing")]
+            Repositioner::InProcess(control) => control.replay(&to),
+        }
     }
 }
 

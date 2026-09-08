@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::{Future, ready};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -403,12 +404,18 @@ impl ConnectedKafkaBroker {
     /// # Ok(())
     /// # }
     /// ```
-    #[allow(
-        clippy::unused_async,
-        reason = "librdkafka joins the group in the background; the SubscriptionSource contract \
-                  is async either way"
-    )]
-    pub async fn subscribe_with(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
+    pub fn subscribe_with(
+        &self,
+        def: KafkaTopic,
+    ) -> impl Future<Output = Result<KafkaSubscriber, KafkaError>> {
+        // librdkafka joins the group in the background, so opening a subscription never awaits;
+        // the async surface is what the SubscriptionSource contract and the call sites expect.
+        ready(self.open_subscription(def))
+    }
+
+    /// The synchronous body behind [`subscribe_with`](Self::subscribe_with), kept apart so the
+    /// error paths stay `?` rather than a chain of early `ready(Err(..))` returns.
+    fn open_subscription(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
         self.state.ensure_open(def.topic())?;
         def.validate()?;
         let manual = !def.assigned_partitions().is_empty();
@@ -490,23 +497,25 @@ impl ConnectedKafkaBroker {
             self.state
                 .register_eos(pipeline, EosSource::new(&tracker, &consumer));
         }
-        let retry =
-            (def.retry_policy().is_some() || def.dead_letter_topic().is_some()).then(|| {
-                Arc::new(RetryContext::new(
-                    def.retry_policy().cloned(),
-                    def.max_deliveries_cap(),
-                    def.dead_letter_topic().map(str::to_owned),
-                    Arc::clone(&self.state),
-                    Arc::clone(&consumer),
-                    Arc::clone(&tracker),
-                ))
-            });
+        // The descriptor's configuration fields are spent by now, so the rest of it moves into
+        // the subscription rather than being cloned back out of a borrow.
+        let parts = def.into_parts();
+        let retry = (parts.retry.is_some() || parts.dead_letter.is_some()).then(|| {
+            Arc::new(RetryContext::new(
+                parts.retry,
+                parts.max_deliveries,
+                parts.dead_letter,
+                Arc::clone(&self.state),
+                Arc::clone(&consumer),
+                Arc::clone(&tracker),
+            ))
+        });
         let subscriber = KafkaSubscriber::new(
             consumer,
-            def.topic().to_owned(),
-            def.commit_mode().clone(),
+            parts.name,
+            parts.commit,
             tracker,
-            def.lane_key_choice(),
+            parts.lane_key,
             retry,
         );
         #[cfg(feature = "schema-registry")]
@@ -625,8 +634,6 @@ fn assign_partitions(
 
 #[cfg(test)]
 mod tests {
-    use ruststream::DescribeServer as _;
-
     use super::*;
 
     #[test]
