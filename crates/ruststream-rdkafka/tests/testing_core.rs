@@ -1134,6 +1134,12 @@ async fn a_transactional_publisher_errors_after_shutdown() {
         .await
         .expect_err("beginning on a closed transport must error");
     assert!(matches!(&begun, KafkaError::Closed { .. }), "{begun}");
+    // Abort refuses too rather than reporting a local success, as the real publisher's does.
+    let aborted = publisher
+        .abort()
+        .await
+        .expect_err("aborting on a closed transport must error");
+    assert!(matches!(&aborted, KafkaError::Closed { .. }), "{aborted}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -208,7 +208,12 @@ impl KafkaTestTransactionalPublisher {
     }
 
     /// Takes the open transaction's buffer, leaving the handle free for the next one.
-    fn settle(&self) -> Result<Vec<Buffered>, KafkaError> {
+    ///
+    /// Checks in the real publisher's order - the connection first, the open transaction second -
+    /// so a settle against a shut-down transport reports [`KafkaError::Closed`] and leaves the
+    /// transaction where it was, exactly as it does on a cluster.
+    fn take_open(&self) -> Result<Vec<Buffered>, KafkaError> {
+        self.state.ensure_open(&self.id)?;
         self.open
             .lock()
             .expect("test transaction mutex poisoned")
@@ -251,16 +256,14 @@ impl TransactionalPublisher for KafkaTestTransactionalPublisher {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::NoTransaction`] when none is open on this handle, and
-    /// [`KafkaError::Closed`] once the transport has shut down - the transaction is consumed
-    /// either way, as a failed commit consumes the real one.
+    /// Returns [`KafkaError::Closed`] once the transport has shut down and
+    /// [`KafkaError::NoTransaction`] when none is open on this handle, in that order of
+    /// precedence, as the real publisher reports them.
     fn commit(&self) -> impl Future<Output = Result<(), Self::Error>> {
-        ready(self.settle().and_then(|buffered| {
-            self.state.ensure_open(&self.id)?;
+        ready(self.take_open().map(|buffered| {
             for entry in &buffered {
                 self.route(entry);
             }
-            Ok(())
         }))
     }
 
@@ -268,10 +271,10 @@ impl TransactionalPublisher for KafkaTestTransactionalPublisher {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::NoTransaction`] when none is open on this handle. Aborting after
-    /// the transport shut down still succeeds: nothing has to reach it.
+    /// The same two as [`commit`](TransactionalPublisher::commit): the real publisher's abort
+    /// also refuses on a shut-down connection rather than reporting a local success.
     fn abort(&self) -> impl Future<Output = Result<(), Self::Error>> {
-        ready(self.settle().map(drop))
+        ready(self.take_open().map(drop))
     }
 }
 
