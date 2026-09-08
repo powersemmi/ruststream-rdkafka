@@ -1152,6 +1152,115 @@ impl<C: Codec> Codec for SchemaFramed<C> {
     }
 }
 
+/// The topic-to-subject half a publish-side framing layer needs: the naming strategy, the
+/// per-topic pins, and the memory of which subjects the registry does not hold.
+///
+/// Every framing layer has to answer the same question - "what schema does this topic publish
+/// under, and is there one at all" - and only differs in what it then does with the answer, so
+/// the question is answered in one place. The miss in particular is remembered here, which is
+/// what keeps a topic that is not registry-backed from paying a round-trip per publish.
+#[derive(Clone)]
+pub(crate) struct SubjectMap {
+    registry: SchemaRegistry,
+    strategy: SubjectStrategy,
+    /// Subjects pinned per topic, overriding the strategy.
+    pins: HashMap<String, String>,
+    /// Subjects the registry answered 404 for: their topics publish un-framed without
+    /// re-querying.
+    skipped: Arc<Mutex<HashSet<String>>>,
+}
+
+impl SubjectMap {
+    pub(crate) fn new(registry: SchemaRegistry) -> Self {
+        Self {
+            registry,
+            strategy: SubjectStrategy::default(),
+            pins: HashMap::new(),
+            skipped: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    pub(crate) fn registry(&self) -> &SchemaRegistry {
+        &self.registry
+    }
+
+    pub(crate) fn strategy(&self) -> SubjectStrategy {
+        self.strategy
+    }
+
+    pub(crate) fn set_strategy(&mut self, strategy: SubjectStrategy) {
+        self.strategy = strategy;
+    }
+
+    pub(crate) fn pins(&self) -> &HashMap<String, String> {
+        &self.pins
+    }
+
+    pub(crate) fn pin(&mut self, topic: String, subject: String) {
+        self.pins.insert(topic, subject);
+    }
+
+    /// The subject `topic` publishes under.
+    pub(crate) fn subject_for(&self, topic: &str) -> String {
+        self.pins
+            .get(topic)
+            .cloned()
+            .unwrap_or_else(|| self.strategy.subject(topic, ""))
+    }
+
+    /// The schema `topic` publishes under, or `None` when the registry has no such subject.
+    ///
+    /// A miss is remembered (and logged once), so a topic that is not registry-backed publishes
+    /// untouched without re-querying; a subject registered later is picked up after a restart or
+    /// an explicit [`SchemaRegistry::warm`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when the internal mutex is poisoned, which requires a prior panic inside this
+    /// type (an invariant violation, not an operational failure).
+    pub(crate) async fn schema_for(
+        &self,
+        topic: &str,
+    ) -> Result<Option<Arc<RegisteredSchema>>, KafkaError> {
+        let subject = self.subject_for(topic);
+        if let Some(schema) = self.registry.cached_subject(&subject) {
+            return Ok(Some(schema));
+        }
+        if self.is_skipped(&subject) {
+            return Ok(None);
+        }
+        let Some(schema) = self.registry.latest(&subject).await? else {
+            self.skip(topic, &subject);
+            return Ok(None);
+        };
+        Ok(Some(schema))
+    }
+
+    fn is_skipped(&self, subject: &str) -> bool {
+        self.skipped
+            .lock()
+            .expect("skipped-subjects mutex poisoned")
+            .contains(subject)
+    }
+
+    /// Remembers (and logs, once) that `subject` is unregistered, so `topic` publishes
+    /// un-framed without re-querying the registry.
+    fn skip(&self, topic: &str, subject: &str) {
+        let mut skipped = self
+            .skipped
+            .lock()
+            .expect("skipped-subjects mutex poisoned");
+        if skipped.insert(subject.to_owned()) {
+            tracing::info!(
+                target: "ruststream_rdkafka",
+                topic,
+                subject,
+                "no schema registered for the topic's subject; its publishes go out un-framed",
+            );
+        }
+    }
+}
+
 /// Publish middleware framing outgoing JSON in the Confluent wire format - the publish-side
 /// half of the registry integration, added app-wide with `RustStream::publish_layer`.
 ///
@@ -1184,21 +1293,16 @@ impl<C: Codec> Codec for SchemaFramed<C> {
 /// ```
 #[derive(Clone)]
 pub struct SchemaFrame {
-    registry: SchemaRegistry,
-    strategy: SubjectStrategy,
-    subjects: HashMap<String, String>,
+    subjects: SubjectMap,
     /// Per-topic Protobuf message names (fully qualified), for multi-message schemas.
     messages: HashMap<String, String>,
-    /// Subjects the registry answered 404 for: their topics publish un-framed without
-    /// re-querying.
-    skipped: Arc<Mutex<HashSet<String>>>,
 }
 
 impl fmt::Debug for SchemaFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SchemaFrame")
-            .field("strategy", &self.strategy)
-            .field("subjects", &self.subjects)
+            .field("strategy", &self.subjects.strategy())
+            .field("subjects", self.subjects.pins())
             .finish_non_exhaustive()
     }
 }
@@ -1209,11 +1313,8 @@ impl SchemaFrame {
     #[must_use]
     pub fn new(registry: SchemaRegistry) -> Self {
         Self {
-            registry,
-            strategy: SubjectStrategy::default(),
-            subjects: HashMap::new(),
+            subjects: SubjectMap::new(registry),
             messages: HashMap::new(),
-            skipped: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -1223,14 +1324,14 @@ impl SchemaFrame {
     /// [`subject`](Self::subject) instead.
     #[must_use]
     pub fn subject_strategy(mut self, strategy: SubjectStrategy) -> Self {
-        self.strategy = strategy;
+        self.subjects.set_strategy(strategy);
         self
     }
 
     /// Pins `topic`'s subject explicitly, overriding the strategy.
     #[must_use]
     pub fn subject(mut self, topic: impl Into<String>, subject: impl Into<String>) -> Self {
-        self.subjects.insert(topic.into(), subject.into());
+        self.subjects.pin(topic.into(), subject.into());
         self
     }
 
@@ -1243,57 +1344,15 @@ impl SchemaFrame {
         self
     }
 
-    /// The subject `topic` publishes under.
-    fn subject_for(&self, topic: &str) -> String {
-        self.subjects
-            .get(topic)
-            .cloned()
-            .unwrap_or_else(|| self.strategy.subject(topic, ""))
-    }
-
-    fn is_skipped(&self, subject: &str) -> bool {
-        self.skipped
-            .lock()
-            .expect("skipped-subjects mutex poisoned")
-            .contains(subject)
-    }
-
-    /// Remembers (and logs, once) that `subject` is unregistered, so `topic` publishes
-    /// un-framed without re-querying the registry.
-    fn skip(&self, topic: &str, subject: &str) {
-        let mut skipped = self
-            .skipped
-            .lock()
-            .expect("skipped-subjects mutex poisoned");
-        if skipped.insert(subject.to_owned()) {
-            tracing::info!(
-                target: "ruststream_rdkafka",
-                topic,
-                subject,
-                "no schema registered for the topic's subject; its publishes go out un-framed",
-            );
-        }
-    }
-
     /// Frames `out`'s payload in place when its topic's subject is registered.
     async fn frame(&self, out: &mut Outgoing<'_>) -> Result<(), KafkaError> {
         let topic = out.name().to_owned();
-        let subject = self.subject_for(&topic);
-        let cached = self.registry.cached_subject(&subject);
-        let schema = if let Some(schema) = cached {
-            schema
-        } else {
-            if self.is_skipped(&subject) {
-                return Ok(());
-            }
-            let Some(schema) = self.registry.latest(&subject).await? else {
-                self.skip(&topic, &subject);
-                return Ok(());
-            };
-            schema
+        let Some(schema) = self.subjects.schema_for(&topic).await? else {
+            return Ok(());
         };
         let message = self.messages.get(&topic).map(String::as_str);
-        let datum = outgoing_json_to_datum(&self.registry, &schema, message, out.payload())?;
+        let datum =
+            outgoing_json_to_datum(self.subjects.registry(), &schema, message, out.payload())?;
         let framed = encode_envelope(schema.id, &datum);
         let payload = out.payload_mut();
         payload.clear();
