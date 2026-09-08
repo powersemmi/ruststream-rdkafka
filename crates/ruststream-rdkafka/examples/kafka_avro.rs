@@ -51,15 +51,16 @@ fn app() -> impl App {
     // --8<-- [start:wiring]
     // The reply subject holds an Avro schema, so the SchemaFrame layer puts Avro on the
     // wire; nothing Avro-specific is declared on the publisher.
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
-        .schema_registry(sr.clone());
+        .schema_registry(registry.clone());
 
     RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .publish_layer(SchemaFrame::new(sr.clone()))
+        .publish_layer(SchemaFrame::new(registry.clone()))
         .on_startup(async move |()| {
-            sr.register_avro::<Confirmation>("confirmations-value")
+            registry
+                .register_avro::<Confirmation>("confirmations-value")
                 .await?;
             Ok::<_, KafkaError>(())
         })

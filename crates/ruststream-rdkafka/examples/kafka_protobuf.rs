@@ -55,23 +55,24 @@ async fn confirm(order: &Order) -> Confirmation {
 #[ruststream::app]
 fn app() -> impl App {
     // --8<-- [start:wiring]
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
-        .schema_registry(sr.clone());
+        .schema_registry(registry.clone());
 
     // The reply subject holds a Protobuf schema, so replies go out as framed Protobuf; the
     // message defaults to the schema's first top-level one (pin another per topic with
     // `.message("confirmations", "acme.Confirmation")`).
     RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .publish_layer(SchemaFrame::new(sr.clone()))
+        .publish_layer(SchemaFrame::new(registry.clone()))
         .on_startup(async move |()| {
-            sr.register(
-                "confirmations-value",
-                SchemaType::Protobuf,
-                CONFIRMATIONS_PROTO,
-            )
-            .await?;
+            registry
+                .register(
+                    "confirmations-value",
+                    SchemaType::Protobuf,
+                    CONFIRMATIONS_PROTO,
+                )
+                .await?;
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {
