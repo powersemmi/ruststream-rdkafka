@@ -32,6 +32,53 @@ every subscription that broker opens, so a codec or a frame-reading handler on i
 JSON; the codec and the lanes take `KafkaBroker::schema_prefetch(..)` instead, which resolves
 schemas without touching a payload.
 
+## What each format reaches
+
+The three paths do not cover the three formats evenly. One blank is forced by the type system and
+will never close; the others are gaps, and this table marks which is which rather than leaving a
+reader to guess.
+
+| | Avro | JSON | Protobuf |
+| --- | --- | --- | --- |
+| Codec | `AvroCodec::local`, `AvroCodec::registry` | `SchemaFramed<JsonCodec>` | forced blank, see below |
+| Byte lanes | `avro::decode_framed`, `avro::Subject` | the frame types alone | `protobuf::decode_framed`, `protobuf::Subject` |
+| Transcode | yes | yes | yes |
+| Schema read off the type | `AvroSchema` | `schemars::JsonSchema` | **no** |
+| Subject registered from the type | `avro::Subject::register`, `register_avro::<T>` | `register_json::<T>` | **no** |
+| Schema references (`import`) | not applicable | not applicable | **not resolved** |
+| Subjects resolved at `connect` | codec | codec | forced blank |
+| `MissingSubject` | codec | codec | forced blank |
+| `check_compatibility` at startup | codec | codec | forced blank |
+| Writer schema resolved per delivery | codec, which needs it | not needed | not needed |
+| Shared id and subject cache | every path | every path | every path |
+
+**The forced blank.** Protobuf can never be a codec. `Codec::encode<T: Serialize>` is the gate, and
+a `prost` message is not a serde type, so it cannot reach the codec position at all - the lanes are
+its only home, and that is a property of the format rather than an unfinished corner. Every
+Protobuf row that reads "forced blank" is the same fact one step removed: `SchemaPrefetch` warms
+what a codec registered, so with no codec there is nothing for it to warm.
+
+**Why the prefetch rows read "codec" and not "Avro".** Nothing in that machinery is Avro-only.
+`MissingSubject`, the connect-time subject resolution and the startup compatibility check all live
+on `SchemaPrefetch` and apply to whatever a codec registered, so JSON under `SchemaFramed` gets
+them today exactly as Avro does - including `AutoRegister`, which puts a `schemars`-derived JSON
+Schema back.
+
+**The lanes answer the same question with a constructor, not a policy.** They have no
+`MissingSubject` because they do not need one: `register` is `AutoRegister`, `resolve` is `Refuse`,
+and `pinned` is neither. The choice is made where the code is written rather than by a value read
+at connect, which is the better shape - so this is not a gap to close. Protobuf has the last two
+and not the first, which is the gap below rather than a missing policy.
+
+**The two real gaps, both Protobuf, both one piece of work.** A Protobuf type cannot hand over its
+own schema, so a service writes its `.proto` twice - once as the file `prost-build` compiles and
+once as a string literal to register - with nothing tying the copies together, which is why there
+is no `protobuf::Subject::register`. And no path here resolves registry schema references, so a
+`.proto` that imports anything the compiled pool does not already carry is out of reach: the
+well-known `google/protobuf/*` types resolve, `confluent/*` (which the registry itself treats as
+ambient) does not, and any import of your own needs the `references` field this crate never writes
+or reads.
+
 ## The codec
 
 The schema source is part of the codec, and there are two.
@@ -176,7 +223,7 @@ genuinely not on the wire.
 
 ### JSON under the envelope
 
-`SchemaFramed::new(&prefetch, subject, JsonCodec)` is the JSON registry codec. The envelope is
+`SchemaFramed::new(&prefetch, JsonCodec)` is the JSON registry codec. The envelope is
 separable here because a JSON document is self-describing: the id says which schema it claims to
 conform to, and the document parses without it. An Avro datum cannot be read without the schema
 its id names, which is why `AvroCodec` owns its envelope rather than riding this wrapper - the
