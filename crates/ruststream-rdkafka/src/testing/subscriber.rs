@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Poll, ready as poll_ready};
 
+use bytes::Bytes;
 use futures::Stream;
 use ruststream::testing::Coordinator;
 use ruststream::{
@@ -19,6 +20,7 @@ use super::router::{DeliveryReceiver, DeliverySender, SubscriptionId, TestDelive
 use super::seek::InProcessSeek;
 use crate::error::KafkaError;
 use crate::seek::{KafkaPosition, KafkaSeeker};
+use crate::topic::LaneKey;
 
 /// In-process subscriber on one topic name.
 ///
@@ -49,10 +51,16 @@ pub struct KafkaTestSubscriber {
     /// Minted once, when the subscription opens: every delivery carries a clone, so a handler's
     /// context hands out the reposition handle for one reference-count bump.
     seeker: Arc<KafkaSeeker>,
+    /// What the descriptor asked worker lanes to be keyed by, resolved per delivery.
+    lane_key: LaneKey,
 }
 
 impl KafkaTestSubscriber {
-    pub(crate) fn open_many(state: &Arc<TestBrokerState>, topics: &[String]) -> Self {
+    pub(crate) fn open_many(
+        state: &Arc<TestBrokerState>,
+        topics: &[String],
+        lane_key: LaneKey,
+    ) -> Self {
         let generation = Arc::new(AtomicU64::new(0));
         let (ids, sender, receiver) = state.router.subscribe_many(topics, &generation);
         let coordinator = state.coordinator();
@@ -66,6 +74,22 @@ impl KafkaTestSubscriber {
             coordinator,
             generation,
             seeker: Arc::new(KafkaSeeker::in_process(Arc::new(control))),
+            lane_key,
+        }
+    }
+
+    /// The lane key a delivery carries, resolved the way the real subscriber resolves it.
+    ///
+    /// Under [`LaneKey::Partition`] every delivery here shares one lane, because the transport
+    /// gives every topic exactly one partition - which is what a real single-partition topic
+    /// does too, and what keeps `workers(n)` from appearing more concurrent in process than the
+    /// cluster would be.
+    fn lane_of(lane_key: LaneKey, headers: &HeaderMap) -> Option<Bytes> {
+        match lane_key {
+            LaneKey::RecordKey => headers
+                .get(crate::PARTITION_KEY_HEADER)
+                .map(Bytes::copy_from_slice),
+            LaneKey::Partition => Some(Bytes::from_static(b"0")),
         }
     }
 
@@ -84,6 +108,7 @@ impl KafkaTestSubscriber {
         coordinator: Option<&Coordinator>,
         generation: &AtomicU64,
         seeker: &Arc<KafkaSeeker>,
+        lane_key: LaneKey,
     ) -> Option<KafkaTestMessage> {
         if delivery.generation < generation.load(Ordering::Acquire) {
             if let Some(coordinator) = coordinator {
@@ -91,11 +116,13 @@ impl KafkaTestSubscriber {
             }
             return None;
         }
+        let lane = Self::lane_of(lane_key, &delivery.headers);
         Some(KafkaTestMessage {
             delivery: Some(delivery),
             sender: sender.clone(),
             coordinator: coordinator.cloned(),
             seeker: Arc::clone(seeker),
+            lane,
         })
     }
 }
@@ -133,17 +160,24 @@ impl Subscriber for KafkaTestSubscriber {
             coordinator,
             generation,
             seeker,
+            lane_key,
             ..
         } = self;
+        let lane_key = *lane_key;
         futures::stream::poll_fn(move |cx| {
             loop {
                 match poll_ready!(receiver.poll_recv(cx)) {
                     // A delivery from before a reposition: drop it and take the next one, which
                     // is what makes the replay the only thing the handler sees.
                     Some(delivery) => {
-                        if let Some(message) =
-                            Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
-                        {
+                        if let Some(message) = Self::accept(
+                            delivery,
+                            sender,
+                            coordinator.as_ref(),
+                            generation,
+                            seeker,
+                            lane_key,
+                        ) {
                             return Poll::Ready(Some(Ok(message)));
                         }
                     }
@@ -185,15 +219,22 @@ impl BatchSubscriber for KafkaTestSubscriber {
             coordinator,
             generation,
             seeker,
+            lane_key,
             ..
         } = self;
+        let lane_key = *lane_key;
         futures::stream::poll_fn(move |cx| {
             let first = loop {
                 match poll_ready!(receiver.poll_recv(cx)) {
                     Some(delivery) => {
-                        if let Some(message) =
-                            Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
-                        {
+                        if let Some(message) = Self::accept(
+                            delivery,
+                            sender,
+                            coordinator.as_ref(),
+                            generation,
+                            seeker,
+                            lane_key,
+                        ) {
                             break message;
                         }
                     }
@@ -206,9 +247,14 @@ impl BatchSubscriber for KafkaTestSubscriber {
                 let Ok(delivery) = receiver.try_recv() else {
                     break;
                 };
-                if let Some(message) =
-                    Self::accept(delivery, sender, coordinator.as_ref(), generation, seeker)
-                {
+                if let Some(message) = Self::accept(
+                    delivery,
+                    sender,
+                    coordinator.as_ref(),
+                    generation,
+                    seeker,
+                    lane_key,
+                ) {
                     batch.push(message);
                 }
             }
@@ -223,6 +269,9 @@ pub struct KafkaTestMessage {
     sender: DeliverySender,
     coordinator: Option<Coordinator>,
     seeker: Arc<KafkaSeeker>,
+    /// The keyed-lane key, resolved from the subscription's [`LaneKey`] exactly as the real
+    /// subscriber resolves it.
+    lane: Option<Bytes>,
 }
 
 impl KafkaTestMessage {
@@ -291,10 +340,12 @@ impl IncomingMessage for KafkaTestMessage {
         &self.queued().headers
     }
 
-    /// The partition key from the `PARTITION_KEY_HEADER`, mirroring the real message so keyed
-    /// worker lanes behave the same in-process.
+    /// The keyed-lane key, mirroring the real message: the source partition (the default, and
+    /// always `0` here because the transport gives every topic one), or the record key under
+    /// [`LaneKey::RecordKey`]. The record key itself stays reachable through
+    /// [`KafkaTestMessage::key`].
     fn partition_key(&self) -> Option<&[u8]> {
-        self.headers().get(crate::PARTITION_KEY_HEADER)
+        self.lane.as_deref()
     }
 
     /// Finalizes the delivery.
@@ -328,9 +379,10 @@ impl IncomingMessage for KafkaTestMessage {
 }
 
 impl Partitioned for KafkaTestMessage {
-    /// The partition key from the `PARTITION_KEY_HEADER`, mirroring the real message.
+    /// The keyed-lane key (see [`IncomingMessage::partition_key`] on this type), mirroring the
+    /// real message.
     fn partition_key(&self) -> Option<&[u8]> {
-        self.headers().get(crate::PARTITION_KEY_HEADER)
+        self.lane.as_deref()
     }
 }
 

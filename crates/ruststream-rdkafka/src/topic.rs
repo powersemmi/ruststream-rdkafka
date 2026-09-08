@@ -1,5 +1,8 @@
 //! The subscription descriptor: one topic consumed through one consumer group.
 
+#[cfg(feature = "testing")]
+use std::future::{Future, ready};
+
 use ruststream::SubscriptionSource;
 
 use crate::broker::ConnectedKafkaBroker;
@@ -451,18 +454,22 @@ impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic
         &self.name
     }
 
-    async fn subscribe(
+    // Returns a future without awaiting: opening an in-process subscription is synchronous, and
+    // the trait is what shapes the signature.
+    fn subscribe(
         self,
         broker: &crate::testing::ConnectedKafkaTestBroker,
-    ) -> Result<Self::Subscriber, KafkaError> {
+    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
         if !self.partitions.is_empty() {
-            return Err(KafkaError::InvalidOptions(
+            return ready(Err(KafkaError::InvalidOptions(
                 "the in-process test broker does not simulate partitions; manual partition \
                  assignment needs a real cluster"
                     .to_owned(),
-            ));
+            )));
         }
-        broker.subscribe_topics(&self.topics).await
+        // The lane key travels with the subscription, so `workers(n, by_key)` lanes deliveries
+        // here by whatever it lanes them by on a cluster.
+        ready(broker.open_subscription(&self.topics, self.lane_key))
     }
 }
 

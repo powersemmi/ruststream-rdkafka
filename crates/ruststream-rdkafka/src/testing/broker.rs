@@ -14,7 +14,10 @@ use ruststream::{
 use super::publisher::KafkaTestPublisher;
 use super::router::KeyRouter;
 use super::subscriber::KafkaTestSubscriber;
+use super::transaction::KafkaTestTransactionalPublisher;
 use crate::error::KafkaError;
+use crate::publisher::KafkaTransactionalPublish;
+use crate::topic::LaneKey;
 
 pub(crate) struct TestBrokerState {
     pub(crate) router: KeyRouter,
@@ -137,7 +140,7 @@ impl ConnectedKafkaTestBroker {
         topic: impl Into<String>,
     ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
         let topics = [topic.into()];
-        ready(self.open_subscription(&topics))
+        ready(self.open_subscription(&topics, LaneKey::default()))
     }
 
     /// Subscribes to several topics as one subscription, mirroring
@@ -152,12 +155,19 @@ impl ConnectedKafkaTestBroker {
         &self,
         topics: &[String],
     ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
-        ready(self.open_subscription(topics))
+        ready(self.open_subscription(topics, LaneKey::default()))
     }
 
     /// The synchronous body behind both subscribe entry points, kept apart so the validation
     /// errors stay `?` rather than a chain of early `ready(Err(..))` returns.
-    fn open_subscription(&self, topics: &[String]) -> Result<KafkaTestSubscriber, KafkaError> {
+    ///
+    /// `lane_key` is what a descriptor carries into the subscription; the public entry points
+    /// take the descriptor default, and [`KafkaTopic`](crate::KafkaTopic) passes its own.
+    pub(crate) fn open_subscription(
+        &self,
+        topics: &[String],
+        lane_key: LaneKey,
+    ) -> Result<KafkaTestSubscriber, KafkaError> {
         for topic in topics {
             if topic.is_empty() {
                 return Err(KafkaError::InvalidOptions(
@@ -174,7 +184,11 @@ impl ConnectedKafkaTestBroker {
             }
             self.state.ensure_open(topic)?;
         }
-        Ok(KafkaTestSubscriber::open_many(&self.state, topics))
+        Ok(KafkaTestSubscriber::open_many(
+            &self.state,
+            topics,
+            lane_key,
+        ))
     }
 
     /// A publisher into this broker's router.
@@ -186,6 +200,47 @@ impl ConnectedKafkaTestBroker {
     #[must_use]
     pub fn publisher(&self, _policy: crate::KafkaPublish) -> KafkaTestPublisher {
         KafkaTestPublisher::new(Arc::clone(&self.state))
+    }
+
+    /// A live transactional publisher over this broker's router, mirroring
+    /// [`ConnectedKafkaBroker::transactional_publisher`](crate::ConnectedKafkaBroker::transactional_publisher).
+    ///
+    /// See [`KafkaTestTransactionalPublisher`] for what the in-process transaction reproduces
+    /// and what it cannot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Closed`] once the transport has been shut down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::KafkaPublish;
+    /// use ruststream_rdkafka::testing::KafkaTestBroker;
+    ///
+    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+    /// let broker = KafkaTestBroker::new().connect().await?;
+    /// let publisher = broker
+    ///     .transactional_publisher(KafkaPublish::default().transactional_id("orders-svc-1"))
+    ///     .await?;
+    /// # let _ = publisher;
+    /// # Ok(())
+    /// # }
+    /// ```
+    // Returns a future without awaiting on purpose: the real broker's counterpart is async
+    // because it creates and initializes a producer, and call-site parity keeps a service's
+    // wiring identical on both.
+    pub fn transactional_publisher(
+        &self,
+        policy: KafkaTransactionalPublish,
+    ) -> impl Future<Output = Result<KafkaTestTransactionalPublisher, KafkaError>> {
+        let opened = self.state.ensure_open(policy.id());
+        ready(opened.map(|()| KafkaTestTransactionalPublisher::new(&self.state, policy)))
+    }
+
+    pub(crate) const fn state(&self) -> &Arc<TestBrokerState> {
+        &self.state
     }
 }
 
