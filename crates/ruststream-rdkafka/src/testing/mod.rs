@@ -2,8 +2,9 @@
 //!
 //! [`KafkaTestBroker`] follows the same ladder as the real broker and implements the core
 //! `TestableBroker` contract on its connected form, over an in-memory router, so application
-//! handlers wired against Kafka descriptors can be exercised without a cluster: messages fan
-//! out synchronously to subscribers matched by exact topic name. The crate's real publish
+//! handlers wired against Kafka descriptors can be exercised without a cluster: a record routes
+//! synchronously by exact topic name to one member of every consumer group reading it. The
+//! crate's real publish
 //! policies pair against it - [`KafkaPublish`](crate::KafkaPublish),
 //! [`KafkaTransactionalPublish`](crate::KafkaTransactionalPublish) and
 //! [`KafkaPartitionedPublish`](crate::KafkaPartitionedPublish) - so include sites need no
@@ -17,13 +18,18 @@
 //! service that reads `Ctx<Partition>`, replays with `Ctx<SeekHandle>` or opens at a
 //! `start_at(..)` position mounts here unchanged and is tested with `TestApp`.
 //!
-//! Scope: topic-name routing, settlement, headers, the partition-key header, worker lanes (a
+//! Scope: topic-name routing; consumer groups, so competing consumers really compete (a record
+//! reaches one member of each group, and every group reads its own copy); settlement as a read
+//! position rather than a per-message frame, so `nack(true)` rewinds to the committed position
+//! under [`Commit::Tracked`](crate::Commit::Tracked) and is advisory under
+//! [`Commit::Auto`](crate::Commit::Auto); headers; the partition-key header; worker lanes (a
 //! subscription's [`LaneKey`](crate::LaneKey) resolves here exactly as it does upstream, so
-//! `workers(n, by_key)` lanes deliveries the same way), repositioning over the retained log, and
+//! `workers(n, by_key)` lanes deliveries the same way); repositioning over the retained log; and
 //! the client-visible half of a transaction (publishes held back until commit, discarded on
-//! abort, one independent transaction per partition lane). Consumer groups (a topic's messages
-//! reach every subscription here, not one member per group), real partitions, committed offsets,
-//! the retry and dead-letter pipeline, record timestamps and rebalancing are cluster behavior,
+//! abort, one independent transaction per partition lane). Real partitions (every topic has
+//! exactly one, so a group's records land on one member instead of spreading), positions that
+//! outlive a subscription, the retry and dead-letter pipeline, record timestamps and rebalancing
+//! are cluster behavior,
 //! and so is every guarantee a transaction rests on: atomic `read_committed` visibility, zombie
 //! fencing by transactional id, broker-held transaction timeouts, and the exactly-once coupling
 //! of consumed offsets into the producer transaction. [`KafkaTestTransactionalPublisher`] names

@@ -467,9 +467,15 @@ impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic
                     .to_owned(),
             )));
         }
-        // The lane key travels with the subscription, so `workers(n, by_key)` lanes deliveries
-        // here by whatever it lanes them by on a cluster.
-        ready(broker.open_subscription(&self.topics, self.lane_key))
+        // Group, lane key and commit mode all travel with the subscription, so competing
+        // consumers compete, `workers(n, by_key)` lanes deliveries, and `nack(true)` redelivers
+        // here by the rule each of them follows on a cluster.
+        ready(broker.open_subscription(
+            &self.topics,
+            self.group.as_deref(),
+            self.lane_key,
+            self.commit.clone(),
+        ))
     }
 }
 

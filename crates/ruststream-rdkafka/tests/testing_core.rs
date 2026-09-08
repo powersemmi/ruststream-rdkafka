@@ -37,9 +37,12 @@ use ruststream::{
 };
 use ruststream_rdkafka::context::keys::{Partition, Position, SeekHandle};
 use ruststream_rdkafka::context::{KafkaBatchContext, KafkaContext};
-use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
+use ruststream_rdkafka::testing::{
+    ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage, KafkaTestSubscriber,
+};
 use ruststream_rdkafka::{
-    KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER, PartitionLanes,
+    Commit, KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
+    PartitionLanes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -146,6 +149,294 @@ async fn nack_requeue_redelivers_and_drop_drops() {
 
     let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
     assert!(silence.is_err(), "nack(false) must not redeliver");
+}
+
+// ------------------------------------------------------------- settlement as a read position
+
+/// Drains `count` deliveries, settling each with `settle`, and reports what arrived.
+async fn take_settling<S, F>(stream: &mut S, count: usize, mut settle: F) -> Vec<Vec<u8>>
+where
+    S: Stream<Item = Result<KafkaTestMessage, KafkaError>> + Unpin,
+    F: FnMut(usize, &KafkaTestMessage) -> Settle,
+{
+    let mut seen = Vec::new();
+    for index in 0..count {
+        let msg = tokio::time::timeout(WAIT, stream.next())
+            .await
+            .expect("delivery within timeout")
+            .expect("stream has next")
+            .expect("delivery ok");
+        seen.push(msg.payload().to_vec());
+        match settle(index, &msg) {
+            Settle::Ack => msg.ack().await.expect("ack"),
+            Settle::Retry => msg.nack(true).await.expect("retry"),
+            Settle::Drop => msg.nack(false).await.expect("drop"),
+        }
+    }
+    seen
+}
+
+/// How `take_settling` should settle one delivery.
+enum Settle {
+    Ack,
+    Retry,
+    Drop,
+}
+
+// A rewind is a read position, not a queue: it drags back everything after the record that asked
+// for it, which is where at-least-once duplication comes from on a cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tracked_retry_rewinds_the_whole_tail_not_one_message() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("rewind")
+        .commit(Commit::Tracked)
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("rewind", payload))
+            .await
+            .expect("publish");
+    }
+
+    let mut stream = Box::pin(subscriber.stream());
+    // Ack "a", retry "b": the committed position sits at "b", so "b" and "c" both come back.
+    let seen = take_settling(&mut stream, 2, |index, _| {
+        if index == 0 {
+            Settle::Ack
+        } else {
+            Settle::Retry
+        }
+    })
+    .await;
+    assert_eq!(seen, vec![b"a".to_vec(), b"b".to_vec()]);
+
+    let replayed = take_settling(&mut stream, 2, |_, _| Settle::Ack).await;
+    assert_eq!(
+        replayed,
+        vec![b"b".to_vec(), b"c".to_vec()],
+        "a tracked retry resumes from the committed position, so the tail behind it replays too",
+    );
+
+    let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(silence.is_err(), "the whole log has now settled");
+}
+
+// The other half of the rule: `nack(false)` settles the offset, so a later rewind does not drag
+// the dropped record back with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_record_stays_dropped_across_a_later_rewind() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("dropped")
+        .commit(Commit::Tracked)
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("dropped", payload))
+            .await
+            .expect("publish");
+    }
+
+    let mut stream = Box::pin(subscriber.stream());
+    let seen = take_settling(&mut stream, 3, |index, _| match index {
+        0 => Settle::Drop,
+        1 => Settle::Ack,
+        _ => Settle::Retry,
+    })
+    .await;
+    assert_eq!(seen, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+
+    let replayed = take_settling(&mut stream, 1, |_, _| Settle::Ack).await;
+    assert_eq!(
+        replayed,
+        vec![b"c".to_vec()],
+        "the dropped and acked records settled the position past themselves, so only the \
+         retried record comes back",
+    );
+
+    let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(silence.is_err(), "the whole log has now settled");
+}
+
+// Under auto-commit the position is stored as the record is handed over, so a retry cannot bring
+// it back. The stand-in has to say that rather than obligingly redeliver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auto_commit_retry_is_advisory_and_redelivers_nothing() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("advisory")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("advisory", b"once"))
+        .await
+        .expect("publish");
+
+    let mut stream = Box::pin(subscriber.stream());
+    let seen = take_settling(&mut stream, 1, |_, _| Settle::Retry).await;
+    assert_eq!(seen, vec![b"once".to_vec()]);
+
+    let silence = tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+    assert!(
+        silence.is_err(),
+        "auto-commit stores the position when the record is handed over, so `nack(true)` is \
+         advisory and must not redeliver",
+    );
+}
+
+// ------------------------------------------------------------------------- consumer groups
+
+/// Reads whatever `subscriber` has ready within a short window, settling each delivery.
+async fn drain_ready(subscriber: &mut KafkaTestSubscriber) -> Vec<Vec<u8>> {
+    let mut stream = Box::pin(subscriber.stream());
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(msg))) =
+        tokio::time::timeout(Duration::from_millis(80), stream.next()).await
+    {
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack");
+    }
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn members_of_one_group_share_a_topic_instead_of_each_getting_a_copy() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let worker = || KafkaTopic::new("shared").group("workers");
+    let mut first = worker().subscribe(&broker).await.expect("subscribe first");
+    let mut second = worker().subscribe(&broker).await.expect("subscribe second");
+    // A different group is a different reader of the same log, so it gets its own copy.
+    let mut auditor = KafkaTopic::new("shared")
+        .group("audit")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe auditor");
+
+    for payload in [b"1".as_slice(), b"2", b"3"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("shared", payload))
+            .await
+            .expect("publish");
+    }
+
+    let one = drain_ready(&mut first).await;
+    let two = drain_ready(&mut second).await;
+    let audit = drain_ready(&mut auditor).await;
+
+    let expected = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
+    // The transport gives every topic one partition, and Kafka assigns a partition to exactly one
+    // member of a group - so the group's records land on one member, not spread over both. What
+    // must never happen is both members handling everything.
+    assert_eq!(
+        one.len() + two.len(),
+        3,
+        "each record must reach exactly one member of the group, got {one:?} and {two:?}",
+    );
+    assert!(
+        one == expected && two.is_empty(),
+        "the group's single partition is owned by one member, got {one:?} and {two:?}",
+    );
+    assert_eq!(audit, expected, "a second group reads its own copy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscriptions_without_a_group_are_each_alone_in_one() {
+    let broker = connected().await;
+    let mut first = broker
+        .subscribe_with("solo")
+        .await
+        .expect("subscribe first");
+    let mut second = broker
+        .subscribe_with("solo")
+        .await
+        .expect("subscribe second");
+
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("solo", b"both"))
+        .await
+        .expect("publish");
+
+    assert_eq!(drain_ready(&mut first).await, vec![b"both".to_vec()]);
+    assert_eq!(
+        drain_ready(&mut second).await,
+        vec![b"both".to_vec()],
+        "an anonymous subscription is alone in its own group, so nothing takes the topic from it",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_brokers_default_group_makes_bare_subscriptions_compete() {
+    let broker = KafkaTestBroker::new()
+        .default_group("orders-svc")
+        .connect()
+        .await
+        .expect("connect");
+    let mut first = broker
+        .subscribe_with("bare")
+        .await
+        .expect("subscribe first");
+    let mut second = broker
+        .subscribe_with("bare")
+        .await
+        .expect("subscribe second");
+
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("bare", b"one"))
+        .await
+        .expect("publish");
+
+    let one = drain_ready(&mut first).await;
+    let two = drain_ready(&mut second).await;
+    assert_eq!(
+        one.len() + two.len(),
+        1,
+        "the broker's default group is what makes two bare subscriptions compete, got {one:?} \
+         and {two:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_departing_owner_hands_its_topic_to_the_next_group_member() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let worker = || KafkaTopic::new("handover").group("workers");
+    let first = worker().subscribe(&broker).await.expect("subscribe first");
+    let mut second = worker().subscribe(&broker).await.expect("subscribe second");
+
+    // While the owner is live the second member gets nothing.
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("handover", b"before"))
+        .await
+        .expect("publish");
+    assert!(drain_ready(&mut second).await.is_empty());
+
+    // Dropping the owner is this transport's rebalance: the remaining member takes the topic.
+    drop(first);
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("handover", b"after"))
+        .await
+        .expect("publish");
+    assert_eq!(drain_ready(&mut second).await, vec![b"after".to_vec()]);
 }
 
 /// Publishes one keyed and one keyless record to `topic`.
@@ -347,7 +638,10 @@ async fn ack_payment(order: &Order) -> HandlerOutcome {
 #[derive(Clone, Default)]
 struct Attempts(Arc<AtomicUsize>);
 
-#[subscriber(KafkaTopic::new("retry"))]
+// `Commit::Tracked` is what gives `nack(true)` a meaning: under the descriptor default,
+// auto-commit has stored the position by the time the handler runs, so a retry cannot bring the
+// record back here any more than it can on a cluster.
+#[subscriber(KafkaTopic::new("retry").commit(Commit::Tracked))]
 async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerOutcome {
     let _ = order;
     // Requeue once, then acknowledge: exercises the `nack(requeue = true)` -> `enqueued`

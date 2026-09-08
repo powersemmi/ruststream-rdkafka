@@ -1,10 +1,11 @@
 //! The in-process subscriber and its delivery type.
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Poll, ready as poll_ready};
 
 use bytes::Bytes;
@@ -12,22 +13,33 @@ use futures::Stream;
 use ruststream::testing::Coordinator;
 use ruststream::{
     AckError, BatchSubscriber, HeaderMap, IncomingMessage, Partitioned, Positioned, Seekable,
-    Subscriber,
+    Seeker as _, Subscriber,
 };
 
 use super::broker::TestBrokerState;
-use super::router::{DeliveryReceiver, DeliverySender, SubscriptionId, TestDelivery};
+use super::router::{DeliveryReceiver, SubscriptionId, TestDelivery};
 use super::seek::InProcessSeek;
 use crate::error::KafkaError;
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::topic::LaneKey;
+use crate::topic::{Commit, LaneKey};
+
+/// Offsets handed to the application and not yet settled, per topic.
+///
+/// The lowest entry of a topic is that topic's committed position: everything below it is
+/// settled, so a `Commit::Tracked` redelivery resumes from there. That is the same
+/// contiguous-prefix rule the real subscriber's commit tracker applies.
+type Unsettled = HashMap<String, BTreeSet<usize>>;
 
 /// In-process subscriber on one topic name.
 ///
-/// Yielded messages settle like the routing contract expects: ack finalizes, `nack(true)`
-/// re-enqueues to this same subscription, `nack(false)` drops. The real transport's
-/// committed-position semantics (holes, watermarks, redelivery on rebalance) are deliberately
-/// not simulated.
+/// # Settlement
+///
+/// Settlement is a read position here, as it is on a cluster, not a per-message frame. `ack` and
+/// `nack(false)` settle the delivery's offset; `nack(true)` under [`Commit::Tracked`] leaves it
+/// unsettled and resumes from the committed position, so the record **and the tail behind it**
+/// are delivered again, while under [`Commit::Auto`] it is advisory and brings nothing back.
+/// What is not simulated is what only a cluster has: a position that survives the subscription,
+/// and redelivery triggered by a rebalance.
 ///
 /// # Repositioning
 ///
@@ -42,7 +54,6 @@ pub struct KafkaTestSubscriber {
     state: Arc<TestBrokerState>,
     ids: Vec<SubscriptionId>,
     topic: String,
-    sender: DeliverySender,
     receiver: DeliveryReceiver,
     coordinator: Option<Coordinator>,
     /// The read position this subscription is on. A reposition bumps it, so deliveries queued
@@ -53,43 +64,39 @@ pub struct KafkaTestSubscriber {
     seeker: Arc<KafkaSeeker>,
     /// What the descriptor asked worker lanes to be keyed by, resolved per delivery.
     lane_key: LaneKey,
+    /// How the descriptor asked settlement to be committed, which is what decides whether
+    /// `nack(true)` brings anything back and how much.
+    commit: Commit,
+    /// Shared with every live delivery, so settling one moves the committed position the next
+    /// redelivery rewinds to.
+    unsettled: Arc<Mutex<Unsettled>>,
 }
 
 impl KafkaTestSubscriber {
     pub(crate) fn open_many(
         state: &Arc<TestBrokerState>,
         topics: &[String],
+        group: Option<&str>,
         lane_key: LaneKey,
+        commit: Commit,
     ) -> Self {
         let generation = Arc::new(AtomicU64::new(0));
-        let (ids, sender, receiver) = state.router.subscribe_many(topics, &generation);
+        let (ids, sender, receiver) = state.router.subscribe_many(topics, group, &generation);
         let coordinator = state.coordinator();
-        let control = InProcessSeek::new(state, topics, sender.clone(), &generation);
+        // The seeker owns the only remaining handle on the send side: every redelivery in this
+        // transport is a reposition, so nothing else needs to enqueue.
+        let control = InProcessSeek::new(state, topics, sender, &generation);
         Self {
             state: Arc::clone(state),
             ids,
             topic: topics.join(","),
-            sender,
             receiver,
             coordinator,
             generation,
             seeker: Arc::new(KafkaSeeker::in_process(Arc::new(control))),
             lane_key,
-        }
-    }
-
-    /// The lane key a delivery carries, resolved the way the real subscriber resolves it.
-    ///
-    /// Under [`LaneKey::Partition`] every delivery here shares one lane, because the transport
-    /// gives every topic exactly one partition - which is what a real single-partition topic
-    /// does too, and what keeps `workers(n)` from appearing more concurrent in process than the
-    /// cluster would be.
-    fn lane_of(lane_key: LaneKey, headers: &HeaderMap) -> Option<Bytes> {
-        match lane_key {
-            LaneKey::RecordKey => headers
-                .get(crate::PARTITION_KEY_HEADER)
-                .map(Bytes::copy_from_slice),
-            LaneKey::Partition => Some(Bytes::from_static(b"0")),
+            commit,
+            unsettled: Arc::new(Mutex::new(Unsettled::new())),
         }
     }
 
@@ -98,30 +105,60 @@ impl KafkaTestSubscriber {
     pub fn topic(&self) -> &str {
         &self.topic
     }
+}
+
+/// What turns a queued [`TestDelivery`] into a [`KafkaTestMessage`], borrowed from the
+/// subscription for the life of one stream.
+struct Accepting<'a> {
+    coordinator: Option<&'a Coordinator>,
+    generation: &'a AtomicU64,
+    seeker: &'a Arc<KafkaSeeker>,
+    unsettled: &'a Arc<Mutex<Unsettled>>,
+    lane_key: LaneKey,
+    commit: &'a Commit,
+}
+
+impl Accepting<'_> {
+    /// The lane key a delivery carries, resolved the way the real subscriber resolves it.
+    ///
+    /// Under [`LaneKey::Partition`] every delivery here shares one lane, because the transport
+    /// gives every topic exactly one partition - which is what a real single-partition topic
+    /// does too, and what keeps `workers(n)` from appearing more concurrent in process than the
+    /// cluster would be.
+    fn lane_of(&self, headers: &HeaderMap) -> Option<Bytes> {
+        match self.lane_key {
+            LaneKey::RecordKey => headers
+                .get(crate::PARTITION_KEY_HEADER)
+                .map(Bytes::copy_from_slice),
+            LaneKey::Partition => Some(Bytes::from_static(b"0")),
+        }
+    }
 
     /// Builds the delivery, or reports it as belonging to a read position this subscription no
     /// longer has. A stale delivery is accounted as consumed here: it was counted in flight when
     /// it was enqueued, and nothing else will settle it.
-    fn accept(
-        delivery: TestDelivery,
-        sender: &DeliverySender,
-        coordinator: Option<&Coordinator>,
-        generation: &AtomicU64,
-        seeker: &Arc<KafkaSeeker>,
-        lane_key: LaneKey,
-    ) -> Option<KafkaTestMessage> {
-        if delivery.generation < generation.load(Ordering::Acquire) {
-            if let Some(coordinator) = coordinator {
+    fn accept(&self, delivery: TestDelivery) -> Option<KafkaTestMessage> {
+        if delivery.generation < self.generation.load(Ordering::Acquire) {
+            if let Some(coordinator) = self.coordinator {
                 coordinator.consumed();
             }
             return None;
         }
-        let lane = Self::lane_of(lane_key, &delivery.headers);
+        let lane = self.lane_of(&delivery.headers);
+        // Handed to the application, so it counts against the committed position until it
+        // settles - the rule that makes a `Commit::Tracked` rewind land where it should.
+        self.unsettled
+            .lock()
+            .expect("test settlement mutex poisoned")
+            .entry(delivery.topic.clone())
+            .or_default()
+            .insert(delivery.seq);
         Some(KafkaTestMessage {
             delivery: Some(delivery),
-            sender: sender.clone(),
-            coordinator: coordinator.cloned(),
-            seeker: Arc::clone(seeker),
+            coordinator: self.coordinator.cloned(),
+            seeker: Arc::clone(self.seeker),
+            unsettled: Arc::clone(self.unsettled),
+            commit: self.commit.clone(),
             lane,
         })
     }
@@ -154,30 +191,22 @@ impl Subscriber for KafkaTestSubscriber {
     /// Cancel safe and re-enterable: the receiver is polled in place, so dropping the returned
     /// stream loses nothing and `stream` can be called again.
     fn stream(&mut self) -> impl Stream<Item = Result<Self::Message, Self::Error>> + Send + '_ {
-        let Self {
-            receiver,
-            sender,
-            coordinator,
-            generation,
-            seeker,
-            lane_key,
-            ..
-        } = self;
-        let lane_key = *lane_key;
+        let accepting = Accepting {
+            coordinator: self.coordinator.as_ref(),
+            generation: &self.generation,
+            seeker: &self.seeker,
+            unsettled: &self.unsettled,
+            lane_key: self.lane_key,
+            commit: &self.commit,
+        };
+        let receiver = &mut self.receiver;
         futures::stream::poll_fn(move |cx| {
             loop {
                 match poll_ready!(receiver.poll_recv(cx)) {
                     // A delivery from before a reposition: drop it and take the next one, which
                     // is what makes the replay the only thing the handler sees.
                     Some(delivery) => {
-                        if let Some(message) = Self::accept(
-                            delivery,
-                            sender,
-                            coordinator.as_ref(),
-                            generation,
-                            seeker,
-                            lane_key,
-                        ) {
+                        if let Some(message) = accepting.accept(delivery) {
                             return Poll::Ready(Some(Ok(message)));
                         }
                     }
@@ -213,28 +242,20 @@ impl BatchSubscriber for KafkaTestSubscriber {
         size: NonZeroUsize,
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
-        let Self {
-            receiver,
-            sender,
-            coordinator,
-            generation,
-            seeker,
-            lane_key,
-            ..
-        } = self;
-        let lane_key = *lane_key;
+        let accepting = Accepting {
+            coordinator: self.coordinator.as_ref(),
+            generation: &self.generation,
+            seeker: &self.seeker,
+            unsettled: &self.unsettled,
+            lane_key: self.lane_key,
+            commit: &self.commit,
+        };
+        let receiver = &mut self.receiver;
         futures::stream::poll_fn(move |cx| {
             let first = loop {
                 match poll_ready!(receiver.poll_recv(cx)) {
                     Some(delivery) => {
-                        if let Some(message) = Self::accept(
-                            delivery,
-                            sender,
-                            coordinator.as_ref(),
-                            generation,
-                            seeker,
-                            lane_key,
-                        ) {
+                        if let Some(message) = accepting.accept(delivery) {
                             break message;
                         }
                     }
@@ -247,14 +268,7 @@ impl BatchSubscriber for KafkaTestSubscriber {
                 let Ok(delivery) = receiver.try_recv() else {
                     break;
                 };
-                if let Some(message) = Self::accept(
-                    delivery,
-                    sender,
-                    coordinator.as_ref(),
-                    generation,
-                    seeker,
-                    lane_key,
-                ) {
+                if let Some(message) = accepting.accept(delivery) {
                     batch.push(message);
                 }
             }
@@ -266,9 +280,13 @@ impl BatchSubscriber for KafkaTestSubscriber {
 /// One in-process delivery.
 pub struct KafkaTestMessage {
     delivery: Option<TestDelivery>,
-    sender: DeliverySender,
     coordinator: Option<Coordinator>,
     seeker: Arc<KafkaSeeker>,
+    /// The subscription's unsettled offsets, so settling this delivery moves the committed
+    /// position its siblings rewind to.
+    unsettled: Arc<Mutex<Unsettled>>,
+    /// The subscription's commit mode, which decides what `nack(true)` means.
+    commit: Commit,
     /// The keyed-lane key, resolved from the subscription's [`LaneKey`] exactly as the real
     /// subscriber resolves it.
     lane: Option<Bytes>,
@@ -311,6 +329,27 @@ impl KafkaTestMessage {
     pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
         Arc::clone(&self.seeker)
     }
+
+    /// Marks this delivery settled, so it stops holding the topic's committed position down.
+    fn settle(&self, topic: &str, seq: usize) {
+        let mut unsettled = self
+            .unsettled
+            .lock()
+            .expect("test settlement mutex poisoned");
+        if let Some(offsets) = unsettled.get_mut(topic) {
+            offsets.remove(&seq);
+        }
+    }
+
+    /// The topic's committed position: the lowest offset still unsettled, or `None` when
+    /// everything handed over so far has settled.
+    fn committed(&self, topic: &str) -> Option<usize> {
+        self.unsettled
+            .lock()
+            .expect("test settlement mutex poisoned")
+            .get(topic)
+            .and_then(|offsets| offsets.first().copied())
+    }
 }
 
 impl Drop for KafkaTestMessage {
@@ -348,33 +387,48 @@ impl IncomingMessage for KafkaTestMessage {
         self.lane.as_deref()
     }
 
-    /// Finalizes the delivery.
+    /// Settles the delivery, advancing the subscription's committed position over it.
     ///
     /// # Errors
     ///
-    /// Never fails; the in-process transport has no position to store.
+    /// Never fails; settling an in-process delivery reaches no broker.
     fn ack(mut self) -> impl Future<Output = Result<(), AckError>> {
-        drop(self.take());
+        let delivery = self.take();
+        self.settle(&delivery.topic, delivery.seq);
         ready(Ok(()))
     }
 
-    /// Re-enqueues to the same subscription (`requeue = true`) or drops (`requeue = false`).
+    /// Settlement as Kafka defines it, which is a read position and not a per-message frame.
     ///
-    /// A requeued delivery keeps the read-position generation it arrived under, so a reposition
-    /// landing in between discards it: the replay already covers everything from the target on.
+    /// `requeue = false` settles the offset (the drop path), so nothing comes back.
+    ///
+    /// `requeue = true` under [`Commit::Tracked`] leaves the offset unsettled and resumes the
+    /// subscription from the committed position, so this record **and everything after it on the
+    /// topic** are delivered again - the at-least-once duplication a real rewind produces, not a
+    /// single re-enqueued frame. Under [`Commit::Auto`] it is advisory and nothing comes back:
+    /// librdkafka stored the position when the record was handed over, so the offset is already
+    /// past it.
     ///
     /// # Errors
     ///
-    /// Never fails; the in-process transport has no position to store.
-    fn nack(mut self, requeue: bool) -> impl Future<Output = Result<(), AckError>> {
+    /// Returns [`AckError::Broker`] when the rewind cannot be applied, which in process means
+    /// the transport was shut down under the subscription.
+    async fn nack(mut self, requeue: bool) -> Result<(), AckError> {
         let delivery = self.take();
-        if requeue && self.sender.send(delivery).is_ok() {
-            // This bypasses the router fanout, so account for the new in-flight delivery here.
-            if let Some(coordinator) = &self.coordinator {
-                coordinator.enqueued();
-            }
+        // Non-exhaustive, and `Transactional` has no pipeline in process to defer the commit to,
+        // so it rewinds like `Tracked` rather than inventing an exactly-once window.
+        let advisory = matches!(self.commit, Commit::Auto);
+        if !requeue || advisory {
+            self.settle(&delivery.topic, delivery.seq);
+            return Ok(());
         }
-        ready(Ok(()))
+        // Left unsettled, so the committed position is at or below this record.
+        let from = self.committed(&delivery.topic).unwrap_or(delivery.seq);
+        let from = i64::try_from(from).unwrap_or(i64::MAX);
+        self.seeker
+            .seek(KafkaPosition::topic_offset(&delivery.topic, 0, from))
+            .await
+            .map_err(|err| AckError::Broker(Box::new(err)))
     }
 }
 
