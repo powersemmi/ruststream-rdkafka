@@ -171,9 +171,9 @@ struct RegistryInner {
 /// ```no_run
 /// use ruststream_rdkafka::{KafkaBroker, SchemaRegistry};
 ///
-/// let sr = SchemaRegistry::new("http://localhost:8081").basic_auth("svc", "secret");
+/// let registry = SchemaRegistry::new("http://localhost:8081").basic_auth("svc", "secret");
 /// // Consuming: subscriptions transcode framed deliveries to plain JSON through the client.
-/// let broker = KafkaBroker::new(["localhost:9092"]).schema_registry(sr.clone());
+/// let broker = KafkaBroker::new(["localhost:9092"]).schema_registry(registry.clone());
 /// # let _ = broker;
 /// ```
 #[derive(Clone)]
@@ -1286,9 +1286,9 @@ impl SubjectMap {
 /// use ruststream::runtime::{AppInfo, RustStream};
 /// use ruststream_rdkafka::{SchemaFrame, SchemaRegistry};
 ///
-/// let sr = SchemaRegistry::new("http://localhost:8081");
+/// let registry = SchemaRegistry::new("http://localhost:8081");
 /// let app = RustStream::new(AppInfo::new("orders", "1.0.0"))
-///     .publish_layer(SchemaFrame::new(sr.clone()));
+///     .publish_layer(SchemaFrame::new(registry.clone()));
 /// # let _ = app;
 /// ```
 #[derive(Clone)]

@@ -179,10 +179,13 @@ fn decode_datum<T: prost::Message + Default>(
 /// }
 ///
 /// # async fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let sr = SchemaRegistry::new("http://localhost:8081");
-/// let subject =
-///     protobuf::Subject::<Confirmation>::resolve(&sr, "confirmations-value", "acme.Confirmation")
-///         .await?;
+/// let registry = SchemaRegistry::new("http://localhost:8081");
+/// let subject = protobuf::Subject::<Confirmation>::resolve(
+///     &registry,
+///     "confirmations-value",
+///     "acme.Confirmation",
+/// )
+/// .await?;
 ///
 /// let frame = subject.frame(&Confirmation { id: 7 })?;
 /// assert_eq!(frame.schema_id(), subject.schema_id());
@@ -1008,24 +1011,25 @@ message Order {
             })))
             .mount(&server)
             .await;
-        let sr = SchemaRegistry::new(server.uri());
-        sr.register("orders-value", SchemaType::Protobuf, ORDERS_PROTO)
+        let registry = SchemaRegistry::new(server.uri());
+        registry
+            .register("orders-value", SchemaType::Protobuf, ORDERS_PROTO)
             .await
             .expect("register");
-        let schema = sr.cached_subject("orders-value").expect("cached");
-        (server, sr, (*schema).clone())
+        let schema = registry.cached_subject("orders-value").expect("cached");
+        (server, registry, (*schema).clone())
     }
 
     #[tokio::test]
     async fn json_protobuf_json_roundtrips_with_index_paths() {
-        let (_server, sr, schema) = registry_with_orders(5).await;
+        let (_server, registry, schema) = registry_with_orders(5).await;
         let json = br#"{"id":42,"item":"anvil"}"#;
 
         // Order is the second top-level message: a real index path, not the compact zero.
-        let datum = json_to_protobuf(&sr, &schema, Some("acme.Order"), json).expect("encode");
+        let datum = json_to_protobuf(&registry, &schema, Some("acme.Order"), json).expect("encode");
         assert_ne!(datum[0], 0, "a real index path must be encoded");
 
-        let back = protobuf_to_json(&sr, &schema, &datum).expect("decode");
+        let back = protobuf_to_json(&registry, &schema, &datum).expect("decode");
         let value: serde_json::Value = serde_json::from_slice(&back).expect("json");
         assert_eq!(value["id"], 42);
         assert_eq!(value["item"], "anvil");
@@ -1033,11 +1037,12 @@ message Order {
 
     #[tokio::test]
     async fn nested_messages_address_by_index_path() {
-        let (_server, sr, schema) = registry_with_orders(6).await;
+        let (_server, registry, schema) = registry_with_orders(6).await;
         let json = br#"{"sku":"SKU-1","quantity":3}"#;
 
-        let datum = json_to_protobuf(&sr, &schema, Some("acme.Order.Line"), json).expect("encode");
-        let back = protobuf_to_json(&sr, &schema, &datum).expect("decode");
+        let datum =
+            json_to_protobuf(&registry, &schema, Some("acme.Order.Line"), json).expect("encode");
+        let back = protobuf_to_json(&registry, &schema, &datum).expect("decode");
         let value: serde_json::Value = serde_json::from_slice(&back).expect("json");
         assert_eq!(value["sku"], "SKU-1");
         assert_eq!(value["quantity"], 3);
@@ -1045,8 +1050,8 @@ message Order {
 
     #[tokio::test]
     async fn unknown_messages_error_clearly() {
-        let (_server, sr, schema) = registry_with_orders(7).await;
-        let err = json_to_protobuf(&sr, &schema, Some("acme.Missing"), b"{}")
+        let (_server, registry, schema) = registry_with_orders(7).await;
+        let err = json_to_protobuf(&registry, &schema, Some("acme.Missing"), b"{}")
             .expect_err("unknown message");
         assert!(err.to_string().contains("fully qualified"));
     }
@@ -1062,9 +1067,9 @@ message Order {
 
     #[tokio::test]
     async fn a_subject_frames_behind_its_messages_index_path() {
-        let (_server, sr, schema) = registry_with_orders(9).await;
+        let (_server, registry, schema) = registry_with_orders(9).await;
 
-        let subject = Subject::<Order>::resolve(&sr, "orders-value", "acme.Order")
+        let subject = Subject::<Order>::resolve(&registry, "orders-value", "acme.Order")
             .await
             .expect("resolve");
         assert_eq!(subject.schema_id(), 9);
@@ -1078,7 +1083,7 @@ message Order {
         assert_ne!(frame.datum()[0], 0, "Order is not the first message");
 
         // The transcode reads the same bytes, so the index path really addresses `acme.Order`.
-        let json = protobuf_to_json(&sr, &schema, frame.datum()).expect("transcode");
+        let json = protobuf_to_json(&registry, &schema, frame.datum()).expect("transcode");
         let value: serde_json::Value = serde_json::from_slice(&json).expect("json");
         assert_eq!(value["id"], 42);
         assert_eq!(value["item"], "anvil");
@@ -1086,8 +1091,8 @@ message Order {
 
     #[tokio::test]
     async fn a_framed_delivery_decodes_with_no_registry() {
-        let (_server, sr, _) = registry_with_orders(9).await;
-        let subject = Subject::<Order>::resolve(&sr, "orders-value", "acme.Order")
+        let (_server, registry, _) = registry_with_orders(9).await;
+        let subject = Subject::<Order>::resolve(&registry, "orders-value", "acme.Order")
             .await
             .expect("resolve");
         let order = Order {

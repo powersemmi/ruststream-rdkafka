@@ -303,8 +303,12 @@ where
 /// }
 ///
 /// #[subscriber("orders")]
-/// async fn consume(frame: &IncomingFrame<'_>, State(sr): State<SchemaRegistry>) -> HandlerOutcome {
-///     let Ok(order) = ruststream_rdkafka::avro::decode_framed::<Order>(&sr, frame).await else {
+/// async fn consume(
+///     frame: &IncomingFrame<'_>,
+///     State(registry): State<SchemaRegistry>,
+/// ) -> HandlerOutcome {
+///     let decoded = ruststream_rdkafka::avro::decode_framed::<Order>(&registry, frame).await;
+///     let Ok(order) = decoded else {
 ///         return HandlerOutcome::drop();
 ///     };
 ///     println!("order {}", order.id);
@@ -357,8 +361,8 @@ where
 /// }
 ///
 /// # async fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let sr = SchemaRegistry::new("http://localhost:8081");
-/// let subject = Subject::<Confirmation>::register(&sr, "confirmations-value").await?;
+/// let registry = SchemaRegistry::new("http://localhost:8081");
+/// let subject = Subject::<Confirmation>::register(&registry, "confirmations-value").await?;
 ///
 /// let frame = subject.frame(&Confirmation { id: 7 })?;
 /// assert_eq!(frame.schema_id(), subject.schema_id());
@@ -581,12 +585,13 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "id": id })))
             .mount(&server)
             .await;
-        let sr = SchemaRegistry::new(server.uri());
-        sr.register_avro::<Order>("orders-value")
+        let registry = SchemaRegistry::new(server.uri());
+        registry
+            .register_avro::<Order>("orders-value")
             .await
             .expect("register");
-        let schema = sr.cached_subject("orders-value").expect("cached");
-        (server, sr, (*schema).clone())
+        let schema = registry.cached_subject("orders-value").expect("cached");
+        (server, registry, (*schema).clone())
     }
 
     #[test]
@@ -655,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_framed_delivery_resolves_the_writer_schema_onto_the_reader() {
-        let (_server, sr, schema) = registry_with_order(7).await;
+        let (_server, registry, schema) = registry_with_order(7).await;
 
         // Written by a producer on the old schema, read by a consumer on the new one.
         let mut buf = BytesMut::new();
@@ -672,7 +677,7 @@ mod tests {
         let payload = framed.wire_bytes(&mut wire).expect("infallible").to_vec();
 
         let frame = IncomingFrame::from_payload(&payload).expect("framed");
-        let read: OrderV2 = decode_framed(&sr, &frame).await.expect("resolve");
+        let read: OrderV2 = decode_framed(&registry, &frame).await.expect("resolve");
         assert_eq!(
             read,
             OrderV2 {
@@ -694,11 +699,11 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let sr = SchemaRegistry::new(server.uri());
+        let registry = SchemaRegistry::new(server.uri());
         let payload = [0u8, 0, 0, 0, 3, 1];
 
         let frame = IncomingFrame::from_payload(&payload).expect("framed");
-        let err = decode_framed::<Order>(&sr, &frame)
+        let err = decode_framed::<Order>(&registry, &frame)
             .await
             .expect_err("not avro");
         assert!(err.to_string().contains("not Avro"));
@@ -706,9 +711,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_subject_frames_with_the_id_of_its_own_schema() {
-        let (_server, sr, schema) = registry_with_order(11).await;
+        let (_server, registry, schema) = registry_with_order(11).await;
 
-        let subject = Subject::<Order>::register(&sr, "orders-value")
+        let subject = Subject::<Order>::register(&registry, "orders-value")
             .await
             .expect("register");
         assert_eq!(subject.schema_id(), schema.id());
@@ -725,13 +730,13 @@ mod tests {
 
     #[tokio::test]
     async fn json_avro_json_roundtrips() {
-        let (_server, sr, schema) = registry_with_order(7).await;
+        let (_server, registry, schema) = registry_with_order(7).await;
         let json = br#"{"id":42,"item":"anvil"}"#;
 
-        let datum = json_to_avro(&sr, &schema, json).expect("encode");
+        let datum = json_to_avro(&registry, &schema, json).expect("encode");
         assert_ne!(datum.as_slice(), json, "the wire form is Avro, not JSON");
 
-        let back = avro_to_json(&sr, &schema, &datum).expect("decode");
+        let back = avro_to_json(&registry, &schema, &datum).expect("decode");
         let order: Order = serde_json::from_slice(&back).expect("deserialize");
         assert_eq!(
             order,
@@ -744,8 +749,8 @@ mod tests {
 
     #[tokio::test]
     async fn schema_mismatches_error_clearly() {
-        let (_server, sr, schema) = registry_with_order(7).await;
-        let err = json_to_avro(&sr, &schema, br#"{"id":"not-a-number"}"#)
+        let (_server, registry, schema) = registry_with_order(7).await;
+        let err = json_to_avro(&registry, &schema, br#"{"id":"not-a-number"}"#)
             .expect_err("a document violating the schema must fail");
         assert!(matches!(err, KafkaError::SchemaRegistry(_)));
     }

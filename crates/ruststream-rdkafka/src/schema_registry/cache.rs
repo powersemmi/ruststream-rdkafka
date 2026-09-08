@@ -124,7 +124,7 @@ pub trait SchemaCache: Send + Sync + 'static {
 /// use ruststream_rdkafka::{SchemaCachePolicy, SchemaRegistry};
 ///
 /// // The default: ids kept, up to a bound, and subjects never re-resolved.
-/// let sr = SchemaRegistry::new("http://localhost:8081");
+/// let registry = SchemaRegistry::new("http://localhost:8081");
 ///
 /// // A producer that should notice a newly registered version without a restart.
 /// let refreshing = SchemaRegistry::new("http://localhost:8081").cache_policy(
@@ -137,7 +137,7 @@ pub trait SchemaCache: Send + Sync + 'static {
 /// // Nothing remembered at all: every lookup reaches the registry.
 /// let uncached = SchemaRegistry::new("http://localhost:8081")
 ///     .cache_policy(SchemaCachePolicy::Disabled);
-/// # let _ = (sr, refreshing, uncached);
+/// # let _ = (registry, refreshing, uncached);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
