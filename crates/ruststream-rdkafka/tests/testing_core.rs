@@ -7,9 +7,13 @@
 //! `KafkaTestSubscriber` directly are the ones whose subject IS that transport (its routing
 //! contract, its settlement, what its seeker refuses).
 //!
+//! Transactions sit on the line: the client-visible half - held-back publishes, a commit that
+//! releases them, an abort that does not, and the misuse errors - is exercised here, because the
+//! stand-in really implements it. What the guarantee rests on is not, and cannot be.
+//!
 //! Real Kafka semantics - consumer groups, partitions, committed positions across restarts,
-//! transactions and the exactly-once pipeline - live in `tests/integration_rdkafka.rs` against a
-//! live cluster.
+//! atomic visibility, zombie fencing and the exactly-once pipeline - live in
+//! `tests/integration_rdkafka.rs` against a live cluster.
 
 #![cfg(feature = "testing")]
 
