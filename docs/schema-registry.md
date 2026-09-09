@@ -1,11 +1,10 @@
 # Schema Registry
 
-Kafka deployments standardized on Confluent Schema Registry frame their payloads with the
-Confluent wire format - a zero magic byte, a big-endian 4-byte schema id, then the encoded
-datum - and keep the schemas themselves in the registry. The `schema-registry` cargo feature
-integrates all of it as **middleware on the async edges** - the subscription's delivery path
-on the way in, the app's publish pipeline on the way out - so handlers, codecs, and the whole
-runtime stay on plain JSON (the default codec).
+Payloads on registry-backed topics carry the Confluent wire format: a zero magic byte, a
+big-endian 4-byte schema id, then the encoded datum. The `schema-registry` feature converts
+payloads between that format and plain JSON as **middleware on the async edges** - the
+subscription's delivery path on the way in, the app's publish pipeline on the way out. Handlers,
+codecs and the rest of the runtime stay on plain JSON, the default codec.
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:wiring"
@@ -13,86 +12,94 @@ runtime stay on plain JSON (the default codec).
 
 ## The client
 
-`SchemaRegistry` constructs synchronously and does no I/O until the first lookup; clones share
-one schema cache, so an id or a subject resolves over the network once per process. Basic and
-bearer authentication are builder options, TLS comes via rustls.
+`SchemaRegistry::new` records the URL and sends no request until the first lookup. You can set
+basic or bearer authentication on the client, and HTTPS goes through rustls. Every clone of the
+client reads and writes one cache, so a schema id or a subject is fetched over the network once
+per process.
 
 ## Consuming: transcode on the way in
 
-`KafkaBroker::schema_registry(sr)` makes every subscription transcode Confluent-framed
-deliveries to plain JSON while still on the async consume path: the JSON Schema flavor loses
-its envelope, Avro and Protobuf datums (with their features enabled) convert through the
-registry schema the envelope references. Handlers are ordinary subscribers on the default
-codec:
+`KafkaBroker::schema_registry(sr)` puts the client on the consume edge: every subscription of
+that broker converts a framed delivery to plain JSON before the payload reaches the codec. A
+JSON Schema payload keeps its bytes and loses the envelope. An Avro or Protobuf datum converts
+through the registry schema its envelope names. Handlers are then ordinary subscribers on the
+default codec:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:handler"
 ```
 
-Non-framed payloads pass through untouched, so mixed topics keep working. A registry outage
-or a framed payload whose format feature is off passes through un-transcoded with a warning,
-and the handler's decode failure policy decides the delivery's fate - a broken registry never
-stalls the consumer.
+A payload without the envelope passes through untouched, so a topic that mixes framed and plain
+records keeps working. A delivery the middleware cannot convert passes through un-transcoded
+with a warning: the registry answered with an error, or the payload's format feature is off. The
+subscriber's decode failure policy then decides what happens to that delivery.
 
 ## Publishing: frame on the way out
 
-`SchemaFrame` is publish middleware - the publish-side counterpart of the core's consume
-layers - added app-wide with `RustStream::publish_layer`. For every publish flowing through
-the app's pipeline it resolves the destination topic's subject and frames the plain-JSON
-payload by the subject's **registered flavor**: a JSON Schema subject keeps its bytes under
-the envelope, an Avro or Protobuf subject transcodes (with the matching feature). Nothing is
-declared per publisher; the registry is the source of truth for what each topic speaks.
+`SchemaFrame` is the publish middleware; you add it app-wide with `RustStream::publish_layer`.
+For every publish that goes through the app's pipeline it resolves the destination topic's
+subject and frames the plain-JSON payload in that subject's **registered flavor**: a JSON Schema
+subject keeps its bytes under the envelope, an Avro or Protobuf subject converts. The registry
+decides a topic's wire format, and no publisher declares it.
 
-A topic whose subject the registry does not know publishes untouched - mixed registry/plain
-topologies need no configuration. The miss is cached and logged once per subject, so plain
-topics pay no per-publish round-trip (a subject registered later is picked up after a restart
-or an explicit `warm`). A registry outage or a payload that does not fit the schema fails the
-publish - a publishing handler nacks and retries rather than putting a mis-framed record on
-the topic.
+The subject follows Confluent's `TopicName` strategy by default, `{topic}-value`. You can change
+the mapping with `subject_strategy`, or pin one topic's subject with `subject(topic, subject)`.
+The `RecordName` and `TopicRecordName` strategies name the subject after the record type, which
+the publish path does not pass, so the subject comes out empty or ending in a dash. Either one
+needs the subject pinned per topic.
 
-The subject comes from the Confluent `TopicName` strategy (`{topic}-value`) by default;
-`subject_strategy` changes the mapping and `subject(topic, subject)` pins one explicitly (the
-`RecordName` strategies need the record's name, which the publish path does not know).
+A topic whose subject the registry does not know publishes untouched, so one app serves
+registry-backed and plain topics without configuration. `SchemaFrame` remembers the unregistered
+subject and logs it once; a subject registered afterwards takes effect after a restart or an
+explicit `warm`.
 
-Subjects resolve **lazily on the async publish path** - when the subject already exists in the
-registry there is no startup ceremony at all. Producers that own their schemas register them
-once at startup:
+A publish that cannot be framed returns an error: the registry answered with an error, or the
+subject's schema rejects the payload. A publishing handler then nacks its delivery for a retry,
+so no mis-framed record reaches the topic.
+
+A subject resolves **lazily, on the first publish** to its topic, so a service whose subjects
+already exist in the registry needs no startup step. A producer that owns its schemas registers
+them at startup, from the message type itself:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:types"
 ```
 
-`register` takes a raw definition (idempotent registry-side), `register_json::<T>` derives a
-JSON Schema from the type via schemars (re-exported), and `warm` only resolves an existing
-subject - for deployments where producers must not create schemas, which is Confluent's own
-production guidance (`auto.register.schemas` off).
+The reply type declares the destination: `#[outgoing(name = "confirmations")]` names the topic,
+and the subscriber writes a bare `publish` clause.
 
-Publishing handlers, reply publishers, the partition-scoped transactional publishers, and the
-EOS pipeline all compose unchanged: they publish through the app's pipeline, where the layer
-sits. A publisher paired straight off a connected broker outside the runtime bypasses the
-pipeline and publishes exactly what it is given.
+`register` posts a definition you wrote yourself, and an identical schema keeps the id it already
+has. `register_json::<T>` derives the JSON Schema from the type through schemars, which the crate
+re-exports. `warm` registers nothing: it resolves an existing subject and caches it, for
+deployments where producers must not create schemas (`auto.register.schemas` off).
+
+Every publisher the runtime pairs publishes through the app's pipeline, so replies, transactional
+publishers, the per-partition publishers and the exactly-once pipeline are framed with nothing to
+configure at the include site. A publisher you pair off a connected broker yourself is outside
+the pipeline and publishes exactly what it is given.
 
 ## Formats
 
-- **JSON** (this feature, works with the default `json` codec alone): envelope on and off,
-  documents untouched. Documents are not validated against the registered schema; the handler
-  type's shape is the effective contract.
-- **Avro** (`avro` feature): datum to JSON on consume, JSON to datum on publish, both against
-  the registry schema; `register_avro::<T>` derives the schema from the type (the `AvroSchema`
-  derive is re-exported):
+- **JSON** (`schema-registry` alone, on the default `json` codec): the envelope goes on and comes
+  off, the document itself is untouched. The document is not checked against the registered
+  schema, so the handler type is the effective contract.
+- **Avro** (`avro` feature): datums convert through the registry schema on both edges.
+  `register_avro::<T>` derives the schema from the type, and the `AvroSchema` derive is
+  re-exported:
 
     ```rust
     --8<-- "crates/ruststream-rdkafka/examples/kafka_avro.rs:wiring"
     ```
-- **Protobuf** (`protobuf` feature): messages to JSON and back through descriptors compiled
-  from the registry's `.proto` source (well-known types available; schema references beyond
-  them are not resolved), message-indexes handled on both sides - nested and multi-message
-  schemas included. Outgoing messages default to the schema's first top-level message; pin
-  another per topic with `SchemaFrame::message("topic", "pkg.Message")`:
+- **Protobuf** (`protobuf` feature): messages convert to JSON and back through descriptors
+  compiled from the registry's `.proto` source. The well-known types are available; registry
+  schema references beyond them are not resolved. Message indexes are read and written on both
+  edges, so nested and multi-message schemas work. An outgoing message uses the schema's first
+  top-level message; you can name another per topic with
+  `SchemaFrame::message("topic", "pkg.Message")`:
 
     ```rust
     --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf.rs:wiring"
     ```
 
-The transcoding trade-off: one JSON hop per message on registry topics buys a
-single uniform handler model - the same struct, the same codec, any wire format.
+An Avro or Protobuf message is converted through JSON on each edge. That is the cost of one
+handler model: the same struct and the same codec for every wire format.
