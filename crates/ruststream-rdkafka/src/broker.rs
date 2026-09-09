@@ -194,8 +194,10 @@ impl KafkaBroker {
     /// The consumer group used by subscriptions that do not set one themselves
     /// ([`KafkaTopic::group`](crate::KafkaTopic::group) overrides it per subscription).
     ///
-    /// Kafka requires a group to subscribe, so the bare-string `#[subscriber("orders")]` form
-    /// needs this; a subscription that ends up with no group at all is a startup error.
+    /// Joining a group is what the bare-string `#[subscriber("orders")]` form does, so it needs
+    /// this; a subscription that ends up with no group at all is a startup error. A subscription
+    /// that names its partitions with [`KafkaTopic::partitions`](crate::KafkaTopic::partitions)
+    /// joins no group and needs none.
     #[must_use]
     pub fn default_group(mut self, group: impl Into<String>) -> Self {
         self.default_group = Some(group.into());
