@@ -1,8 +1,7 @@
 # Kafka broker
 
-`ruststream-rdkafka` is the Apache Kafka broker for the
-[RustStream](https://github.com/powersemmi/ruststream) messaging framework, backed by
-[rdkafka](https://docs.rs/rdkafka) / librdkafka.
+`ruststream-rdkafka` runs a [RustStream](https://github.com/powersemmi/ruststream) service on
+Apache Kafka, through [rdkafka](https://docs.rs/rdkafka) / librdkafka.
 
 ```toml
 [dependencies]
@@ -23,17 +22,21 @@ A minimal service is one handler and one app function:
 
 ## The transport model
 
-- A subscription is one consumer joining one consumer group on one topic.
-  [`KafkaTopic`](topics.md) describes it; the bare-string `#[subscriber("orders")]` form uses
-  the broker's `default_group` (Kafka cannot subscribe without a group).
-- The outgoing message name is the destination topic, and the partition-key header becomes the
-  record's native key, so Kafka itself keeps per-key ordering (see [Publishing](publishing.md)).
-- Settlement follows Kafka's committed-position model: the `Commit` mode picks between
-  librdkafka auto-commit (`Auto`, the default) and precise per-message acknowledgement over a
-  contiguous watermark (`Tracked`). See [Topics and groups](topics.md).
-- Configuration delegates to librdkafka: unset options mean librdkafka defaults, and raw
-  `config(key, value)` passthroughs on the broker, the producer, and the descriptor reach every
-  property this crate does not surface as a typed option.
+- A subscription is one consumer reading one topic. [`KafkaTopic`](topics.md) describes it, the
+  consumer group included; the bare-string `#[subscriber("orders")]` form takes the group from
+  the broker's `default_group`.
+- The name an outgoing message declares is the destination topic. A reply type that declares
+  `#[outgoing(name = "confirmations")]` is published to `confirmations`, and the subscriber
+  writes the bare `publish` clause. A reply type that declares no name is published to the topic
+  the mount site names, `publish("enriched-orders")`. A partition-key header becomes the record's
+  native key, so Kafka itself keeps per-key ordering (see [Publishing](publishing.md)).
+- Settlement follows Kafka's committed position rather than a per-message frame. `Commit::Auto`,
+  the default, leaves that position to librdkafka's auto-commit; `Commit::Tracked` makes each
+  `ack` a precise per-message acknowledgement over a contiguous watermark. See
+  [Topics and groups](topics.md).
+- Configuration delegates to librdkafka. An option you leave unset keeps the librdkafka default,
+  and `config(key, value)` on the broker and on the descriptor, `producer_config(key, value)` for
+  the producer, reach every property this crate does not surface as a typed option.
 
 ## The lifecycle ladder
 
@@ -51,20 +54,23 @@ ConnectedKafkaBroker               subscriptions and live publishers hang off th
 ClosedKafkaBroker                  terminal witness: unflushed_records()
 ```
 
-`KafkaBroker::new` recording configuration instead of connecting is what lets a service compose
-with the synchronous `#[ruststream::app]` builder: the runtime calls `connect` once at startup,
-opens every subscription against the connected form, and shuts it down at the end. Only the
-owner of the handle gets the compile-time guarantee - handles that alias the connection
-(publishers paired earlier, subscribers still open) report `KafkaError::Closed` after the
+`KafkaBroker::new` only records configuration, so the service composes with the synchronous
+`#[ruststream::app]` builder. The runtime calls `connect` once at startup, opens every
+subscription against the connected broker, and shuts it down at the end.
+
+The compile-time guarantee belongs to the owner of the handle. Handles that alias the connection
+(publishers instantiated earlier, subscribers still open) return `KafkaError::Closed` after the
 shutdown instead of succeeding against a dead connection.
 
-Publishers follow the same split. `KafkaPublish` - and its `transactional_id`, `per_partition`,
-and `KafkaEosPublish` transitions - is a **policy**: pure declaration, constructible anywhere,
-with no publish surface of its own. The include site names the policy
-(`b.include(handler).out(Reply, policy)` for the reply, `.out(marker, policy)` for an `Out<..>`
-slot), and the runtime pairs it against the connected broker into the **live** publisher the
-handler receives. A handler that only replies names nothing at all: the broker's default policy
-is used.
+Publishers follow the same split. `KafkaPublish` is the **policy** that constructs the **live**
+`KafkaPublisher`; `transactional_id` turns it into the transactional policy, `per_partition`
+turns that one into the per-partition policy, and `KafkaEosPublish` is the policy of an
+exactly-once pipeline.
+
+You name the policy when you register the handler (`b.include(handler).out(Reply, policy)` for
+the reply, `.out(marker, policy)` for an `Out<..>` slot), and at startup the policy instantiates
+the publisher on the connected broker. A handler that only replies names nothing, and the
+broker's default policy constructs the publisher.
 
 ## Capabilities
 
@@ -72,14 +78,14 @@ The framework's optional capability traits, and which of them this broker implem
 
 | Capability | Native | Detail |
 |---|---|---|
-| `Subscribe` | yes | A bare-string `#[subscriber("orders")]` resolves through the broker's [default consumer group](topics.md#consumer-groups). |
-| `BatchSubscriber` | yes | A batch is one delivery plus everything librdkafka has already fetched, with no added waiting, cut off at the size the mount site names: [Batches](topics.md#batches). |
-| `TransactionalPublisher` | yes | `KafkaTransactionalPublisher` drives the producer's transaction API, one open transaction per handle: [Transactions](publishing.md#transactions). |
-| `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows use [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
-| `RequestReply` | no | The protocol has no reply correlation; request/reply on Kafka is an application-level reply topic plus a correlation header. |
-| `Partitioned` | yes | The partition key of a delivery is the record's native Kafka key: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
-| `Seekable` + `Positioned` | yes | `KafkaSeeker` repositions the partitions this consumer holds, reached from a handler through the `SeekHandle` context key next to the delivery's own `Position`; the in-process test broker mints the same seeker over its retained log, so a service that replays is testable without a cluster: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
-| `DescribeServer` | yes | The broker reports its bootstrap servers under the `kafka` protocol for generated AsyncAPI documents. |
+| `Subscribe` | yes | `#[subscriber("orders")]` subscribes by topic name alone, in the broker's [default consumer group](topics.md#consumer-groups). |
+| `BatchSubscriber` | yes | Consume whole batches, one delivery plus everything librdkafka has already fetched, with no added waiting, up to the size the mount site names: [Batches](topics.md#batches). |
+| `TransactionalPublisher` | yes | Publish inside Kafka transactions, one open transaction per handle: [Transactions](publishing.md#transactions). |
+| `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows take [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
+| `RequestReply` | no | Kafka has no reply correlation; request/reply is a reply topic of your own plus a correlation header. |
+| `Partitioned` | yes | Ordered worker lanes, keyed by the delivery's source partition or by the record key under `LaneKey::RecordKey`: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
+| `Seekable` + `Positioned` | yes | Reposition the partitions this consumer holds from a handler, through the `SeekHandle` context key next to the delivery's own `Position`: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
+| `DescribeServer` | yes | The generated AsyncAPI document lists the bootstrap servers under the `kafka` protocol. |
 
 ## Scaffold a service
 
@@ -88,8 +94,8 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 ```
 
 The starter wires one Kafka broker with a default consumer group, a tracked-commit subscriber
-with a retry/dead-letter pipeline and a published reply, and the `#[ruststream::app]` entry
-point (`run` / `asyncapi gen`).
+with a retry and dead-letter pipeline, and a published reply. Its `#[ruststream::app]` entry
+point gives the binary the `run` and `asyncapi gen` commands.
 
 ## Guides
 
