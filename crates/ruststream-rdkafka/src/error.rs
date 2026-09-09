@@ -1,6 +1,8 @@
 //! The crate error type shared by the broker, publishers, and subscribers.
 
 use std::error::Error as StdError;
+#[cfg(feature = "schema-registry")]
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -88,6 +90,22 @@ pub enum KafkaError {
     #[cfg(feature = "schema-registry")]
     #[error("schema registry error: {0}")]
     SchemaRegistry(#[source] Box<dyn StdError + Send + Sync>),
+
+    /// A Schema Registry request did not answer within the client's request timeout.
+    ///
+    /// A registry that accepts the connection and then goes silent is the case this separates
+    /// from an outright failure: both edges resolve schemas on the async delivery path, so
+    /// without a deadline one silent registry holds a delivery for as long as it stays silent.
+    /// [`SchemaRegistry::request_timeout`](crate::SchemaRegistry::request_timeout) sets the
+    /// deadline.
+    #[cfg(feature = "schema-registry")]
+    #[error("schema registry request {request} did not answer within {timeout:?}")]
+    SchemaRegistryTimeout {
+        /// The registry path the request targeted, for example `/schemas/ids/7`.
+        request: String,
+        /// The deadline that expired.
+        timeout: Duration,
+    },
 }
 
 impl KafkaError {

@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ruststream::Publisher;
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
@@ -31,6 +32,12 @@ use crate::error::KafkaError;
 
 /// The zero magic byte opening every Confluent-framed payload.
 const WIRE_MAGIC: u8 = 0;
+
+/// The deadline one registry request gets unless the client names another.
+///
+/// Ten seconds sits above anything a healthy registry needs, a cold one and a slow hop
+/// included, and far below the stall an absent deadline allows on the delivery path.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The schema flavors the registry stores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +126,8 @@ impl SubjectStrategy {
     }
 }
 
+// No `Debug`: the variants hold credentials, and `SchemaRegistry`'s own `Debug` leaves them out.
+#[derive(Clone)]
 enum Auth {
     None,
     Basic { user: String, password: String },
@@ -129,6 +138,7 @@ struct RegistryInner {
     base_url: String,
     http: reqwest::Client,
     auth: Auth,
+    timeout: Duration,
     by_id: Mutex<HashMap<u32, Arc<RegisteredSchema>>>,
     by_subject: Mutex<HashMap<String, u32>>,
     #[cfg(feature = "avro")]
@@ -161,6 +171,7 @@ impl fmt::Debug for SchemaRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SchemaRegistry")
             .field("base_url", &self.inner.base_url)
+            .field("request_timeout", &self.inner.timeout)
             .finish_non_exhaustive()
     }
 }
@@ -199,6 +210,7 @@ impl SchemaRegistry {
                 base_url,
                 http: reqwest::Client::new(),
                 auth: Auth::None,
+                timeout: DEFAULT_REQUEST_TIMEOUT,
                 by_id: Mutex::new(HashMap::new()),
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
@@ -213,25 +225,59 @@ impl SchemaRegistry {
     /// client out: clones share the configuration they were made from.
     #[must_use]
     pub fn basic_auth(self, user: impl Into<String>, password: impl Into<String>) -> Self {
-        self.with_auth(Auth::Basic {
-            user: user.into(),
-            password: password.into(),
-        })
+        let timeout = self.inner.timeout;
+        self.reconfigure(
+            Auth::Basic {
+                user: user.into(),
+                password: password.into(),
+            },
+            timeout,
+        )
     }
 
     /// Bearer-token authentication for every registry request. Configure before handing the
     /// client out.
     #[must_use]
     pub fn bearer_token(self, token: impl Into<String>) -> Self {
-        self.with_auth(Auth::Bearer(token.into()))
+        let timeout = self.inner.timeout;
+        self.reconfigure(Auth::Bearer(token.into()), timeout)
     }
 
-    fn with_auth(self, auth: Auth) -> Self {
+    /// The deadline for one registry request, counted from the start of the request until its
+    /// response body is read. The default is ten seconds.
+    ///
+    /// Both edges resolve schemas while a delivery or a publish waits, so this is what bounds
+    /// a registry that accepts the connection and then goes silent. On expiry the request
+    /// returns [`KafkaError::SchemaRegistryTimeout`], which names the path and the deadline: a
+    /// framed delivery then reaches the handler un-transcoded with a warning, and a publish
+    /// returns the error so the publishing handler asks for a redelivery.
+    ///
+    /// Configure before handing the client out.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use ruststream_rdkafka::SchemaRegistry;
+    ///
+    /// let sr = SchemaRegistry::new("http://localhost:8081")
+    ///     .request_timeout(Duration::from_secs(2));
+    /// # let _ = sr;
+    /// ```
+    #[must_use]
+    pub fn request_timeout(self, timeout: Duration) -> Self {
+        let auth = self.inner.auth.clone();
+        self.reconfigure(auth, timeout)
+    }
+
+    fn reconfigure(self, auth: Auth, timeout: Duration) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
                 base_url: self.inner.base_url.clone(),
                 http: self.inner.http.clone(),
                 auth,
+                timeout,
                 by_id: Mutex::new(HashMap::new()),
                 by_subject: Mutex::new(HashMap::new()),
                 #[cfg(feature = "avro")]
@@ -244,7 +290,11 @@ impl SchemaRegistry {
 
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         let url = format!("{}{path}", self.inner.base_url);
-        let request = self.inner.http.request(method, url);
+        let request = self
+            .inner
+            .http
+            .request(method, url)
+            .timeout(self.inner.timeout);
         match &self.inner.auth {
             Auth::None => request,
             Auth::Basic { user, password } => request.basic_auth(user, Some(password)),
@@ -252,16 +302,28 @@ impl SchemaRegistry {
         }
     }
 
+    /// Turns one request failure into a crate error, telling a silent registry apart from a
+    /// failing one: only the expiry of this client's deadline becomes the timeout error.
+    fn failed(&self, path: &str, err: reqwest::Error) -> KafkaError {
+        if err.is_timeout() {
+            return KafkaError::SchemaRegistryTimeout {
+                request: path.to_owned(),
+                timeout: self.inner.timeout,
+            };
+        }
+        KafkaError::schema_registry(err)
+    }
+
     async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, KafkaError> {
         let response = self
             .request(reqwest::Method::GET, path)
             .send()
             .await
-            .map_err(KafkaError::schema_registry)?;
+            .map_err(|err| self.failed(path, err))?;
         let response = response
             .error_for_status()
             .map_err(KafkaError::schema_registry)?;
-        response.json().await.map_err(KafkaError::schema_registry)
+        response.json().await.map_err(|err| self.failed(path, err))
     }
 
     /// The schema registered under `id`, from the cache or the registry.
@@ -316,19 +378,19 @@ impl SchemaRegistry {
             "schema": definition,
             "schemaType": schema_type.as_api(),
         });
+        let path = format!("/subjects/{subject}/versions");
         let response = self
-            .request(
-                reqwest::Method::POST,
-                &format!("/subjects/{subject}/versions"),
-            )
+            .request(reqwest::Method::POST, &path)
             .json(&body)
             .send()
             .await
-            .map_err(KafkaError::schema_registry)?
+            .map_err(|err| self.failed(&path, err))?
             .error_for_status()
             .map_err(KafkaError::schema_registry)?;
-        let registered: RegisterResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
+        let registered: RegisterResponse = response
+            .json()
+            .await
+            .map_err(|err| self.failed(&path, err))?;
         let schema = Arc::new(RegisteredSchema {
             id: registered.id,
             schema_type,
@@ -371,22 +433,22 @@ impl SchemaRegistry {
         &self,
         subject: &str,
     ) -> Result<Option<Arc<RegisteredSchema>>, KafkaError> {
+        let path = format!("/subjects/{subject}/versions/latest");
         let response = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/subjects/{subject}/versions/latest"),
-            )
+            .request(reqwest::Method::GET, &path)
             .send()
             .await
-            .map_err(KafkaError::schema_registry)?;
+            .map_err(|err| self.failed(&path, err))?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let response = response
             .error_for_status()
             .map_err(KafkaError::schema_registry)?;
-        let fetched: LatestVersionResponse =
-            response.json().await.map_err(KafkaError::schema_registry)?;
+        let fetched: LatestVersionResponse = response
+            .json()
+            .await
+            .map_err(|err| self.failed(&path, err))?;
         let schema = Arc::new(RegisteredSchema {
             id: fetched.id,
             schema_type: SchemaType::from_api(fetched.schema_type.as_deref()),
