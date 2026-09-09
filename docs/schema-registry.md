@@ -17,6 +17,11 @@ basic or bearer authentication on the client, and HTTPS goes through rustls. Eve
 client reads and writes one cache, so a schema id or a subject is fetched over the network once
 per process.
 
+Every registry request carries a deadline, ten seconds by default, which you can change with
+`request_timeout`. A delivery or a publish waits on the lookup, so the deadline is what bounds a
+registry that accepts the connection and then goes silent. The request returns an error when the
+deadline expires, and both edges treat it like any other registry error.
+
 ## Consuming: transcode on the way in
 
 `KafkaBroker::schema_registry(sr)` puts the client on the consume edge: every subscription of
@@ -31,7 +36,7 @@ default codec:
 
 A payload without the envelope passes through untouched, so a topic that mixes framed and plain
 records keeps working. A delivery the middleware cannot convert passes through un-transcoded
-with a warning: the registry answered with an error, or the payload's format feature is off. The
+with a warning: the schema lookup returned an error, or the payload's format feature is off. The
 subscriber's decode failure policy then decides what happens to that delivery.
 
 ## Publishing: frame on the way out
@@ -53,7 +58,7 @@ registry-backed and plain topics without configuration. `SchemaFrame` remembers 
 subject and logs it once; a subject registered afterwards takes effect after a restart or an
 explicit `warm`.
 
-A publish that cannot be framed returns an error: the registry answered with an error, or the
+A publish that cannot be framed returns an error: the subject lookup returned an error, or the
 subject's schema rejects the payload. A publishing handler then nacks its delivery for a retry,
 so no mis-framed record reaches the topic.
 
