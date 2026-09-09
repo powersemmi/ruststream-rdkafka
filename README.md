@@ -90,12 +90,12 @@ built-in; other backends (gssapi, dynamic linking, ...) can be enabled by depend
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 struct Order {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Outgoing, PartialEq, Serialize)]
 struct Confirmation {
     id: u64,
 }
