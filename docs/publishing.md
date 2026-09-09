@@ -215,6 +215,14 @@ argument, and a handler reads its own from a `Ctx<Source>` parameter like any ot
 `KafkaContext` field. A handler cannot take the pipeline as an `Out` slot: a slot's bound names a
 capability, and this crate declares none for the pipeline's explicit form.
 
+The live pipeline reaches a handler through the startup hook.
+`b.after_startup(EosPublish::new("enrich-svc-1"), hook)` calls `hook` with the `EosPipeline` once
+the broker is connected, and the hook takes no application state, so the service passes the
+pipeline between the two through a cell: an `Arc<OnceLock<EosPipeline>>` cloned into the state
+`on_startup` returns and into the hook that fills it. The handler reads that state through
+`State<..>` and publishes with `pipeline.publish(&source, msg)`. Name the id in one place: a
+second pipeline on the same transactional id fences the first.
+
 Publishes join the pipeline's open window. Every `commit_interval` (100ms by default, the Kafka
 Streams exactly-once default) the window closes: the pipeline waits for its participants to
 settle, adds the settled positions and the consumer's group metadata to the transaction, and
