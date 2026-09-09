@@ -375,7 +375,9 @@ struct PlanOrder {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// Two mount sites send this item to two different topics, so the type declares none and each
+// include names its own.
+#[derive(Debug, Serialize, Outgoing)]
 struct PlanItem {
     order_id: u64,
 }
@@ -475,6 +477,96 @@ async fn round_robin_leaves_keyed_replies_alone() {
         messages[0].headers().get(PARTITION_HEADER).is_none(),
         "a keyed reply keeps its key-implied placement",
     );
+}
+
+// -------------------------------------------------------------- where a reply lands on Kafka
+
+/// The request both proofs below answer. It names no topic of its own, so each test injects it
+/// at the topic its handler reads.
+#[derive(Debug, Serialize, Deserialize, Outgoing)]
+struct ReceiptRequest {
+    id: u64,
+}
+
+/// A receipt always lands on `receipts`, so the topic belongs to the type.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+#[outgoing(name = "receipts")]
+struct Receipt {
+    id: u64,
+}
+
+/// An acknowledgement leaves its topic to whoever mounts the handler.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+struct Acknowledgement {
+    id: u64,
+}
+
+#[subscriber("receipt-requests", publish)]
+async fn issue_receipt(req: &ReceiptRequest) -> Receipt {
+    Receipt { id: req.id }
+}
+
+#[subscriber("ack-requests", publish("acknowledgements"))]
+async fn acknowledge(req: &ReceiptRequest) -> Acknowledgement {
+    Acknowledgement { id: req.id }
+}
+
+/// A reply type that names its own topic lands there, and the record still carries the key the
+/// chain stamped on it: on Kafka the destination and the placement stay independent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_reply_lands_at_the_topic_its_type_names() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(issue_receipt)
+                .out(Reply, KafkaPublish::default())
+                .transform(KeyStamp);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .message(&ReceiptRequest { id: 7 })
+        .to("receipt-requests")
+        .publish()
+        .await
+        .expect("publish");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("receipt-requests")
+        .assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<Receipt>("receipts")
+        .assert_called_once()
+        .with(&Receipt { id: 7 })
+        .with_header(PARTITION_KEY_HEADER, "tenant-1");
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// A reply type that names no topic lands where the include site's clause says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_undeclared_reply_lands_at_the_topic_the_mount_site_names() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(acknowledge).out(Reply, KafkaPublish::default());
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .message(&ReceiptRequest { id: 3 })
+        .to("ack-requests")
+        .publish()
+        .await
+        .expect("publish");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("ack-requests")
+        .assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<Acknowledgement>("acknowledgements")
+        .assert_called_once()
+        .with(&Acknowledgement { id: 3 });
+
+    tb.shutdown().await.expect("shutdown");
 }
 
 #[derive(Debug, Serialize, Outgoing)]

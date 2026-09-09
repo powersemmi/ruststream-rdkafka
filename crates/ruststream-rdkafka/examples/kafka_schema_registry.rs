@@ -10,7 +10,7 @@
 //! ```
 
 use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream::subscriber;
+use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::schema_registry::JsonSchema;
 use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,10 @@ struct Order {
     id: i64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+// The reply topic is a property of the confirmation itself, so the type declares it and the
+// subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing, JsonSchema)]
+#[outgoing(name = "confirmations")]
 struct Confirmation {
     id: i64,
     accepted: bool,
@@ -33,7 +36,7 @@ struct Confirmation {
 // --8<-- [start:handler]
 // An ordinary handler on the default JSON codec: the broker middleware already stripped the
 // Confluent envelope (and, with the avro/protobuf features, converted the datum to JSON).
-#[subscriber("orders", publish("confirmations"))]
+#[subscriber("orders", publish)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
         id: order.id,

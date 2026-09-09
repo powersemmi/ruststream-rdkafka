@@ -9,7 +9,7 @@
 //! ```
 
 use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream::subscriber;
+use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry, SchemaType};
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,10 @@ struct Order {
     id: i64,
 }
 
-#[derive(Debug, Serialize)]
+// The reply topic is a property of the confirmation itself, so the type declares it and the
+// subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "confirmations")]
 struct Confirmation {
     id: i64,
     accepted: bool,
@@ -39,7 +42,7 @@ struct Confirmation {
 // --8<-- [end:types]
 
 // An ordinary handler on the default JSON codec: the middleware converts both directions.
-#[subscriber("orders", publish("confirmations"))]
+#[subscriber("orders", publish)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
         id: order.id,

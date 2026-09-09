@@ -7,7 +7,8 @@
 
 use ruststream::runtime::{App, AppInfo, Reply, RustStream};
 use ruststream::{
-    Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber, subscriber,
+    Broker, ConnectedBroker, IncomingMessage, Outgoing, OutgoingMessage, Publisher, Subscriber,
+    subscriber,
 };
 use ruststream_rdkafka::schema_registry::{JsonSchema, parse_envelope};
 use ruststream_rdkafka::{
@@ -172,7 +173,9 @@ async fn live_registry_roundtrips_register_warm_and_fetch() {
 /// literal, so runs share it and pick their own messages out by a unique marker id.
 const FRAMED_TOPIC: &str = "sr-json-frames-placeholder";
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+// The relay republishes the order it read, so the type declares no topic of its own: the run's
+// reply topic stays the mount site's.
+#[derive(Debug, Clone, Serialize, Deserialize, Outgoing, JsonSchema)]
 struct SrOrder {
     id: i64,
 }

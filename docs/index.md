@@ -63,8 +63,8 @@ and `KafkaEosPublish` transitions - is a **policy**: pure declaration, construct
 with no publish surface of its own. The include site names the policy
 (`b.include(handler).out(Reply, policy)` for the reply, `.out(marker, policy)` for an `Out<..>`
 slot), and the runtime pairs it against the connected broker into the **live** publisher the
-handler receives. A handler that only replies to its `publish("dest")` topic names nothing at
-all: the broker's default policy is used.
+handler receives. A handler that only replies names nothing at all: the broker's default policy
+is used.
 
 ## Capabilities
 

@@ -780,7 +780,7 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 /// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
 /// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
 ///
-/// A `publish("replies")` handler over an exactly-once pipeline names it as the mount site's
+/// A replying handler over an exactly-once pipeline names it as the mount site's
 /// transform step, right after the policy:
 /// `b.include(enrich).out(Reply, KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
 /// reply then joins the pipeline's open window paired with its delivery's consumed offset,

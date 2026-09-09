@@ -14,7 +14,10 @@ struct Order {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// The reply topic is a property of the confirmation itself, so the type declares it and the
+// subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "confirmations")]
 struct Confirmation {
     id: u64,
     accepted: bool,
@@ -32,7 +35,7 @@ struct Confirmation {
         .commit(Commit::Tracked)
         .assignment(Assignment::CooperativeSticky)
         .config("fetch.min.bytes", "1024"),
-    publish("confirmations")
+    publish
 )]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {

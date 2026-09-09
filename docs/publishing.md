@@ -19,8 +19,8 @@ rather than the wiring.
 
 Where a policy is named:
 
-- `b.include(handler)` alone - a `publish("dest")` handler replies through the broker's default
-  policy, `KafkaPublish::default()`.
+- `b.include(handler)` alone - a handler that returns a reply publishes it through the broker's
+  default policy, `KafkaPublish::default()`.
 - `b.include(handler).out(Reply, policy)` - the handler's reply publisher.
 - `b.include(handler).out(marker, policy).build()` - the publisher an `Out<..>` parameter
   receives, named by the slot's marker (`DefaultSlot` when the parameter declares none).

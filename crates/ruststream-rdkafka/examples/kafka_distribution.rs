@@ -16,13 +16,15 @@ struct Order {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// The work item declares the topic it lands on, so the subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "work-items")]
 struct WorkItem {
     order_id: u64,
 }
 
 // A keyless reply: nothing pins it to a partition, so distribution is the publisher's call.
-#[subscriber("orders", publish("work-items"))]
+#[subscriber("orders", publish)]
 async fn plan(order: &Order) -> WorkItem {
     WorkItem { order_id: order.id }
 }

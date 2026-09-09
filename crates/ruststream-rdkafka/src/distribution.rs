@@ -34,10 +34,11 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 /// use ruststream_rdkafka::prelude::*;
 /// # #[derive(serde::Deserialize)]
 /// # struct Order { id: u64 }
-/// # #[derive(serde::Serialize)]
+/// # #[derive(serde::Serialize, Outgoing)]
+/// # #[outgoing(name = "work-items")]
 /// # struct WorkItem { order_id: u64 }
 ///
-/// #[ruststream::subscriber("orders", publish("work-items"))]
+/// #[ruststream::subscriber("orders", publish)]
 /// async fn plan(order: &Order) -> WorkItem {
 ///     WorkItem { order_id: order.id }
 /// }

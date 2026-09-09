@@ -8,7 +8,7 @@
 //! ```
 
 use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream::subscriber;
+use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::avro::AvroSchema;
 use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry};
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,10 @@ struct Order {
     item: String,
 }
 
-#[derive(Debug, Serialize, AvroSchema)]
+// The reply topic is a property of the confirmation itself, so the type declares it and the
+// subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing, AvroSchema)]
+#[outgoing(name = "confirmations")]
 struct Confirmation {
     id: i64,
     accepted: bool,
@@ -32,7 +35,7 @@ struct Confirmation {
 // --8<-- [start:handler]
 // An ordinary handler on the default JSON codec: the middleware already converted the Avro
 // datum to JSON on the way in, and converts the reply back to Avro on the way out.
-#[subscriber("orders", publish("confirmations"))]
+#[subscriber("orders", publish)]
 async fn confirm(order: &Order) -> Confirmation {
     let _ = &order.item;
     Confirmation {

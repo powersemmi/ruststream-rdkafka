@@ -31,8 +31,9 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, OutgoingMessage, Positioned,
-    PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher, nonzero,
+    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing, OutgoingMessage,
+    Positioned, PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
+    nonzero,
 };
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
@@ -1650,7 +1651,9 @@ async fn assigned_lane(
     HandlerOutcome::ack()
 }
 
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+// The exactly-once relay republishes the payload it read, so the type declares no topic of its
+// own: the reply topic stays the mount site's.
+#[derive(Debug, Clone, serde::Serialize, Deserialize, Outgoing)]
 struct OrderPayload {
     partition: i32,
     seq: u32,

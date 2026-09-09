@@ -17,7 +17,9 @@ use ruststream_rdkafka::KafkaError;
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// An order is read on one topic and relayed onto another, so it declares no topic of its own:
+// the enrichment's mount site names where the relayed copy lands.
+#[derive(Debug, Clone, Serialize, Deserialize, Outgoing)]
 struct Order {
     id: u64,
     items: Vec<String>,
