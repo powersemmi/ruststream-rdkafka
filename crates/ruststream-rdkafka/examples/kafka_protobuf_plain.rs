@@ -49,9 +49,8 @@ struct Confirmation {
 // --8<-- [end:types]
 
 // --8<-- [start:handler]
-// An ordinary function over ordinary types: no `IncomingFrame`, no `decode_framed`, no
-// `Subject::frame`, and no publish call. The delivery arrived past its envelope, and the reply
-// leaves before one.
+// An ordinary function over ordinary types: nothing about the wire in the signature, and no
+// publish call. The delivery arrived past its envelope, and the reply leaves before one.
 #[subscriber("orders", publish)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {

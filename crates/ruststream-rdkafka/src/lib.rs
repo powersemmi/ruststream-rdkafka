@@ -70,8 +70,6 @@ mod tracker;
 #[cfg(feature = "avro")]
 pub mod avro;
 pub mod context;
-#[cfg(feature = "schema-registry")]
-pub mod frame;
 pub mod prelude;
 #[cfg(feature = "protobuf")]
 pub mod protobuf;
@@ -84,8 +82,6 @@ pub use broker::{ClosedKafkaBroker, ConnectedKafkaBroker, KafkaBroker};
 pub use distribution::RoundRobin;
 pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, KafkaEosPublish, SourceOffset};
 pub use error::KafkaError;
-#[cfg(feature = "schema-registry")]
-pub use frame::{IncomingFrame, OutgoingFrame};
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 #[cfg(feature = "protobuf")]
 pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};

@@ -1,20 +1,21 @@
-//! Protobuf on the byte lanes, and the JSON transcode it replaces.
+//! Protobuf as a self-serializing type, and the JSON transcode it replaces.
 //!
 //! A `prost`-generated message already owns its byte layout, and unlike an Avro model it is not
-//! a serde type - so on a topic with no registry it rides the core's byte lanes directly, with
-//! `#[derive(Serialized, Deserialized)]` and `#[wire(prost)]` and no help from this crate at all.
+//! a serde type - so it can never reach the codec position, and it rides the core's byte lanes
+//! itself instead. The handler takes the generated message and returns the generated message;
+//! nothing about the wire appears in a signature.
 //!
-//! What the registry adds is the envelope, and the envelope is where this module comes in. A
-//! Confluent-framed Protobuf payload is the zero magic byte, the schema id, a message-index path
-//! naming which message of the schema was written, and then the message. The envelope rides the
-//! lane as [`IncomingFrame`] / [`OutgoingFrame`], and the two ends of the index path are handled
-//! here:
+//! What the registry adds is the envelope: the zero magic byte, the schema id, a message-index
+//! path naming which message of the schema was written, and then the message. Its two ends are
+//! handled here, and they are asymmetric on purpose:
 //!
-//! - [`decode_framed`] skips the indexes and hands the message bytes to `prost`. It needs no
-//!   registry: a generated type knows its own fields, and the index path only says which message
-//!   of the schema this is - which the reading type has already decided.
-//! - [`Subject`] resolves a subject's id and its message's index path once, at startup, so
-//!   framing a value is a pure byte operation with no I/O.
+//! - [`decode_confluent`] is what an incoming type names in `#[wire(decode = ..)]`. It steps over
+//!   the envelope and hands the message bytes to `prost`, with no registry involved: a generated
+//!   type knows its own fields, and the index path only says which message of the schema this is,
+//!   which the reading type has already decided.
+//! - the publish side needs one number, the subject's schema id, and a value cannot fetch it, so
+//!   [`ProtobufFrame`] and [`KafkaFramedPublish`] put the envelope on where the destination topic
+//!   is known.
 //!
 //! # The JSON transcode
 //!
@@ -26,70 +27,24 @@
 //! dynamic message per delivery, and it depends on the registry being reachable to decode
 //! anything at all. The two paths do not mix on one broker: a broker carrying
 //! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) transcodes every
-//! subscription it opens, so a frame-reading handler on it would be handed JSON.
+//! subscription it opens, so a generated type on it would be handed JSON.
 
 use std::collections::HashMap;
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
-use ruststream::{BytesMut, OutgoingMessage, PairError, PublishPolicy, Publisher};
+use ruststream::{OutgoingMessage, PairError, PublishPolicy, Publisher};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
-use crate::frame::{IncomingFrame, OutgoingFrame};
 use crate::publisher::{KafkaPublish, KafkaPublisher};
 use crate::schema_registry::{
     RegisteredSchema, SchemaRegistry, SchemaType, SubjectMap, SubjectStrategy, WIRE_MAGIC,
     parse_envelope,
 };
-
-/// Reads a Confluent-framed delivery into a `prost`-generated message.
-///
-/// No registry is involved, and that is the point: the envelope's message-index path says which
-/// message of the schema was written, and the reading type has already decided which one it
-/// reads, so skipping the path is all the framing costs. Fields the writer added and this type
-/// does not know are preserved as unknown fields, exactly as `prost` handles them anywhere else.
-///
-/// The schema id is available as [`IncomingFrame::schema_id`](crate::IncomingFrame::schema_id)
-/// for a service that wants to check or log which version produced a delivery.
-///
-/// # Errors
-///
-/// Returns [`KafkaError::WireFormat`] when the message-index path is truncated, or when the
-/// bytes after it are not a message of `T`.
-///
-/// # Examples
-///
-/// ```
-/// use ruststream::runtime::Deserialized;
-/// use ruststream_rdkafka::{IncomingFrame, protobuf};
-///
-/// #[derive(Clone, PartialEq, prost::Message)]
-/// struct Order {
-///     #[prost(int64, tag = "1")]
-///     id: i64,
-/// }
-///
-/// # fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// // Schema id 42, the compact `[0]` index path, then `id = 7`.
-/// let payload = [0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x08, 0x07];
-/// let frame = IncomingFrame::from_payload(&payload)?;
-///
-/// let order: Order = protobuf::decode_framed(&frame)?;
-/// assert_eq!(order.id, 7);
-/// # Ok(())
-/// # }
-/// # check().unwrap();
-/// ```
-pub fn decode_framed<T: prost::Message + Default>(
-    frame: &IncomingFrame<'_>,
-) -> Result<T, KafkaError> {
-    decode_datum(frame.schema_id(), frame.datum())
-}
 
 /// Reads a Confluent-framed delivery into a `prost`-generated message, straight off the wire.
 ///
@@ -105,9 +60,9 @@ pub fn decode_framed<T: prost::Message + Default>(
 /// Avro needs the writer schema its id names and therefore an `await`.
 ///
 /// A payload with no envelope is read as a bare message, so a topic that some producers frame
-/// and others do not still decodes. What is lost by not looking at the id is the *governance*
-/// half - which schema version a delivery claims - and a handler that needs it takes
-/// [`IncomingFrame`] and calls [`decode_framed`] instead.
+/// and others do not still decodes. What this drops is the *governance* half - which schema
+/// version a delivery claims - because a generated type reads the same fields whichever version
+/// wrote them.
 ///
 /// # Errors
 ///
@@ -146,7 +101,7 @@ pub fn decode_confluent<T: prost::Message + Default>(payload: &[u8]) -> Result<T
     }
 }
 
-/// The shared half of both decode entry points: step over the index path, read the message.
+/// Step over the index path, read the message.
 fn decode_datum<T: prost::Message + Default>(
     schema_id: u32,
     datum: &[u8],
@@ -158,143 +113,6 @@ fn decode_datum<T: prost::Message + Default>(
         ))
     })?;
     T::decode(message).map_err(KafkaError::wire_format)
-}
-
-/// A registry subject resolved to a schema id and one message's index path, for one message type.
-///
-/// The framing a Protobuf producer owes the wire is entirely resolved here: which schema id, and
-/// which message of that schema. Both are looked up once, at startup, so [`frame`](Self::frame)
-/// is a pure byte operation and a subject that does not exist, or does not declare the message,
-/// fails the app's startup rather than its first publish.
-///
-/// # Examples
-///
-/// ```no_run
-/// use ruststream_rdkafka::{SchemaRegistry, protobuf};
-///
-/// #[derive(Clone, PartialEq, prost::Message)]
-/// struct Confirmation {
-///     #[prost(int64, tag = "1")]
-///     id: i64,
-/// }
-///
-/// # async fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let registry = SchemaRegistry::new("http://localhost:8081");
-/// let subject = protobuf::Subject::<Confirmation>::resolve(
-///     &registry,
-///     "confirmations-value",
-///     "acme.Confirmation",
-/// )
-/// .await?;
-///
-/// let frame = subject.frame(&Confirmation { id: 7 })?;
-/// assert_eq!(frame.schema_id(), subject.schema_id());
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug, Clone)]
-pub struct Subject<T> {
-    schema_id: u32,
-    /// The message-index path, already in its wire form: the same bytes prefix every message.
-    indexes: Vec<u8>,
-    // `fn() -> T` so the marker adds no auto-trait obligation of its own.
-    message: PhantomData<fn() -> T>,
-}
-
-impl<T: prost::Message> Subject<T> {
-    /// Resolves `subject`'s registered schema and the index path of the message named
-    /// `message` (fully qualified, package included).
-    ///
-    /// The message name is a string rather than something read off `T`, because a plain
-    /// `prost`-generated type carries no descriptor to read it from. Naming a message that `T`
-    /// is not puts a mis-addressed index path on the wire, which consumers report as a decode
-    /// failure; binding the two at compile time would mean requiring
-    /// `prost_reflect::ReflectMessage` on every generated type, which is a code-generation
-    /// dependency this crate should not impose on a service that only wants to publish.
-    ///
-    /// For the same reason this takes the subject's registered schema at face value, where
-    /// [`AvroCodec`](crate::avro::AvroCodec) resolves the id of the *producer's own* schema: a
-    /// generated Protobuf type carries no `.proto` source to look up. Protobuf's wire format is
-    /// tag-addressed and stays readable across compatible schema versions, which is what makes
-    /// that acceptable here and would not be for Avro.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable or has no such
-    /// subject, and [`KafkaError::InvalidOptions`] when the subject holds another format's
-    /// schema or does not declare `message`.
-    pub async fn resolve(
-        registry: &SchemaRegistry,
-        subject: &str,
-        message: &str,
-    ) -> Result<Self, KafkaError> {
-        let schema = registry.warm(subject).await?;
-        if schema.schema_type() != SchemaType::Protobuf {
-            return Err(KafkaError::InvalidOptions(format!(
-                "subject {subject:?} holds a {:?} schema, not Protobuf",
-                schema.schema_type(),
-            )));
-        }
-        let pool = registry.parsed_proto(&schema)?;
-        let descriptor = pool.get_message_by_name(message).ok_or_else(|| {
-            KafkaError::InvalidOptions(format!(
-                "message {message:?} is not in subject {subject:?}'s schema (use the fully \
-                 qualified name, package included)",
-            ))
-        })?;
-        let indexes = message_indexes(&descriptor).ok_or_else(|| {
-            KafkaError::InvalidOptions(format!(
-                "message {message:?} is not declared by the registered schema file",
-            ))
-        })?;
-        Ok(Self {
-            schema_id: schema.id(),
-            indexes: encode_indexes(&indexes),
-            message: PhantomData,
-        })
-    }
-
-    /// A subject whose id and message-index path are already known, taking no registry at all.
-    ///
-    /// [`resolve`](Self::resolve) exists to learn those two things; a service that already has
-    /// them - a deployment pinning ids in configuration, a replay tool, a test with no registry
-    /// in front of it - names them here. The path is the message's position in its schema file:
-    /// `[0]` for the first top-level message, `[1, 0]` for the first message nested in the
-    /// second, and so on.
-    ///
-    /// The caller owns the pairing `resolve` establishes: the id must name a schema that
-    /// declares `T` at that path, or consumers address the wrong message.
-    #[must_use]
-    pub fn pinned(schema_id: u32, message_indexes: &[i32]) -> Self {
-        Self {
-            schema_id,
-            indexes: encode_indexes(message_indexes),
-            message: PhantomData,
-        }
-    }
-
-    /// The registry-assigned id of the schema this subject holds.
-    #[must_use]
-    pub fn schema_id(&self) -> u32 {
-        self.schema_id
-    }
-}
-
-impl<T: prost::Message> Subject<T> {
-    /// Encodes `value` behind this subject's message-index path, ready to publish.
-    ///
-    /// Synchronous by construction: the only things that needed the registry were the id and the
-    /// index path, and resolving the subject already took both.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::WireFormat`] when `prost` cannot encode the value.
-    pub fn frame(&self, value: &T) -> Result<OutgoingFrame, KafkaError> {
-        let mut datum = BytesMut::with_capacity(self.indexes.len() + value.encoded_len());
-        datum.extend_from_slice(&self.indexes);
-        value.encode(&mut datum).map_err(KafkaError::wire_format)?;
-        Ok(OutgoingFrame::new(self.schema_id, datum.to_vec()))
-    }
 }
 
 /// One topic's message-index prefix, kept with the schema id it was computed against so a
@@ -473,12 +291,12 @@ impl ProtobufFraming {
 /// schema**. Everything else passes through untouched: a topic with no subject (mixed
 /// registry/plain topologies need no configuration), and a topic whose subject is Avro or JSON,
 /// whose payload some other path already framed. That is what lets one app carry an Avro codec,
-/// a JSON codec and Protobuf lanes at once with this layer installed app-wide.
+/// a JSON codec and Protobuf at once with this layer installed app-wide.
 ///
-/// A payload that already carries an envelope also passes through, so a handler that framed its
-/// own message with [`Subject::frame`] is not framed twice. The check is exact rather than a
-/// guess: a bare `prost` message begins with a field tag, whose field number is at least 1, so
-/// its first byte is never the zero magic byte.
+/// A payload that already carries an envelope also passes through, so a message that came in
+/// framed and goes out again is not framed twice. The check is exact rather than a guess: a bare
+/// `prost` message begins with a field tag, whose field number is at least 1, so its first byte
+/// is never the zero magic byte.
 ///
 /// It is an alternative to [`SchemaFrame`](crate::SchemaFrame) rather than a companion. That
 /// layer's contract is "the payload is a JSON document, transcode it to the subject's flavor";
@@ -1063,76 +881,12 @@ message Order {
         assert!(err.to_string().contains("fully qualified"));
     }
 
-    /// The generated shape a service would get from `prost-build` for `acme.Order`.
-    #[derive(Clone, PartialEq, prost::Message)]
-    struct Order {
-        #[prost(int64, tag = "1")]
-        id: i64,
-        #[prost(string, tag = "2")]
-        item: String,
-    }
-
-    #[tokio::test]
-    async fn a_subject_frames_behind_its_messages_index_path() {
-        let (_server, registry, schema) = registry_with_orders(9).await;
-
-        let subject = Subject::<Order>::resolve(&registry, "orders-value", "acme.Order")
-            .await
-            .expect("resolve");
-        assert_eq!(subject.schema_id(), 9);
-
-        let frame = subject
-            .frame(&Order {
-                id: 42,
-                item: "anvil".to_owned(),
-            })
-            .expect("frame");
-        assert_ne!(frame.datum()[0], 0, "Order is not the first message");
-
-        // The transcode reads the same bytes, so the index path really addresses `acme.Order`.
-        let json = protobuf_to_json(&registry, &schema, frame.datum()).expect("transcode");
-        let value: serde_json::Value = serde_json::from_slice(&json).expect("json");
-        assert_eq!(value["id"], 42);
-        assert_eq!(value["item"], "anvil");
-    }
-
-    #[tokio::test]
-    async fn a_framed_delivery_decodes_with_no_registry() {
-        let (_server, registry, _) = registry_with_orders(9).await;
-        let subject = Subject::<Order>::resolve(&registry, "orders-value", "acme.Order")
-            .await
-            .expect("resolve");
-        let order = Order {
-            id: 7,
-            item: "widget".to_owned(),
-        };
-        let mut wire = BytesMut::new();
-        let payload = {
-            use ruststream::runtime::Serialized;
-            subject
-                .frame(&order)
-                .expect("frame")
-                .wire_bytes(&mut wire)
-                .expect("infallible")
-                .to_vec()
-        };
-
-        let frame = {
-            use ruststream::runtime::Deserialized;
-            IncomingFrame::from_payload(&payload).expect("framed")
-        };
-        assert_eq!(decode_framed::<Order>(&frame).expect("decode"), order);
-    }
-
     #[test]
     fn a_truncated_index_path_is_rejected() {
-        use ruststream::runtime::Deserialized;
-
         // A path claiming two entries but carrying none.
         let payload = [0x00, 0x00, 0x00, 0x00, 0x01, 0x04];
-        let frame = IncomingFrame::from_payload(&payload).expect("framed");
 
-        let err = decode_framed::<Order>(&frame).expect_err("truncated");
+        let err = decode_confluent::<LaneOrder>(&payload).expect_err("truncated");
         assert!(err.to_string().contains("truncated"));
     }
 
@@ -1194,7 +948,7 @@ message Order {
             item: "anvil".to_owned(),
         };
         // The encode half is bare prost: no envelope, no index path, no id.
-        let mut buf = BytesMut::new();
+        let mut buf = ruststream::BytesMut::new();
         let bare = order.wire_bytes(&mut buf).expect("encode").to_vec();
         assert_eq!(bare, order.encode_to_vec());
 
@@ -1232,11 +986,15 @@ message Order {
 
     #[tokio::test]
     async fn the_prefix_addresses_the_pinned_message() {
-        let (_server, registry, _) = registry_with_orders(11).await;
-        let framing = framing(registry, Some("acme.Order"));
+        let (_server, registry, schema) = registry_with_orders(11).await;
+        let framing = framing(registry.clone(), Some("acme.Order"));
 
-        let Framing::Framed(framed) = framing.frame("orders", &[0x08, 0x07]).await.expect("frame")
-        else {
+        let bare = LaneOrder {
+            id: 42,
+            item: "anvil".to_owned(),
+        }
+        .encode_to_vec();
+        let Framing::Framed(framed) = framing.frame("orders", &bare).await.expect("frame") else {
             panic!("a Protobuf subject frames");
         };
         let (id, datum) = parse_envelope(&framed).expect("framed");
@@ -1245,7 +1003,14 @@ message Order {
         // zero, and the message bytes follow it unchanged.
         let (indexes, message) = decode_indexes(datum).expect("decodes");
         assert_eq!(indexes, vec![1]);
-        assert_eq!(message, &[0x08, 0x07]);
+        assert_eq!(message, bare.as_slice());
+
+        // The transcode reads the same bytes, so the path really addresses `acme.Order` rather
+        // than only claiming to.
+        let json = protobuf_to_json(&registry, &schema, datum).expect("transcode");
+        let value: serde_json::Value = serde_json::from_slice(&json).expect("json");
+        assert_eq!(value["id"], 42);
+        assert_eq!(value["item"], "anvil");
     }
 
     #[tokio::test]

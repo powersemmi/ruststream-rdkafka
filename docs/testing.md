@@ -151,13 +151,12 @@ to redeliver and a bare name carries no commit mode to decide otherwise, so that
 the contract; a subscription that reaches the broker as a `KafkaTopic` gets its own mode. Name the
 mode on the descriptor whenever a test turns on what a retry does.
 
-## Byte-lane handlers
+## Protobuf handlers
 
-A handler reading the Confluent wire form is an ordinary handler here too: `IncomingFrame` and
-`OutgoingFrame` carry their own bytes, so nothing about them needs a cluster, and reading a
-Protobuf frame needs no registry either. See
-[the Schema Registry page](schema-registry.md#testing-a-lane-handler) for the `TestApp` shape and
-its manual-path counterpart.
+A handler over a generated Protobuf message is an ordinary handler here too: the type carries its
+own bytes, so nothing about it needs a cluster, and reading a framed delivery needs no registry
+either. See [the Schema Registry page](schema-registry.md#testing-a-protobuf-handler) for the
+`TestApp` shape and its manual-path counterpart.
 
 ## What the test broker does not simulate
 

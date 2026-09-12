@@ -160,12 +160,12 @@ ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 `KafkaTopic`, получает свой режим. Называйте режим в дескрипторе всякий раз, когда тест проверяет,
 что делает повтор.
 
-## Обработчики байтовых путей {#byte-lane-handlers}
+## Обработчики Protobuf {#protobuf-handlers}
 
-Обработчик, который читает форму передачи Confluent, и здесь остаётся обычным обработчиком:
-`IncomingFrame` и `OutgoingFrame` несут собственные байты, поэтому кластер им ни для чего не
-нужен, а чтению кадра Protobuf не нужен и реестр. Форма на `TestApp` и её ручной аналог
-описаны на [странице Schema Registry](schema-registry.md#testing-a-lane-handler).
+Обработчик над сгенерированным сообщением Protobuf и здесь остаётся обычным обработчиком: тип
+несёт собственные байты, поэтому кластер ему ни для чего не нужен, а чтению доставки в конверте не
+нужен и реестр. Форма на `TestApp` и её ручной аналог описаны на
+[странице Schema Registry](schema-registry.md#testing-a-protobuf-handler).
 
 ## Что тестовый брокер не моделирует {#what-the-test-broker-does-not-simulate}
 

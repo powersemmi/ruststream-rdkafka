@@ -25,8 +25,8 @@ every subscription that broker opens, so a codec on it would be handed JSON; the
 `KafkaBroker::schema_prefetch(..)` instead, which resolves schemas without touching a payload.
 
 Protobuf is not a third choice. A `prost` message is not a serde type, so it can never reach the
-codec position, and its payloads travel as the Confluent envelope itself - in the handler's
-signature, or on the generated type. That path is [Protobuf](#the-protobuf-envelope) below.
+codec position; it serializes itself instead, and the generated type is what the handler takes and
+returns. That path is [Protobuf](#protobuf) below.
 
 ## What each format reaches
 
@@ -37,7 +37,6 @@ to guess.
 | | Avro | JSON | Protobuf |
 | --- | --- | --- | --- |
 | Codec | `AvroCodec::local`, `AvroCodec::registry` | `SchemaFramed<JsonCodec>` | forced blank, see below |
-| Envelope in the signature | the frame types alone | the frame types alone | `protobuf::decode_framed`, `protobuf::Subject` |
 | Handler over the message itself | the codec | the codec | `#[wire(..)]` + `ProtobufFrame` |
 | Transcode | yes | yes | yes |
 | Schema read off the type | `AvroSchema` | `schemars::JsonSchema` | **no** |
@@ -57,8 +56,7 @@ what a codec registered, so with no codec there is nothing for it to warm.
 
 What the blank costs is smaller than it looks, because the row below it is filled. The *outcome* a
 codec buys - a handler over ordinary types, with nothing about the wire in its signature - Protobuf
-reaches by another route, described under [Protobuf without the envelope in the
-signature](#protobuf-without-the-envelope-in-the-signature). What it does not reach is the
+reaches by another route, described under [Protobuf](#protobuf). What it does not reach is the
 prefetch's machinery, which hangs off the codec position itself.
 
 **Why the prefetch rows read "codec" and not "Avro".** Nothing in that machinery is Avro-only.
@@ -67,17 +65,17 @@ on `SchemaPrefetch` and apply to whatever a codec registered, so JSON under `Sch
 them today exactly as Avro does - including `AutoRegister`, which puts a `schemars`-derived JSON
 Schema back.
 
-**Protobuf answers the same question with a constructor, not a policy.** `protobuf::Subject` has no
-`MissingSubject` because it does not need one: `resolve` is `Refuse` and `pinned` is neither. The
-choice is made where the code is written rather than by a value read at connect, which is the
-better shape - so this is not a gap to close. What is missing is the `AutoRegister` counterpart,
-which is the gap below rather than a missing policy.
+**Protobuf answers the same question where the publish happens, not with a policy.** The framing
+resolves the destination topic's subject, and a destination the registry does not describe is
+passed through by the app-wide layer and refused by the mount-site policy. That difference is
+deliberate and explained under [Setting it once for a whole app](#setting-it-once-for-a-whole-app),
+so there is no `MissingSubject` to add here.
 
 **The two real gaps, both Protobuf, both one piece of work.** A Protobuf type cannot hand over its
 own schema, so a service writes its `.proto` twice - once as the file `prost-build` compiles and
-once as a string literal to register - with nothing tying the copies together, which is why there
-is no `protobuf::Subject::register`. And no path here resolves registry schema references, so a
-`.proto` that imports anything the compiled pool does not already carry is out of reach: the
+once as a string literal to register - with nothing tying the copies together, which is why nothing
+here registers a Protobuf schema from a type. And nothing here resolves registry schema references,
+so a `.proto` that imports anything the compiled pool does not already carry is out of reach: the
 well-known `google/protobuf/*` types resolve, `confluent/*` (which the registry itself treats as
 ambient) does not, and any import of your own needs the `references` field this crate never writes
 or reads.
@@ -269,39 +267,23 @@ Every registry request carries a deadline, ten seconds by default, which you can
 registry that accepts the connection and then goes silent. The request returns an error when the
 deadline expires, and both edges treat it like any other registry error.
 
-## The Protobuf envelope
+## Protobuf
 
-The envelope is a byte-lane type on both ends: `IncomingFrame` arrives through the core's
-`Deserialized` lane, `OutgoingFrame` leaves through `Serialized`, and no codec is resolved for
-either. That is where a `prost` message can live and a codec cannot reach: the core's lanes are
-selected by the type and reserved for types that are *not* serde types (`MessageWire`,
-`ReplyShape` and `Input` are blanket-implemented for every `Serialize` / `DeserializeOwned`
-value), which is why `#[wire(prost)]` works for a `prost` message and an equivalent
-`#[wire(avro)]` cannot exist.
-
-Reading needs no registry at all. The envelope's message-index path only says which message of the
-schema was written, and the reading type has already decided which one it reads, so
-`protobuf::decode_framed` is a plain synchronous call. Only the publish side resolves anything,
-and it resolves once, at startup, so the publish itself does no I/O and a subject that is missing
-or incompatible fails the app's startup rather than its first message:
+A generated message arrives as itself and leaves as itself. The handler is an ordinary function
+over ordinary types, exactly as it is on the Avro codec:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:handler"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:handler"
 ```
 
-`Subject::resolve` looks the id up without registering, which is also what deployments where
-producers must not create schemas want (Confluent's own guidance, with `auto.register.schemas`
-off); `Subject::pinned` takes an id the service already knows, for a pinned deployment, a replay
-tool, or a test with no registry in front of it.
+The types carry the wire, because a `prost` message is not a serde type and so can never reach the
+codec position. They ride the core's byte lanes instead - selected by the type and reserved for
+types that are *not* serde types, which is why `#[wire(prost)]` works for a `prost` message and an
+equivalent `#[wire(avro)]` cannot exist:
 
-The frame types carry no schema knowledge of their own, so they are also the raw form for the rare
-handler that dispatches on a schema id or forwards frames it never decodes, whatever the flavour.
-
-## Protobuf without the envelope in the signature
-
-The handler above sees the envelope because it asked to. It does not have to: a generated
-type can carry the envelope on its own wire paths, and then the handler is an ordinary function
-over ordinary types, exactly as it is on the Avro codec.
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
+```
 
 The two halves are asymmetric, and knowing why is what makes the shape read as one thing rather
 than two. **Reading needs no registry**, so it can happen in the type: Protobuf's compatibility
@@ -314,15 +296,7 @@ synchronous and has only `&self` to work with. The publish path can, because it 
 destination topic, which is exactly what names the subject.
 
 So the type splits its wire paths - `prost` writes the message, this crate reads the envelope -
-and the reply's own publisher puts the id and the index path on the way out.
-
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
-```
-
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:handler"
-```
+and the reply's own publisher puts the id and the index path on the way out:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:wiring"
@@ -362,10 +336,10 @@ publishes leaving through slots and through publishers a mount site never named.
 rather than conflict: whichever runs first frames the payload, and the other finds an envelope
 already there and leaves it alone.
 
-A payload that already carries an envelope passes through on both paths, so a handler that framed
-its own message with `Subject::frame` is not framed twice. The check is exact rather than a guess,
-because a bare `prost` message opens with a field tag whose field number is at least 1, so its
-first byte is never the zero magic byte.
+A payload that already carries an envelope passes through on both paths, so a message that came in
+framed and goes out again is not framed twice. The check is exact rather than a guess, because a
+bare `prost` message opens with a field tag whose field number is at least 1, so its first byte is
+never the zero magic byte.
 
 Neither is a companion to `SchemaFrame`: that layer's contract is "this payload is a JSON document,
 transcode it to the subject's flavor", these say "this payload is already the datum, put the
@@ -384,15 +358,6 @@ cannot happen at startup: a policy could do I/O when it pairs with the connected
 destination topic is not known there - it comes from the mount's `publish(..)` clause, or from the
 call site of a slot publish, neither of which a policy is handed. So a missing subject surfaces as
 a failed publish, which the handler's failure policy settles.
-
-### What the explicit path is still for
-
-`IncomingFrame` with `protobuf::decode_framed`, and `protobuf::Subject`, are unchanged and are not
-made redundant by this. Reach for them when the handler needs the **schema id** - to log which
-version produced a delivery, to route a topic carrying more than one schema, to forward frames it
-never decodes - since that is the one thing decoding past the envelope throws away. `Subject` is
-also the producer's path outside an app's publish pipeline (a seeding tool, a replay job, a test
-with no registry in front of it), where there is no layer to do the framing.
 
 ## Consuming: transcode on the way in
 
@@ -485,25 +450,28 @@ under an older version of the subject is decoded, not resolved: the handler sees
 fields, with no reader schema to fill in what the producer never wrote. Reach for it when a
 service must keep plain serde models on a registry-backed topic; reach for the codec otherwise.
 
-## Testing a lane handler
+## Testing a Protobuf handler
 
-A handler over the envelope is an ordinary handler, so `TestApp` and the in-process
-`KafkaTestBroker` drive it with no cluster and no registry either, since reading a Protobuf frame
-needs none. An `OutgoingFrame` is a publish value like any other, so the injection is the ordinary
-typed one and the frame's own bytes go on the topic untouched:
+A Protobuf handler is an ordinary handler, so `TestApp` and the in-process `KafkaTestBroker` drive
+it with no cluster and no registry either, since reading needs none. The seeded record carries the
+envelope a registry-backed producer writes, and the handler never sees it:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:testapp"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:testapp"
 ```
 
-Without the `macros` feature the same handler is a `Handle` impl over the same two axes; the
-mount names the subscription and the reply's destination, and nothing in either knows a codec
-exists:
+Framing the reply is the half that needs the registry, so in process the reply leaves bare and the
+test asserts on the message rather than on the envelope. What the mount names against a cluster is
+`KafkaPublish::framed(&registry)`.
+
+Without the `macros` feature the same handler is a `Handle` impl over the same two axes - the
+generated message in, the generated message out - and the mount names the subscription and the
+reply's destination:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:handler"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:manual"
 ```
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:mount"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:mount"
 ```

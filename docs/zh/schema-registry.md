@@ -22,8 +22,7 @@
 `KafkaBroker::schema_prefetch(..)`，它解析 schema，却不碰载荷。
 
 Protobuf 不是第三个选择。`prost` 消息不是 serde 类型，因此它永远进不了编解码器的位置，它的载荷
-就以 Confluent 信封本身的形式传递 - 或者出现在处理器的签名里，或者落在生成类型上。这条路见下面的
-[Protobuf 信封](#the-protobuf-envelope)。
+自己序列化自己，处理器收下和交回的就是这个生成类型。这条路见下面的 [Protobuf](#protobuf)。
 
 ## 每种格式能走到哪 { #what-each-format-reaches }
 
@@ -33,7 +32,6 @@ Protobuf 不是第三个选择。`prost` 消息不是 serde 类型，因此它�
 | | Avro | JSON | Protobuf |
 | --- | --- | --- | --- |
 | 编解码器 | `AvroCodec::local`、`AvroCodec::registry` | `SchemaFramed<JsonCodec>` | 必然的空白，见下 |
-| 信封进签名 | 只有帧类型本身 | 只有帧类型本身 | `protobuf::decode_framed`、`protobuf::Subject` |
 | 处理器直接面对消息 | 编解码器 | 编解码器 | `#[wire(..)]` + `ProtobufFrame` |
 | 转码 | 是 | 是 | 是 |
 | 从类型上读出 schema | `AvroSchema` | `schemars::JsonSchema` | **否** |
@@ -51,8 +49,7 @@ Protobuf 不是第三个选择。`prost` 消息不是 serde 类型，因此它�
 预热的是编解码器注册过的东西，没有编解码器就没有东西可预热。
 
 这处空白的代价比看上去小，因为它下面那一行是填满的。编解码器买来的那个*结果* - 处理器面对普通类型、
-签名里不出现传输格式 - Protobuf 走另一条路也能拿到，见
-[签名里不带信封的 Protobuf](#protobuf-without-the-envelope-in-the-signature)。它拿不到的是预取那套
+签名里不出现传输格式 - Protobuf 走另一条路也能拿到，见 [Protobuf](#protobuf)。它拿不到的是预取那套
 机制，而那套机制正挂在编解码器这个位置上。
 
 **为什么预取这几行写的是“编解码器”而不是“Avro”。** 那套机制里没有一样是 Avro 专有的。
@@ -60,15 +57,15 @@ Protobuf 不是第三个选择。`prost` 消息不是 serde 类型，因此它�
 器注册过的一切，因此 `SchemaFramed` 下的 JSON 今天与 Avro 一样拿到它们 - 包括 `AutoRegister`，它
 放回去的是由 `schemars` 导出的 JSON Schema。
 
-**Protobuf 用构造函数回答同一个问题，而不是用策略。** `protobuf::Subject` 没有 `MissingSubject`，
-因为它不需要：`resolve` 就是 `Refuse`，`pinned` 两者都不是。选择在写代码的地方作出，而不是由一个
-连接时读到的值决定，这种形态更好 - 所以这里没有缺口要补。缺的只是 `AutoRegister` 那一半，
-那属于下面的缺口，而不是缺一条策略。
+**Protobuf 在发布发生的地方回答同一个问题，而不是用策略。** 加信封时解析的是目的主题的 subject，
+而注册表描述不了的目的地，应用级的层放行、挂载点的策略拒绝。这个差别是刻意的，讲在
+[一次设定，全应用生效](#setting-it-once-for-a-whole-app)里，所以这里没有 `MissingSubject` 要补。
 
 **两处真正的缺口，都在 Protobuf，也都是同一件工作。** Protobuf 类型交不出自己的 schema，因此服务
 要把自己的 `.proto` 写两遍 - 一遍是 `prost-build` 编译的那个文件，一遍是用来注册的字符串字面量 -
-两份副本之间没有任何东西把它们绑在一起，`protobuf::Subject::register` 也因此不存在。而且这里没有
-任何东西解析注册表里的 schema 引用，因此一个 `.proto` 只要 import 了已编译的 pool 里还没有的东西，
+两份副本之间没有任何东西把它们绑在一起，这里也因此没有任何东西能从类型注册一个 Protobuf schema。
+而且这里没有任何东西解析注册表里的 schema 引用，因此一个 `.proto` 只要 import 了已编译的 pool 里还
+没有的东西，
 就够不着：`google/protobuf/*` 这些标准类型能解析，`confluent/*`（注册表自己视为随处可用）不能，
 你自己的任何 import 则需要 `references` 字段，而本 crate 从不写也从不读它。
 
@@ -229,34 +226,22 @@ subject 的*最新版本*，只要有人注册新版本就会挪动。
 因此这个期限限定的正是那种“接了连接然后沉默”的注册表。期限到了请求返回错误，两侧都把它当作任何别的
 注册表错误来处理。
 
-## Protobuf 信封 { #the-protobuf-envelope }
+## Protobuf { #protobuf }
 
-信封在两端都是字节路径类型：`IncomingFrame` 经由核心的 `Deserialized` 路径到来，`OutgoingFrame`
-经由 `Serialized` 出去，两边都不解析编解码器。那正是 `prost` 消息住得下、而编解码器够不到的地方：
-核心的路径按类型挑选，并且只留给*不是* serde 类型的类型（`MessageWire`、`ReplyShape` 和 `Input`
-对每一个 `Serialize` / `DeserializeOwned` 值都有通用实现），`#[wire(prost)]` 对 `prost` 消息能用、
-而对等的 `#[wire(avro)]` 不可能存在，原因就在这里。
-
-读取完全不需要注册表。信封里的消息索引路径只说明写下的是 schema 的哪个消息，而读取类型早已决定它读
-哪一个，因此 `protobuf::decode_framed` 是一次普通的同步调用。只有发布侧才解析东西，而且在启动时
-解析一次，因此发布本身不做 I/O，缺失或不兼容的 subject 会让应用启动失败，而不是让它的第一条消息
-失败：
+生成出来的消息以它自己的样子到来，也以它自己的样子离开。处理器就是普通类型之上的普通函数，与它在
+Avro 编解码器上一模一样：
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:handler"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:handler"
 ```
 
-`Subject::resolve` 只查 id 不注册，生产者不得创建 schema 的部署要的也正是这个（Confluent 自己的
-建议，`auto.register.schemas` 关闭）；`Subject::pinned` 取用服务已经知道的一个 id，用于钉死的部署、
-重放工具，或者前面没有注册表的测试。
+传输格式由类型自己带着，因为 `prost` 消息不是 serde 类型，永远进不了编解码器的位置。它改走核心的
+字节路径：那些路径按类型挑选，并且只留给*不是* serde 类型的类型 - `#[wire(prost)]` 对 `prost` 消息
+能用、而对等的 `#[wire(avro)]` 不可能存在，原因就在这里：
 
-帧类型自己不带任何 schema 知识，因此它们也是那种少见处理器的原始形态 - 按 schema id 分发，或者转发
-自己从不解码的帧，不论哪种格式。
-
-## 签名里不带信封的 Protobuf { #protobuf-without-the-envelope-in-the-signature }
-
-上面那个处理器看得见信封，是因为它自己要求看。这并非必须：一个生成出来的类型可以在自己的传输
-路径上带着信封，此时处理器就是普通类型之上的普通函数，与它在 Avro 编解码器上一模一样。
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
+```
 
 两半是不对称的，而知道为什么，能让这套形态读起来是一件事而不是两件。**读取不需要注册表**，因此它可以
 发生在类型里：Protobuf 的兼容性模型就是它传输格式自身的模型 - 字段按 tag 寻址，读取端不认识的字段
@@ -266,15 +251,7 @@ subject 的*最新版本*，只要有人注册新版本就会挪动。
 因为它知道目的主题，而目的主题正是 subject 的命名依据。
 
 于是这个类型把自己的传输路径一分为二 - `prost` 写消息，本 crate 读信封 - 而 id 和索引路径由回复自己
-的发布者在出去的路上加上。
-
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:types"
-```
-
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:handler"
-```
+的发布者在出去的路上加上：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_plain.rs:wiring"
@@ -308,7 +285,7 @@ RustStream::new(info).publish_layer(ProtobufFrame::new(registry))
 经由挂载点从未指定过的发布者发出的那些发布。两者是叠加而不是冲突：谁先跑谁给载荷加信封，另一个发现
 信封已经在那里，就不再动它。
 
-已经带着信封的载荷在两条路上都原样通过，因此用 `Subject::frame` 自己加过信封的处理器不会加两次。
+已经带着信封的载荷在两条路上都原样通过，因此一条带着信封进来、又接着出去的消息不会加两次信封。
 这个判断是精确的而不是猜的，因为一个裸的 `prost` 消息以一个字段 tag 开头，其字段号至少是 1，所以它的
 第一个字节绝不会是那个值为零的魔数字节。
 
@@ -326,13 +303,6 @@ subject 在第一次发布到每个目的地时解析，此后一直缓存。它
 配对时本可以做 I/O，但目的主题在那里还不知道 - 它来自挂载处的 `publish(..)` 子句，或者来自一次槽位
 发布的调用点，而这两样都不会交给策略。因此缺失的 subject 表现为一次失败的发布，由处理器的失败策略
 结算。
-
-### 显式路径还有什么用 { #what-the-explicit-path-is-still-for }
-
-`IncomingFrame` 配 `protobuf::decode_framed`，以及 `protobuf::Subject`，都原封不动，也没有因此变得
-多余。处理器需要 **schema id** 时就用它们 - 记录是哪个版本产生了这次投递、给一个带着不止一种 schema
-的主题分发、转发自己从不解码的帧 - 因为那正是解码穿过信封之后唯一扔掉的东西。`Subject` 还是生产者
-在应用发布管线之外的通路（灌数据的工具、重放作业、前面没有注册表的测试），那里没有哪一层来加信封。
 
 ## 消费：入站转码 { #consuming-transcode-on-the-way-in }
 
@@ -410,23 +380,25 @@ schemars 从类型导出 JSON Schema，本 crate 把 schemars 重新导出。`wa
 来补上生产者从未写过的部分。服务必须在注册表支持的主题上保持普通 serde 模型时，走这条路；其余情况走
 编解码器。
 
-## 测试一个路径处理器 { #testing-a-lane-handler }
+## 测试 Protobuf 处理器 { #testing-a-protobuf-handler }
 
-面对信封的处理器就是普通处理器，因此 `TestApp` 和进程内的 `KafkaTestBroker` 不用集群、也不用注册表
-就能驱动它，因为读一个 Protobuf 帧不需要注册表。`OutgoingFrame` 和别的发布值一样，因此注入就是普通
-的类型化注入，帧自己的字节原样进入主题：
+Protobuf 处理器就是普通处理器，因此 `TestApp` 和进程内的 `KafkaTestBroker` 不用集群、也不用注册表
+就能驱动它，因为读取不需要注册表。灌进去的那条记录带着注册表支持的生产者会写的信封，而处理器看不到它：
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:testapp"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:testapp"
 ```
 
-不启用 `macros` feature 时，同一个处理器是同样两条轴之上的一个 `Handle` 实现；挂载指定订阅和回复的
-目的地，而两者都不知道编解码器的存在：
+给回复加信封是需要注册表的那一半，因此在进程内回复是裸着出去的，断言看的是消息而不是信封。对着集群
+时，挂载点指定的是 `KafkaPublish::framed(&registry)`。
+
+不启用 `macros` feature 时，同一个处理器是同样两条轴之上的一个 `Handle` 实现 - 生成的消息进、生成的
+消息出 - 挂载指定订阅和回复的目的地：
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:handler"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:manual"
 ```
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_manual.rs:mount"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf_testing.rs:mount"
 ```
