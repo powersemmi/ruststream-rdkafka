@@ -14,8 +14,20 @@ use ruststream::testing::Coordinator;
 use ruststream::{HeaderMap, RawMessage};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SubscriptionId(u64);
+
+/// The consumer group a subscription joined.
+///
+/// A subscription that names no group is [`Alone`](Self::Alone) in one of its own: nothing else
+/// can be assigned its topic away from it, which is what an anonymous consumer is. That is a
+/// variant rather than an `Option` beside a name, so "names no group" cannot be read as "shares
+/// one nameless group with every other anonymous subscriber".
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum GroupId {
+    Named(String),
+    Alone(SubscriptionId),
+}
 
 /// One in-flight test delivery.
 #[derive(Debug, Clone)]
@@ -37,6 +49,8 @@ pub(crate) type DeliveryReceiver = mpsc::UnboundedReceiver<TestDelivery>;
 #[derive(Debug)]
 struct Subscription {
     topic: String,
+    /// Which group this entry competes in for `topic`.
+    group: GroupId,
     sender: DeliverySender,
     /// The subscription's read-position generation, shared with its seeker. Read under the
     /// router lock so a publish racing a reposition either lands in the replay's snapshot or is
@@ -54,8 +68,12 @@ struct RouterState {
     log: PublishLog,
 }
 
-/// Routes published messages to subscribers by exact topic name; there are no partitions,
-/// groups, or offsets here by design (those are real-cluster behavior).
+/// Routes published messages to subscribers by exact topic name, one member per consumer group.
+///
+/// There are no real partitions here by design (every topic has exactly one, numbered zero), and
+/// that single partition is what group membership divides: Kafka assigns a partition to exactly
+/// one member of each group, so a record reaches one subscription per group and every group gets
+/// its own copy.
 #[derive(Default)]
 pub(crate) struct KeyRouter {
     state: Mutex<RouterState>,
@@ -69,6 +87,7 @@ impl KeyRouter {
     pub(crate) fn subscribe_many(
         &self,
         topics: &[String],
+        group: Option<&str>,
         generation: &Arc<AtomicU64>,
     ) -> (Vec<SubscriptionId>, DeliverySender, DeliveryReceiver) {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -81,6 +100,8 @@ impl KeyRouter {
                     id,
                     Subscription {
                         topic: topic.clone(),
+                        group: group
+                            .map_or(GroupId::Alone(id), |name| GroupId::Named(name.to_owned())),
                         sender: sender.clone(),
                         generation: Arc::clone(generation),
                     },
@@ -96,7 +117,7 @@ impl KeyRouter {
         state.subscriptions.remove(&id);
     }
 
-    /// Appends `payload` to `topic`'s log and fans it out to every subscriber of that topic,
+    /// Appends `payload` to `topic`'s log and hands it to one subscription per consumer group,
     /// synchronously. Every successful enqueue is reported to the coordinator so the harness's
     /// in-flight accounting stays balanced.
     ///
@@ -112,13 +133,13 @@ impl KeyRouter {
     ) {
         let outgoing: Vec<(DeliverySender, TestDelivery)> = {
             let mut state = self.state.lock().expect("test router mutex poisoned");
-            let entries = state.log.entry(topic.to_owned()).or_default();
-            let seq = entries.len();
-            entries.push(RawMessage::new(topic, payload.clone()).with_headers(headers.clone()));
-            state
-                .subscriptions
-                .values()
-                .filter(|subscription| subscription.topic == topic)
+            let seq = {
+                let entries = state.log.entry(topic.to_owned()).or_default();
+                let seq = entries.len();
+                entries.push(RawMessage::new(topic, payload.clone()).with_headers(headers.clone()));
+                seq
+            };
+            Self::owners(&state.subscriptions, topic)
                 .map(|subscription| {
                     (
                         subscription.sender.clone(),
@@ -140,6 +161,34 @@ impl KeyRouter {
                 coordinator.enqueued();
             }
         }
+    }
+
+    /// The one subscription per group that `topic` is assigned to.
+    ///
+    /// Kafka hands a partition to exactly one member of each group, and this transport gives every
+    /// topic a single partition, so a group's records all land on one of its members rather than
+    /// spreading over them. The owner is the lowest live subscription id in the group, which makes
+    /// the choice deterministic and hands the topic over to the next member when the owner drops -
+    /// the effect a rebalance has.
+    fn owners<'a>(
+        subscriptions: &'a HashMap<SubscriptionId, Subscription>,
+        topic: &str,
+    ) -> impl Iterator<Item = &'a Subscription> {
+        let mut assigned: HashMap<&'a GroupId, (SubscriptionId, &'a Subscription)> = HashMap::new();
+        for (id, subscription) in subscriptions
+            .iter()
+            .filter(|(_, subscription)| subscription.topic == topic)
+        {
+            assigned
+                .entry(&subscription.group)
+                .and_modify(|owner| {
+                    if *id < owner.0 {
+                        *owner = (*id, subscription);
+                    }
+                })
+                .or_insert((*id, subscription));
+        }
+        assigned.into_values().map(|(_, subscription)| subscription)
     }
 
     /// Runs `f` over the retained log under the router lock, so a reposition can resolve its

@@ -323,7 +323,15 @@ impl KafkaTransactionalPublish {
         &self.id
     }
 
-    fn with_id(&self, id: String) -> Self {
+    /// Consumes the policy for its transactional id, so a live publisher can take ownership of
+    /// the string instead of cloning it. Only the in-process publisher needs it; the real one
+    /// keeps the whole policy while it creates its producer.
+    #[cfg(feature = "testing")]
+    pub(crate) fn into_id(self) -> String {
+        self.id
+    }
+
+    pub(crate) fn with_id(&self, id: String) -> Self {
         Self {
             queue_timeout: self.queue_timeout,
             id,
@@ -635,6 +643,15 @@ pub struct KafkaPartitionedPublish {
     template: KafkaTransactionalPublish,
 }
 
+impl KafkaPartitionedPublish {
+    /// The policy every lane's publisher is derived from, by substituting the per-partition id.
+    /// The live pairing reads the field directly; only the in-process one is out of module.
+    #[cfg(feature = "testing")]
+    pub(crate) const fn template(&self) -> &KafkaTransactionalPublish {
+        &self.template
+    }
+}
+
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
     type Live = TransactionalPartitions;
 
@@ -762,6 +779,16 @@ impl TransactionalPartitions {
             `KafkaPublish::default().transactional_id(..).per_partition()` policy"
 )]
 pub trait PartitionLanes: Send + Sync {
+    /// The transactional publisher a lane is handed.
+    ///
+    /// An associated type rather than the concrete [`KafkaTransactionalPublisher`], because the
+    /// same capability is offered by more than one transport: the cluster-backed
+    /// [`TransactionalPartitions`] hands out a live producer, and the in-process
+    /// `KafkaTestPartitions` of the `testing` module hands out its own stand-in. A handler
+    /// bounded `Out<impl PartitionLanes>` therefore mounts against either broker unchanged,
+    /// which is the whole point of naming the capability instead of a publisher type.
+    type Publisher: TransactionalPublisher<Error = KafkaError>;
+
     /// The publisher owning `partition`'s transactional id.
     ///
     /// # Errors
@@ -770,10 +797,12 @@ pub trait PartitionLanes: Send + Sync {
     fn for_partition(
         &self,
         partition: i32,
-    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send;
+    ) -> impl Future<Output = Result<Self::Publisher, KafkaError>> + Send;
 }
 
 impl PartitionLanes for TransactionalPartitions {
+    type Publisher = KafkaTransactionalPublisher;
+
     fn for_partition(
         &self,
         partition: i32,
@@ -797,10 +826,12 @@ where
     // impl on exactly the slots the runtime builds.
     Pipe: OutPipeline,
 {
+    type Publisher = L::Publisher;
+
     fn for_partition(
         &self,
         partition: i32,
-    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+    ) -> impl Future<Output = Result<Self::Publisher, KafkaError>> + Send {
         (**self).for_partition(partition)
     }
 }
