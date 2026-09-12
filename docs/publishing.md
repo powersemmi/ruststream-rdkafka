@@ -43,10 +43,18 @@ publisher held in application state and a handle created from the connected brok
 through those calls; only the codec `message(..)` uses differs. An already-encoded payload is a
 `#[derive(Outgoing, Serialized)]` newtype, and the same call sends it with no encoding step.
 
-You pass this crate's per-message arguments in the publish's headers position, and the publisher
-turns them into the record's own fields rather than into Kafka headers: the record key and the
-explicit partition, both below. A placement rule that is not per-message is a `PublishTransform`
-step of the mount site's chain instead (`RoundRobin` below).
+This crate adds one step of its own, `partition(..)`, which names the record's destination
+partition. It comes from the `KafkaPublishSteps` trait, so a handler body that calls it imports
+this crate's prelude and bounds its slot on the options type:
+`Out<impl Publisher<Options = KafkaOptions>, Marker>`. That bound is the one place a handler body
+names something of this crate's rather than of the framework's, and it is what keeps the step off
+a builder over another broker's publisher.
+
+The record key travels in the publish's headers position instead: it is the framework's own
+partition-key contract, and Kafka maps it onto the native record key. Both are below.
+
+A placement rule that is not per-message is a `PublishTransform` step of the mount site's chain
+instead (`RoundRobin` below).
 
 An `Out` parameter names a capability, not a publisher type. This crate declares one of its own,
 `PartitionLanes`: it hands out one transactional publisher per source partition. A handler writes
@@ -73,21 +81,23 @@ Without the header, the configured partitioner picks the partition.
 
 ## Explicit partitions and round-robin distribution
 
-The partition header (`kafka-partition`, an ASCII decimal) pins a record to one exact partition:
-the publisher reads the header, sets the record's partition, and does not send the header itself.
-An explicit partition wins over the record key, and the record key wins over the configured
-partitioner. A value that is not a decimal index makes the publish return an error, and a
-partition the topic does not have makes it return a delivery error:
+`partition(n)` pins one record to one exact partition. The explicit partition wins over the
+record key, and the record key wins over the configured partitioner. The number is an `i32`, so
+there is nothing to mistype; a partition the topic does not have makes the publish return a
+delivery error.
+
+On a publish builder the step reads `out.message(&item).partition(3).publish()`. Below the
+builder - a publisher you hold yourself, a seeding tool - the same setting is the `KafkaOptions`
+value the raw `publish` takes:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_producer.rs:partition"
 ```
 
-`RoundRobin` uses that same header to spread replies evenly. No librdkafka partitioner places
-records round-robin one at a time, and keyless records may stick to one partition for a whole
-batch. With long, near-constant per-message work that means one hot consumer and idle peers. The
-transform sets the next partition of the cycle on every reply that has neither a key nor a
-partition of its own:
+`RoundRobin` spreads replies evenly instead. No librdkafka partitioner places records round-robin
+one at a time, and keyless records may stick to one partition for a whole batch. With long,
+near-constant per-message work that means one hot consumer and idle peers. The transform sets the
+next partition of the cycle on every reply that has neither a key nor a partition of its own:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_distribution.rs:round_robin"
@@ -95,8 +105,12 @@ partition of its own:
 
 The count is explicit and must match the destination topic's partition count: a smaller one
 leaves the tail partitions idle, a larger one makes publishes to the missing partitions return an
-error. You can write your own `PublishTransform` over the same header for any other placement
-rule.
+error.
+
+A transform reaches the record, not the publish call, so it names the partition through the
+`kafka-partition` header (an ASCII decimal) and the publisher reads it there; the header never
+reaches the wire. That is the channel a transform of your own uses for any other placement rule.
+A call site uses the step.
 
 ## Delivery guarantees
 

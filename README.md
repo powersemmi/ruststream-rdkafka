@@ -37,6 +37,9 @@ configuration - the runtime climbs the lifecycle ladder around it.
   and the exactly-once pipeline moves the positions inside the producer transaction.
 - **Native record keys** - the partition-key header becomes the record's Kafka key, so per-key
   ordering works end to end, including `workers(n, by_key)` lanes.
+- **A typed record placement** - `partition(n)` on the publish builder pins one record to one
+  partition, ahead of the key and the partitioner; the number is an `i32`, and a test reads back
+  what a publish carried through `tb.out::<Marker>().with_options(..)`.
 - **Native batches** - a slice parameter consumes whole batches, and the subscriber implements
   the core's `BatchSubscriber` directly rather than buffering client-side: a batch is one
   delivery plus everything librdkafka has already fetched, cut off at the `batch(nonzero!(n))`

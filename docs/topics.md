@@ -309,6 +309,14 @@ advisory no-op and none of it applies:
   copy loses its place in the order and is at-most-once across the delay window: a crash before
   the timer fires loses it. Without `retry_via` the delay is dropped with a warning and the
   element behaves like the plain `retry()` above.
+
+    The subscription names where that copy goes. A `KafkaTopic` answers with its topic, and a
+    publish there reaches every group reading it. Two shapes answer nothing, because a copy
+    published under them would not come back: a pattern subscription, since a record goes to a
+    topic and never to a regex, and a manual partition assignment, since the partitioner may put
+    the copy on a partition the subscription does not read. An application that wires `retry_via`
+    over one of those refuses to start and names the subscription, instead of dropping copies at
+    run time.
 - **A result vector shorter than the batch** - the elements it does not cover are retried, and the
   mismatch is logged.
 

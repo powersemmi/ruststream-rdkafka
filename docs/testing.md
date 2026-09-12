@@ -24,6 +24,17 @@ triggers has settled, so the assertions read finished state and the test needs n
 --8<-- "crates/ruststream-rdkafka/examples/kafka_testing.rs:testapp"
 ```
 
+## Asserting on per-record settings
+
+A publisher folds `partition(..)` into the record itself, so the broker log no longer shows what
+the call site asked for. The slot view answers that question:
+`tb.out::<Marker>().with_options(&KafkaOptions::default().partition(3))` reads back the setting a
+publish through that slot carried, and `assert_options_default()` is the mirror assertion that a
+publish named none and left the placement to the producer.
+
+The in-process transport gives every topic one partition, so it records the number rather than
+placing anything by it. Test a multi-partition placement against a cluster.
+
 ## Repositioning in-process
 
 The in-process transport retains every message it routes, so a subscription can be repositioned
@@ -157,8 +168,9 @@ partitions, positions that outlive a subscription, rebalancing, retention and re
 are cluster behavior, as is everything listed under transactions above. Concretely:
 
 - **Partitions.** Every topic has exactly one partition, numbered zero. `Ctx<Partition>` always
-  reads `0`, a `PARTITION_HEADER` stamp does not change where a record lands, and a seek to any
-  other partition is refused rather than invented. Worker lanes *are* reproduced: a
+  reads `0`, neither a `partition(..)` step nor a `PARTITION_HEADER` stamp changes where a record
+  lands, and a seek to any other partition is refused rather than invented. Worker lanes *are*
+  reproduced: a
   subscription's `LaneKey` resolves here exactly as it does upstream, so under the default
   `LaneKey::Partition` a topic's records share one lane (one partition, one order, keyless
   records included) and under `LaneKey::RecordKey` they lane by key. What a test cannot show is
