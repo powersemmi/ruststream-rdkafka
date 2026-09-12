@@ -20,6 +20,11 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 /// partition or a record key is left alone: keys exist for ordering, and overriding either
 /// would silently break the caller's placement.
 ///
+/// A transform sees the record, not the publish call, which is why the placement travels as a
+/// header here while a call site names it with the builder's
+/// [`partition`](crate::KafkaPublishSteps::partition) step. A publish that used the step keeps
+/// that partition: the call site wins over the cycle.
+///
 /// The count is explicit on purpose (cheap and predictable); it must match the destination
 /// topic's partition count, or the tail partitions simply receive nothing (a smaller count)
 /// or publishes fail (a larger one).
