@@ -1,5 +1,6 @@
 //! The in-process publisher.
 
+use std::borrow::Cow;
 use std::future::{Future, ready};
 use std::sync::Arc;
 
@@ -8,7 +9,8 @@ use ruststream::{DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publ
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
 use crate::error::KafkaError;
-use crate::publisher::KafkaPublish;
+use crate::message::PARTITION_HEADER;
+use crate::publisher::{KafkaOptions, KafkaPublish};
 
 /// Publisher into the in-process router.
 ///
@@ -63,14 +65,24 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPub
 
 impl Publisher for KafkaTestPublisher {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Routes `msg` to subscribers of the topic named by `msg.name()`.
+    ///
+    /// A partition named per record is recorded rather than honoured: the transport gives every
+    /// topic one partition, so it carries the number on
+    /// [`PARTITION_HEADER`](crate::PARTITION_HEADER) where the broker log can read it back, and
+    /// the slot view answers `with_options` from what the call actually carried.
     ///
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty, and
     /// [`KafkaError::Closed`] once the transport this handle aliases has been shut down.
-    fn publish(&self, msg: OutgoingMessage<'_>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         if msg.name().is_empty() {
             return ready(Err(KafkaError::InvalidOptions(
                 "topic name must not be empty; the outgoing message name is the destination \
@@ -81,10 +93,19 @@ impl Publisher for KafkaTestPublisher {
         if let Err(err) = self.state.ensure_open(msg.name()) {
             return ready(Err(err));
         }
+        let partition = options.and_then(|options| options.partition_setting());
+        let headers = partition.map_or_else(
+            || Cow::Borrowed(msg.headers()),
+            |partition| {
+                let mut headers = msg.headers().clone();
+                headers.insert(PARTITION_HEADER, partition.to_string());
+                Cow::Owned(headers)
+            },
+        );
         self.state.router.publish(
             msg.name(),
             &Bytes::copy_from_slice(msg.payload()),
-            msg.headers(),
+            &headers,
             self.state.coordinator().as_ref(),
         );
         ready(Ok(()))

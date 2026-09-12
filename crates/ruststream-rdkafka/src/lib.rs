@@ -90,8 +90,8 @@ pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 #[cfg(feature = "protobuf")]
 pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};
 pub use publisher::{
-    KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaRetryPublisher,
-    KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
+    KafkaOptions, KafkaPartitionedPublish, KafkaPublish, KafkaPublishSteps, KafkaPublisher,
+    KafkaRetryPublisher, KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
     TransactionalPartitions,
 };
 #[cfg(feature = "schema-registry")]

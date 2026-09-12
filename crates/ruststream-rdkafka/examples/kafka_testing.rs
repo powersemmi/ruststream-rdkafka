@@ -208,7 +208,7 @@ async fn seed_batches(broker: &KafkaTestBroker) {
             .encode(&Batch { id, resume_at })
             .expect("serializable");
         publisher
-            .publish(OutgoingMessage::new("batches", payload.as_ref()))
+            .publish(OutgoingMessage::new("batches", payload.as_ref()), None)
             .await
             .expect("seed");
     }

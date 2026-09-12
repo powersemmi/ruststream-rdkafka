@@ -44,7 +44,7 @@ async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Re
         };
         let payload = JsonCodec.encode(&command).expect("serializable");
         let outgoing = OutgoingMessage::new("shipments", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing).await {
+        if let Err(err) = publisher.publish(outgoing, None).await {
             publisher.abort().await.ok();
             return Err(err);
         }
@@ -88,7 +88,7 @@ async fn issue<L: PartitionLanes>(
         };
         let payload = JsonCodec.encode(&line).expect("serializable");
         let outgoing = OutgoingMessage::new("invoice-lines", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing).await {
+        if let Err(err) = publisher.publish(outgoing, None).await {
             publisher.abort().await.ok();
             return Err(err);
         }

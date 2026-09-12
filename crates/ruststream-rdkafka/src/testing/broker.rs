@@ -8,7 +8,8 @@ use std::sync::{Arc, OnceLock};
 use bytes::Bytes;
 use ruststream::testing::{Coordinator, TestableBroker};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage, ServerSpec, Subscribe,
+    Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage, RedeliveryAddress,
+    ServerSpec, Subscribe,
 };
 
 use super::publisher::KafkaTestPublisher;
@@ -84,7 +85,7 @@ impl fmt::Debug for TestBrokerState {
 /// let mut subscriber = broker.subscribe_with("orders").await?;
 /// broker
 ///     .publisher(KafkaPublish::default())
-///     .publish(OutgoingMessage::new("orders", b"{}"))
+///     .publish(OutgoingMessage::new("orders", b"{}"), None)
 ///     .await?;
 /// # Ok(())
 /// # }
@@ -309,6 +310,12 @@ impl Subscribe for ConnectedKafkaTestBroker {
 
     async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
         self.subscribe_with(name).await
+    }
+
+    /// The topic itself, as on a cluster: the in-process router delivers a publish to every
+    /// group reading that name.
+    fn redelivery_address(&self, name: &str) -> Option<RedeliveryAddress> {
+        (!name.starts_with('^')).then(|| RedeliveryAddress::new(name.to_owned()))
     }
 }
 

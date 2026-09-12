@@ -519,10 +519,10 @@ async fn live_json_frame_and_transcode_end_to_end() {
         .expect("connect seed");
     seed_broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(
-            &trigger,
-            format!(r#"{{"id":{marker}}}"#).as_bytes(),
-        ))
+        .publish(
+            OutgoingMessage::new(&trigger, format!(r#"{{"id":{marker}}}"#).as_bytes()),
+            None,
+        )
         .await
         .expect("seed trigger");
     seed_broker.shutdown().await.expect("seed shutdown");

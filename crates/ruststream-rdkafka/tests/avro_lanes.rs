@@ -180,7 +180,7 @@ async fn seed_an_older_writers_datum(
         .expect("connect seed");
     seed_broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(trigger, payload.as_slice()))
+        .publish(OutgoingMessage::new(trigger, payload.as_slice()), None)
         .await
         .expect("seed trigger");
     seed_broker.shutdown().await.expect("seed shutdown");

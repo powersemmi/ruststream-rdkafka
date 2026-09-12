@@ -80,7 +80,7 @@ async fn warm_up_group_coordinator(url: &str) {
         .expect("warm-up subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(&scratch, b"warm-up"))
+        .publish(OutgoingMessage::new(&scratch, b"warm-up"), None)
         .await
         .expect("warm-up publish");
     let mut stream = Box::pin(subscriber.stream());

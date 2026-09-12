@@ -26,7 +26,8 @@ use futures::{Stream, StreamExt};
 use ruststream::codec::{Codec as _, DefaultCodec};
 use ruststream::nonzero;
 use ruststream::runtime::{
-    AppInfo, Ctx, DefaultSlot, HandlerOutcome, Out, Reply, RustStream, SubscriberSettings as _,
+    AppInfo, ContextKind, Ctx, DefaultSlot, HandlerOutcome, Out, Outgoing as OutgoingRecord,
+    PublishTransform, Reads, Reply, RustStream, SubscriberSettings as _,
 };
 use ruststream::subscriber;
 use ruststream::testing::{TestApp, TestableBroker as _, expect_published};
@@ -41,8 +42,8 @@ use ruststream_rdkafka::testing::{
     ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage, KafkaTestSubscriber,
 };
 use ruststream_rdkafka::{
-    Commit, KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
-    PartitionLanes,
+    Commit, KafkaError, KafkaOptions, KafkaPosition, KafkaPublish, KafkaPublishSteps as _,
+    KafkaTopic, PARTITION_KEY_HEADER, PartitionLanes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -75,7 +76,7 @@ async fn pub_sub_round_trip_through_broker_traits() {
     let mut subscriber = broker.subscribe_with("orders").await.expect("subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
 
@@ -95,7 +96,7 @@ async fn empty_topic_name_is_rejected() {
 
     let publish_err = broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("", b"x"))
+        .publish(OutgoingMessage::new("", b"x"), None)
         .await
         .expect_err("empty publish");
     assert!(matches!(publish_err, KafkaError::InvalidOptions(_)));
@@ -109,7 +110,7 @@ async fn topics_are_isolated() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
 
@@ -127,7 +128,7 @@ async fn nack_requeue_redelivers_and_drop_drops() {
     let mut subscriber = broker.subscribe_with("retry").await.expect("subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("retry", b"again"))
+        .publish(OutgoingMessage::new("retry", b"again"), None)
         .await
         .expect("publish");
 
@@ -198,7 +199,7 @@ async fn a_tracked_retry_rewinds_the_whole_tail_not_one_message() {
     for payload in [b"a".as_slice(), b"b", b"c"] {
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new("rewind", payload))
+            .publish(OutgoingMessage::new("rewind", payload), None)
             .await
             .expect("publish");
     }
@@ -241,7 +242,7 @@ async fn a_dropped_record_stays_dropped_across_a_later_rewind() {
     for payload in [b"a".as_slice(), b"b", b"c"] {
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new("dropped", payload))
+            .publish(OutgoingMessage::new("dropped", payload), None)
             .await
             .expect("publish");
     }
@@ -280,7 +281,7 @@ async fn an_auto_commit_retry_is_advisory_and_redelivers_nothing() {
         .expect("subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("advisory", b"once"))
+        .publish(OutgoingMessage::new("advisory", b"once"), None)
         .await
         .expect("publish");
 
@@ -329,7 +330,7 @@ async fn members_of_one_group_share_a_topic_instead_of_each_getting_a_copy() {
     for payload in [b"1".as_slice(), b"2", b"3"] {
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new("shared", payload))
+            .publish(OutgoingMessage::new("shared", payload), None)
             .await
             .expect("publish");
     }
@@ -368,7 +369,7 @@ async fn subscriptions_without_a_group_are_each_alone_in_one() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("solo", b"both"))
+        .publish(OutgoingMessage::new("solo", b"both"), None)
         .await
         .expect("publish");
 
@@ -398,7 +399,7 @@ async fn the_brokers_default_group_makes_bare_subscriptions_compete() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("bare", b"one"))
+        .publish(OutgoingMessage::new("bare", b"one"), None)
         .await
         .expect("publish");
 
@@ -424,7 +425,7 @@ async fn a_departing_owner_hands_its_topic_to_the_next_group_member() {
     // While the owner is live the second member gets nothing.
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("handover", b"before"))
+        .publish(OutgoingMessage::new("handover", b"before"), None)
         .await
         .expect("publish");
     assert!(drain_ready(&mut second).await.is_empty());
@@ -433,7 +434,7 @@ async fn a_departing_owner_hands_its_topic_to_the_next_group_member() {
     drop(first);
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("handover", b"after"))
+        .publish(OutgoingMessage::new("handover", b"after"), None)
         .await
         .expect("publish");
     assert_eq!(drain_ready(&mut second).await, vec![b"after".to_vec()]);
@@ -446,12 +447,15 @@ async fn publish_keyed_pair(broker: &ConnectedKafkaTestBroker, topic: &str) {
     headers.insert(PARTITION_KEY_HEADER, "k-1");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(topic, b"{}").with_headers(headers))
+        .publish(
+            OutgoingMessage::new(topic, b"{}").with_headers(headers),
+            None,
+        )
         .await
         .expect("publish");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(topic, b"plain"))
+        .publish(OutgoingMessage::new(topic, b"plain"), None)
         .await
         .expect("publish");
 }
@@ -541,12 +545,12 @@ async fn published_log_observes_every_publish() {
     let broker = connected().await;
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("audit", b"first"))
+        .publish(OutgoingMessage::new("audit", b"first"), None)
         .await
         .expect("publish");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("audit", b"second"))
+        .publish(OutgoingMessage::new("audit", b"second"), None)
         .await
         .expect("publish");
 
@@ -563,7 +567,7 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("reenter", b"one"))
+        .publish(OutgoingMessage::new("reenter", b"one"), None)
         .await
         .expect("publish");
     {
@@ -573,7 +577,7 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("reenter", b"two"))
+        .publish(OutgoingMessage::new("reenter", b"two"), None)
         .await
         .expect("publish");
     let mut stream = Box::pin(subscriber.stream());
@@ -590,12 +594,12 @@ async fn multi_topic_descriptor_mounts_on_the_test_broker() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("cancellations", b"c1"))
+        .publish(OutgoingMessage::new("cancellations", b"c1"), None)
         .await
         .expect("publish");
 
@@ -737,12 +741,10 @@ async fn plan_keyed(order: &PlanOrder) -> PlanItem {
 /// Stamps the reply with a record key, standing in for a handler that picked its placement.
 struct KeyStamp;
 
-impl<C> ruststream::runtime::PublishTransform<C> for KeyStamp {
-    fn apply(
-        &self,
-        out: &mut ruststream::runtime::Outgoing<'_>,
-        _cx: &ruststream::runtime::PublishContext<'_, C>,
-    ) {
+impl<K: ContextKind> PublishTransform<K> for KeyStamp {
+    type Destination = Reads;
+
+    fn apply(&self, out: &mut OutgoingRecord<'_>, _cx: &K::View<'_>) {
         out.headers_mut().insert(PARTITION_KEY_HEADER, "tenant-1");
     }
 }
@@ -965,6 +967,99 @@ async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
     tb.shutdown().await.expect("shutdown");
 }
 
+// ------------------------------------------------------------------ per-record settings
+
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "placed-items")]
+struct PlacedItem {
+    order_id: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(PlacedItem)]
+struct Placement;
+
+// A body that adjusts a per-record setting names this crate's step, so it imports this crate's
+// prelude and bounds the slot on the options type. Both publishes leave the same slot: one
+// takes whatever the producer decides, the other names its partition.
+#[subscriber("placement-orders")]
+async fn place(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher<Options = KafkaOptions>, Placement>,
+) -> HandlerOutcome {
+    let item = PlacedItem { order_id: order.id };
+    if out.message(&item).publish().await.is_err()
+        || out.message(&item).partition(0).publish().await.is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The slot view is where a per-record setting is read back: the publisher folds it into the
+/// record, so what the call site asked for is only visible there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_partition_step_is_recorded_against_the_slot_it_left() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(place)
+                .out(Placement, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("placement-orders", &PlanOrder { id: 4 })
+        .await
+        .expect("publish");
+
+    tb.out::<Placement>()
+        .assert_called(2)
+        .with_options(&KafkaOptions::default().partition(0));
+    tb.broker::<KafkaTestBroker>()
+        .published::<PlacedItem>("placed-items")
+        .assert_called(2);
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+// A body that names no step at all: every publish takes the producer's own placement.
+#[subscriber("unplaced-orders")]
+async fn leave_placement(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher<Options = KafkaOptions>, Placement>,
+) -> HandlerOutcome {
+    let item = PlacedItem { order_id: order.id };
+    if out.message(&item).publish().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The mirror assertion: nothing was named per record, so the publish carries no settings and
+/// the partitioner places it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publish_that_names_no_setting_carries_none() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(leave_placement)
+                .out(Placement, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("unplaced-orders", &PlanOrder { id: 9 })
+        .await
+        .expect("publish");
+
+    tb.out::<Placement>()
+        .assert_called_once()
+        .assert_options_default();
+
+    tb.shutdown().await.expect("shutdown");
+}
+
 // ------------------------------------------------------------------ repositioning a service
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -1073,13 +1168,16 @@ async fn a_batch_body_repositions_through_its_subscription_context() {
     for (id, resume_at) in [(0, Some(0)), (1, None)] {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "seek-batches",
-                DefaultCodec::default()
-                    .encode(&Cursor { id, resume_at })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "seek-batches",
+                    DefaultCodec::default()
+                        .encode(&Cursor { id, resume_at })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
@@ -1136,13 +1234,16 @@ async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
     for id in 0..5u64 {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "batch-sizes",
-                DefaultCodec::default()
-                    .encode(&Job { id })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "batch-sizes",
+                    DefaultCodec::default()
+                        .encode(&Job { id })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
@@ -1176,13 +1277,16 @@ async fn start_at_opens_a_subscription_on_the_retained_log() {
     for id in 0..2 {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "audit",
-                DefaultCodec::default()
-                    .encode(&Job { id })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "audit",
+                    DefaultCodec::default()
+                        .encode(&Job { id })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
@@ -1394,7 +1498,7 @@ async fn an_open_transaction_holds_its_publishes_until_commit() {
     // With nothing open the publisher routes straight away, as the real one does through the
     // broker's plain producer.
     publisher
-        .publish(OutgoingMessage::new("txn-shipments", b"plain"))
+        .publish(OutgoingMessage::new("txn-shipments", b"plain"), None)
         .await
         .expect("publish");
     let mut stream = Box::pin(subscriber.stream());
@@ -1402,7 +1506,7 @@ async fn an_open_transaction_holds_its_publishes_until_commit() {
 
     publisher.begin_transaction().await.expect("begin");
     publisher
-        .publish(OutgoingMessage::new("txn-shipments", b"held"))
+        .publish(OutgoingMessage::new("txn-shipments", b"held"), None)
         .await
         .expect("publish");
     let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
@@ -1425,7 +1529,7 @@ async fn an_aborted_transaction_routes_nothing_and_frees_the_handle() {
 
     publisher.begin_transaction().await.expect("begin");
     publisher
-        .publish(OutgoingMessage::new("txn-dropped", b"gone"))
+        .publish(OutgoingMessage::new("txn-dropped", b"gone"), None)
         .await
         .expect("publish");
     publisher.abort().await.expect("abort");
@@ -1437,7 +1541,7 @@ async fn an_aborted_transaction_routes_nothing_and_frees_the_handle() {
     // The abort released the claim, so the handle takes another transaction.
     publisher.begin_transaction().await.expect("begin again");
     publisher
-        .publish(OutgoingMessage::new("txn-dropped", b"kept"))
+        .publish(OutgoingMessage::new("txn-dropped", b"kept"), None)
         .await
         .expect("publish");
     publisher.commit().await.expect("commit");
@@ -1489,7 +1593,7 @@ async fn transaction_misuse_errors_instead_of_silently_succeeding() {
 
     // And the refused begin left the open transaction untouched.
     publisher
-        .publish(OutgoingMessage::new("txn-misuse-out", b"kept"))
+        .publish(OutgoingMessage::new("txn-misuse-out", b"kept"), None)
         .await
         .expect("publish");
     publisher.commit().await.expect("commit");
@@ -1505,7 +1609,7 @@ async fn a_transactional_publisher_errors_after_shutdown() {
         .expect("transactional publisher");
     publisher.begin_transaction().await.expect("begin");
     publisher
-        .publish(OutgoingMessage::new("txn-late", b"never"))
+        .publish(OutgoingMessage::new("txn-late", b"never"), None)
         .await
         .expect("buffered");
 
@@ -1562,10 +1666,10 @@ async fn partition_lanes_hand_out_independent_transactions() {
 
     // Two lanes hold open transactions at once, which one shared publisher could not.
     p1.begin_transaction().await.expect("begin p1");
-    p0.publish(OutgoingMessage::new("lane-out", b"p0"))
+    p0.publish(OutgoingMessage::new("lane-out", b"p0"), None)
         .await
         .expect("publish p0");
-    p1.publish(OutgoingMessage::new("lane-out", b"p1"))
+    p1.publish(OutgoingMessage::new("lane-out", b"p1"), None)
         .await
         .expect("publish p1");
     p0.commit().await.expect("commit p0");
@@ -1601,7 +1705,7 @@ async fn bill_lane(
         .encode(&PlanItem { order_id: order.id })
         .expect("serializable");
     if publisher
-        .publish(OutgoingMessage::new("lane-items", payload.as_ref()))
+        .publish(OutgoingMessage::new("lane-items", payload.as_ref()), None)
         .await
         .is_err()
     {
@@ -1652,14 +1756,14 @@ async fn publisher_errors_after_shutdown() {
     let broker = connected().await;
     let publisher = broker.publisher(KafkaPublish::default());
     publisher
-        .publish(OutgoingMessage::new("orders", b"before"))
+        .publish(OutgoingMessage::new("orders", b"before"), None)
         .await
         .expect("publish before shutdown");
 
     broker.shutdown().await.expect("shutdown");
 
     let err = publisher
-        .publish(OutgoingMessage::new("orders", b"after"))
+        .publish(OutgoingMessage::new("orders", b"after"), None)
         .await
         .expect_err("publishing through a handle aliasing a closed transport must error");
     assert!(

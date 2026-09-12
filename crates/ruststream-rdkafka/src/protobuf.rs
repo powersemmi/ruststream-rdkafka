@@ -590,7 +590,7 @@ impl PublishLayer for ProtobufFrame {
 /// # #[derive(Clone, PartialEq, prost::Message, Deserialized)]
 /// # #[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
 /// # struct Order { #[prost(int64, tag = "1")] id: i64 }
-/// #[derive(Clone, PartialEq, prost::Message, Serialized)]
+/// #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
 /// #[wire(encode = ::prost::Message::encode)]
 /// struct Confirmation {
 ///     #[prost(int64, tag = "1")]
@@ -613,9 +613,9 @@ impl PublishLayer for ProtobufFrame {
 /// ```
 ///
 /// The handler returns its reply and nothing else: no slot parameter, no `publish().await`, no
-/// error branch in the body. The reply type needs no destination of its own either - the address
-/// comes from the `publish("confirmations")` clause - so `#[derive(Serialized)]` and the encode
-/// half of `#[wire(..)]` are all it carries.
+/// error branch in the body. The reply type declares no destination of its own - its `Outgoing`
+/// derive names nothing, so the address comes from the `publish("confirmations")` clause - and
+/// beyond that it carries only `#[derive(Serialized)]` and the encode half of `#[wire(..)]`.
 ///
 /// The same policy works wherever else one is named, an [`Out`](ruststream::runtime::Out) slot
 /// included, so a handler that publishes several messages frames them the same way.
@@ -738,6 +738,9 @@ impl<P> KafkaFramedPublisher<P> {
 
 impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPublisher<P> {
     type Error = KafkaError;
+    // Framing is a payload transform: the record's own settings are whatever the publisher
+    // underneath speaks, passed through untouched.
+    type Options = P::Options;
 
     /// Frames `msg` by its destination topic's subject and publishes it.
     ///
@@ -751,10 +754,14 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
     /// # Cancel safety
     ///
     /// Not cancel safe, for the same reason [`KafkaPublisher::publish`] is not.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+    async fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> Result<(), Self::Error> {
         let framed = match self.framing.frame(msg.name(), msg.payload()).await? {
             Framing::Framed(framed) => framed,
-            Framing::AlreadyFramed => return self.inner.publish(msg).await,
+            Framing::AlreadyFramed => return self.inner.publish(msg, options).await,
             Framing::NoSubject => {
                 return Err(KafkaError::SchemaRegistry(
                     format!(
@@ -780,7 +787,7 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
             }
         };
         let framed = OutgoingMessage::new(msg.name(), &framed).with_headers(msg.headers().clone());
-        self.inner.publish(framed).await
+        self.inner.publish(framed, options).await
     }
 }
 

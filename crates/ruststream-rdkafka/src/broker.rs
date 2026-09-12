@@ -10,7 +10,9 @@ use std::time::Duration;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
-use ruststream::{Broker, ConnectedBroker, DescribeServer, ServerSpec, Subscribe};
+use ruststream::{
+    Broker, ConnectedBroker, DescribeServer, RedeliveryAddress, ServerSpec, Subscribe,
+};
 use tokio::task;
 
 use crate::eos::EosSource;
@@ -351,8 +353,18 @@ impl Broker for KafkaBroker {
 }
 
 impl DescribeServer for KafkaBroker {
+    /// The bootstrap coordinate clients connect to, one `host:port` per configured address.
+    ///
+    /// Each address goes through [`ServerSpec::host_from_url`], so a `PLAINTEXT://` or
+    /// `SASL_SSL://` prefix, and any userinfo an address carries, stay out of the generated
+    /// document: it is published, and a credential that reaches it has left the service.
     fn describe_server(&self) -> ServerSpec {
-        ServerSpec::new(self.servers.join(","), "kafka")
+        let hosts: Vec<String> = self
+            .servers
+            .iter()
+            .map(|server| ServerSpec::host_from_url(server))
+            .collect();
+        ServerSpec::new(hosts.join(","), "kafka")
     }
 }
 
@@ -619,6 +631,15 @@ impl Subscribe for ConnectedKafkaBroker {
     /// [`KafkaBroker::default_group`].
     async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
         self.subscribe_with(KafkaTopic::new(name)).await
+    }
+
+    /// The topic itself: on Kafka a publish to a topic reaches every group reading it, which is
+    /// what makes the framework's deferred `retry_after` copy work here.
+    ///
+    /// A `^`-anchored name is a librdkafka topic regex, and a publish cannot address a regex, so
+    /// that form answers nothing rather than an address no record would arrive at.
+    fn redelivery_address(&self, name: &str) -> Option<RedeliveryAddress> {
+        (!name.starts_with('^')).then(|| RedeliveryAddress::new(name.to_owned()))
     }
 }
 

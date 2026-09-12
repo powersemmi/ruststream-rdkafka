@@ -22,7 +22,7 @@ ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
 # The lower bound names the pre-release deliberately: cargo excludes pre-release versions from a
 # range whose bounds carry none, so `>=0.7.0` would refuse the 0.7.0-rc candidates. This form
 # admits the candidate now and the final 0.7.0 when it lands.
-ruststream = { version = ">=0.7.0-rc.2, <0.8.0", default-features = false }
+ruststream = { version = ">=0.7.0-rc.3, <0.8.0", default-features = false }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }

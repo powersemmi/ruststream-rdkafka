@@ -205,7 +205,7 @@ async fn seed_a_framed_order(
         .expect("connect seed");
     seed_broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(trigger, payload.as_slice()))
+        .publish(OutgoingMessage::new(trigger, payload.as_slice()), None)
         .await
         .expect("seed trigger");
     seed_broker.shutdown().await.expect("seed shutdown");
@@ -540,7 +540,10 @@ message Confirmation {
             .expect("connect seed");
         seed_broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(trigger.as_str(), payload.as_slice()))
+            .publish(
+                OutgoingMessage::new(trigger.as_str(), payload.as_slice()),
+                None,
+            )
             .await
             .expect("seed trigger");
         seed_broker.shutdown().await.expect("seed shutdown");
@@ -823,7 +826,10 @@ message Confirmation {
             .expect("connect seed");
         seed_broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(trigger.as_str(), payload.as_slice()))
+            .publish(
+                OutgoingMessage::new(trigger.as_str(), payload.as_slice()),
+                None,
+            )
             .await
             .expect("seed trigger");
         seed_broker.shutdown().await.expect("seed shutdown");

@@ -1,9 +1,8 @@
 //! The subscription descriptor: one topic consumed through one consumer group.
 
-#[cfg(feature = "testing")]
 use std::future::{Future, ready};
 
-use ruststream::SubscriptionSource;
+use ruststream::{RedeliveryAddress, SubscriptionSource};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
@@ -431,6 +430,25 @@ impl KafkaTopic {
     }
 }
 
+impl KafkaTopic {
+    /// The topic a publisher writes to in order to reach this subscription again, for the
+    /// framework's deferred `retry_after` copy.
+    ///
+    /// The first subscribed topic, which every group reading it receives. Two shapes answer
+    /// nothing instead, because a copy published there would not come back:
+    ///
+    /// - a pattern subscription, since a record is produced to a topic and never to a regex;
+    /// - a manual partition assignment, since the subscription reads named partitions and the
+    ///   partitioner would be free to place the copy on one it does not read.
+    fn redelivery_topic(&self) -> Option<RedeliveryAddress> {
+        if self.requires_pattern || !self.partitions.is_empty() {
+            return None;
+        }
+        let first = self.topics.first()?;
+        (!first.starts_with('^')).then(|| RedeliveryAddress::new(first.clone()))
+    }
+}
+
 impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopic {
     type Subscriber = KafkaSubscriber;
 
@@ -443,6 +461,15 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopic {
         connected: &ConnectedKafkaBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
         connected.subscribe_with(self).await
+    }
+
+    // Answered from the descriptor alone, so nothing is awaited; the trait is what shapes the
+    // signature.
+    fn redelivery_address(
+        &self,
+        _connected: &ConnectedKafkaBroker,
+    ) -> impl Future<Output = Result<Option<RedeliveryAddress>, KafkaError>> {
+        ready(Ok(self.redelivery_topic()))
     }
 }
 
@@ -477,6 +504,13 @@ impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic
             self.commit.clone(),
         ))
     }
+
+    fn redelivery_address(
+        &self,
+        _broker: &crate::testing::ConnectedKafkaTestBroker,
+    ) -> impl Future<Output = Result<Option<RedeliveryAddress>, KafkaError>> {
+        ready(Ok(self.redelivery_topic()))
+    }
 }
 
 #[cfg(test)]
@@ -504,5 +538,43 @@ mod tests {
             .max_deliveries(3)
             .validate()
             .expect("a cap with a dead-letter topic is valid");
+    }
+
+    #[test]
+    fn a_plain_subscription_reports_the_topic_a_deferred_copy_goes_to() {
+        let address = KafkaTopic::new("orders")
+            .group("orders-svc")
+            .redelivery_topic()
+            .expect("a topic is a publish destination");
+        assert_eq!(address.as_str(), "orders");
+    }
+
+    #[test]
+    fn a_multi_topic_subscription_reports_the_first_of_them() {
+        let address = KafkaTopic::new("orders")
+            .and_topic("orders.eu")
+            .redelivery_topic()
+            .expect("the first topic reaches the subscription");
+        assert_eq!(address.as_str(), "orders");
+    }
+
+    // A copy published under either of these would not come back, so the descriptor says nothing
+    // and an application wiring `retry_via` over it refuses to start.
+    #[test]
+    fn a_pattern_or_a_manual_assignment_reports_no_address() {
+        assert!(
+            KafkaTopic::pattern("^orders\\..*")
+                .group("orders-svc")
+                .redelivery_topic()
+                .is_none(),
+            "a record is produced to a topic, never to a regex"
+        );
+        assert!(
+            KafkaTopic::new("orders")
+                .partitions([0])
+                .redelivery_topic()
+                .is_none(),
+            "the partitioner may place the copy on a partition this subscription does not read"
+        );
     }
 }

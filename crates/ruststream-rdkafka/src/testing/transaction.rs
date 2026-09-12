@@ -18,7 +18,10 @@ use ruststream::{
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
 use crate::error::KafkaError;
-use crate::publisher::{KafkaPartitionedPublish, KafkaTransactionalPublish, PartitionLanes};
+use crate::message::PARTITION_HEADER;
+use crate::publisher::{
+    KafkaOptions, KafkaPartitionedPublish, KafkaTransactionalPublish, PartitionLanes,
+};
 
 /// One publish held back while a transaction is open: topic, payload, headers.
 type Buffered = (String, Bytes, HeaderMap);
@@ -90,7 +93,7 @@ type Buffered = (String, Bytes, HeaderMap);
 ///
 /// publisher.begin_transaction().await?;
 /// publisher
-///     .publish(OutgoingMessage::new("shipments", b"{}".as_slice()))
+///     .publish(OutgoingMessage::new("shipments", b"{}".as_slice()), None)
 ///     .await?;
 /// publisher.commit().await?;
 /// # Ok(())
@@ -168,7 +171,11 @@ impl KafkaTestTransactionalPublisher {
 
     /// Buffers `msg` when a transaction is open, routes it otherwise. Synchronous, so no lock
     /// guard is ever held across an await point.
-    fn send(&self, msg: &OutgoingMessage<'_>) -> Result<(), KafkaError> {
+    fn send(
+        &self,
+        msg: &OutgoingMessage<'_>,
+        options: Option<&KafkaOptions>,
+    ) -> Result<(), KafkaError> {
         if msg.name().is_empty() {
             return Err(KafkaError::InvalidOptions(
                 "topic name must not be empty; the outgoing message name is the destination topic"
@@ -176,10 +183,16 @@ impl KafkaTestTransactionalPublisher {
             ));
         }
         self.state.ensure_open(msg.name())?;
+        let mut headers = msg.headers().clone();
+        // One partition here, so a partition named per record is carried where the broker log
+        // can read it back rather than placing anything.
+        if let Some(partition) = options.and_then(|options| options.partition_setting()) {
+            headers.insert(PARTITION_HEADER, partition.to_string());
+        }
         let entry: Buffered = (
             msg.name().to_owned(),
             Bytes::copy_from_slice(msg.payload()),
-            msg.headers().clone(),
+            headers,
         );
         {
             let mut open = self.open.lock().expect("test transaction mutex poisoned");
@@ -224,16 +237,24 @@ impl KafkaTestTransactionalPublisher {
 
 impl Publisher for KafkaTestTransactionalPublisher {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Buffers `msg` into the open transaction, or routes it to subscribers of the topic named
     /// by [`OutgoingMessage::name`] when none is open.
+    ///
+    /// A partition named per record is recorded, not honoured, as on the plain in-process
+    /// publisher.
     ///
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty, and
     /// [`KafkaError::Closed`] once the transport this handle aliases has been shut down.
-    fn publish(&self, msg: OutgoingMessage<'_>) -> impl Future<Output = Result<(), Self::Error>> {
-        ready(self.send(&msg))
+    fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        ready(self.send(&msg, options))
     }
 }
 
@@ -338,7 +359,8 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaTransactionalPublish {
 /// let lane = lanes.for_partition(3).await?;
 /// assert_eq!(lane.id(), "billing-svc-1-p3");
 /// lane.begin_transaction().await?;
-/// lane.publish(OutgoingMessage::new("invoice-lines", b"{}".as_slice())).await?;
+/// lane.publish(OutgoingMessage::new("invoice-lines", b"{}".as_slice()), None)
+///     .await?;
 /// lane.commit().await?;
 /// # Ok(())
 /// # }

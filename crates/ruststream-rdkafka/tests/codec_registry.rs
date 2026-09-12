@@ -134,7 +134,7 @@ async fn seed(kafka: &str, topic: &str, payload: &[u8]) {
         .expect("connect seed");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(topic, payload))
+        .publish(OutgoingMessage::new(topic, payload), None)
         .await
         .expect("seed");
     broker.shutdown().await.expect("seed shutdown");

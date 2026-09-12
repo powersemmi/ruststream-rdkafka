@@ -127,7 +127,7 @@ async fn live_avro_middleware_end_to_end() {
         let json = format!(r#"{{"id":{},"item":"item-{n}"}}"#, base + n);
         seed_broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&trigger, json.as_bytes()))
+            .publish(OutgoingMessage::new(&trigger, json.as_bytes()), None)
             .await
             .expect("seed trigger");
     }

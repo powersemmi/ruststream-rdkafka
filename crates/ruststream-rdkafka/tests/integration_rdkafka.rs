@@ -158,7 +158,7 @@ where
 async fn publish(broker: &ConnectedKafkaBroker, topic: &str, payload: &[u8]) {
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(topic, payload))
+        .publish(OutgoingMessage::new(topic, payload), None)
         .await
         .expect("publish");
 }
@@ -180,7 +180,10 @@ async fn round_trip_with_headers_and_key() {
     headers.insert(PARTITION_KEY_HEADER, "order-1");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(&topic, b"{}").with_headers(headers))
+        .publish(
+            OutgoingMessage::new(&topic, b"{}").with_headers(headers),
+            None,
+        )
         .await
         .expect("publish");
 
@@ -418,7 +421,10 @@ async fn shared_key_lands_on_one_partition() {
         headers.insert(PARTITION_KEY_HEADER, "same-key");
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&topic, format!("k{i}").as_bytes()).with_headers(headers))
+            .publish(
+                OutgoingMessage::new(&topic, format!("k{i}").as_bytes()).with_headers(headers),
+                None,
+            )
             .await
             .expect("publish");
     }
@@ -573,7 +579,10 @@ async fn exhausted_retries_dead_letter_with_source_headers() {
     headers.insert(RETRY_COUNT_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(&topic, b"poison").with_headers(headers))
+        .publish(
+            OutgoingMessage::new(&topic, b"poison").with_headers(headers),
+            None,
+        )
         .await
         .expect("publish");
 
@@ -1051,6 +1060,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
                         format!(r#"{{"key":"{key}","seq":{seq}}}"#).as_bytes(),
                     )
                     .with_headers(headers),
+                    None,
                 )
                 .await
                 .expect("publish");
@@ -1150,6 +1160,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
                     format!(r#"{{"key":"{key}","seq":{seq}}}"#).as_bytes(),
                 )
                 .with_headers(headers),
+                None,
             )
             .await
             .expect("publish");
@@ -1225,10 +1236,10 @@ async fn partition_scoped_transactions_run_independently() {
 
     // Another partition's publisher owns its own id and transacts independently.
     p1.begin_transaction().await.expect("begin p1");
-    p0.publish(OutgoingMessage::new(&topic, b"from-p0".as_slice()))
+    p0.publish(OutgoingMessage::new(&topic, b"from-p0".as_slice()), None)
         .await
         .expect("publish p0");
-    p1.publish(OutgoingMessage::new(&topic, b"from-p1".as_slice()))
+    p1.publish(OutgoingMessage::new(&topic, b"from-p1".as_slice()), None)
         .await
         .expect("publish p1");
 
@@ -1285,7 +1296,11 @@ async fn eos_pipeline_commits_offsets_with_records() {
             let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
             let forwarded: Vec<u8> = msg.payload().to_vec();
             pipeline
-                .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
+                .publish(
+                    &source,
+                    OutgoingMessage::new(&output, forwarded.as_slice()),
+                    None,
+                )
                 .await
                 .expect("pipeline publish");
             msg.ack().await.expect("ack");
@@ -1376,7 +1391,11 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
         let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
         let forwarded: Vec<u8> = msg.payload().to_vec();
         pipeline
-            .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .publish(
+                &source,
+                OutgoingMessage::new(&output, forwarded.as_slice()),
+                None,
+            )
             .await
             .expect("pipeline publish (first pass)");
         if expected == b"second" {
@@ -1397,7 +1416,11 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
         let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
         let forwarded: Vec<u8> = msg.payload().to_vec();
         pipeline
-            .publish(&source, OutgoingMessage::new(&output, forwarded.as_slice()))
+            .publish(
+                &source,
+                OutgoingMessage::new(&output, forwarded.as_slice()),
+                None,
+            )
             .await
             .expect("pipeline publish (second pass)");
         msg.ack().await.expect("ack");
@@ -1452,7 +1475,10 @@ async fn explicit_partition_header_targets_the_partition() {
     headers.insert(PARTITION_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(&topic, b"pinned".as_slice()).with_headers(headers))
+        .publish(
+            OutgoingMessage::new(&topic, b"pinned".as_slice()).with_headers(headers),
+            None,
+        )
         .await
         .expect("publish pinned");
 
@@ -1470,7 +1496,10 @@ async fn explicit_partition_header_targets_the_partition() {
     bad.insert(PARTITION_HEADER, "one");
     let err = broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new(&topic, b"nope".as_slice()).with_headers(bad))
+        .publish(
+            OutgoingMessage::new(&topic, b"nope".as_slice()).with_headers(bad),
+            None,
+        )
         .await
         .expect_err("malformed partition must fail");
     assert!(matches!(err, KafkaError::InvalidOptions(_)));
@@ -1492,7 +1521,10 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
         headers.insert(PARTITION_HEADER, partition.to_string());
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&topic, payload).with_headers(headers))
+            .publish(
+                OutgoingMessage::new(&topic, payload).with_headers(headers),
+                None,
+            )
             .await
             .expect("publish pinned");
     }
@@ -1677,7 +1709,10 @@ async fn manual_assignment_composes_with_partition_lanes() {
             let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
             broker
                 .publisher(KafkaPublish::default())
-                .publish(OutgoingMessage::new(&topic, payload.as_bytes()).with_headers(headers))
+                .publish(
+                    OutgoingMessage::new(&topic, payload.as_bytes()).with_headers(headers),
+                    None,
+                )
                 .await
                 .expect("publish");
         }
@@ -1846,7 +1881,11 @@ async fn forward(pipeline: &EosPipeline, msg: &KafkaMessage, output: &str) {
     let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
     let payload = msg.payload().to_vec();
     pipeline
-        .publish(&source, OutgoingMessage::new(output, payload.as_slice()))
+        .publish(
+            &source,
+            OutgoingMessage::new(output, payload.as_slice()),
+            None,
+        )
         .await
         .expect("pipeline publish");
 }
@@ -2077,14 +2116,14 @@ async fn the_early_publisher_errors_after_shutdown() {
     let retries = broker.retry_publisher();
     let connected = broker.connect().await.expect("connect");
     retries
-        .publish(OutgoingMessage::new(&topic, b"live".as_slice()))
+        .publish(OutgoingMessage::new(&topic, b"live".as_slice()), None)
         .await
         .expect("the cell resolves once the broker connects");
 
     connected.shutdown().await.expect("shutdown");
 
     let err = retries
-        .publish(OutgoingMessage::new(&topic, b"after".as_slice()))
+        .publish(OutgoingMessage::new(&topic, b"after".as_slice()), None)
         .await
         .expect_err("publishing through a handle aliasing a closed connection must error");
     assert!(
@@ -2139,7 +2178,7 @@ async fn ctx_extractors_inject_delivery_fields() {
         let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+            .publish(OutgoingMessage::new(&topic, payload.as_bytes()), None)
             .await
             .expect("publish");
     }
@@ -2189,7 +2228,7 @@ async fn forward_through_lane<L: PartitionLanes>(
     let topic = std::env::var("LANES_OUT_TOPIC").expect("out topic env");
     let payload = format!(r#"{{"partition":{},"seq":{}}}"#, order.partition, order.seq);
     if let Err(err) = publisher
-        .publish(OutgoingMessage::new(&topic, payload.as_bytes()))
+        .publish(OutgoingMessage::new(&topic, payload.as_bytes()), None)
         .await
     {
         publisher.abort().await.ok();
@@ -2236,7 +2275,7 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
         let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
         broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&input, payload.as_bytes()))
+            .publish(OutgoingMessage::new(&input, payload.as_bytes()), None)
             .await
             .expect("publish input");
     }
@@ -2324,7 +2363,7 @@ async fn eos_publishing_handler_replies_ride_the_window() {
         let payload = format!(r#"{{"partition":0,"seq":{seq}}}"#);
         producer
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&input, payload.as_bytes()))
+            .publish(OutgoingMessage::new(&input, payload.as_bytes()), None)
             .await
             .expect("publish input");
     }
