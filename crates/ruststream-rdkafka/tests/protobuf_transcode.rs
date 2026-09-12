@@ -10,7 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ruststream::runtime::{App, AppInfo, HandlerOutcome, Reply, RustStream, State};
-use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
+use ruststream::{
+    Broker, ConnectedBroker, FromRef, Outgoing, OutgoingMessage, Publisher, subscriber,
+};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
 };
@@ -22,7 +24,9 @@ use tokio::sync::Notify;
 /// schema id no other run has, and the probe filters deliveries by a marker id range.
 const FRAMED_TOPIC: &str = "proto-mw-frames-placeholder";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// The relay republishes the order it read, so the type declares no topic of its own: the run's
+// reply topic stays the mount site's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Outgoing)]
 struct Order {
     id: i64,
     item: String,
@@ -126,7 +130,7 @@ async fn live_protobuf_middleware_end_to_end() {
         let json = format!(r#"{{"id":{},"item":"item-{n}"}}"#, base + n);
         seed_broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&trigger, json.as_bytes()))
+            .publish(OutgoingMessage::new(&trigger, json.as_bytes()), None)
             .await
             .expect("seed trigger");
     }

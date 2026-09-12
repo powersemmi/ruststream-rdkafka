@@ -22,7 +22,7 @@ ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
 # The lower bound names the pre-release deliberately: cargo excludes pre-release versions from a
 # range whose bounds carry none, so `>=0.7.0` would refuse the 0.7.0-rc candidates. This form
 # admits the candidate now and the final 0.7.0 when it lands.
-ruststream = { version = ">=0.7.0-rc.1, <0.8.0", default-features = false }
+ruststream = { version = ">=0.7.0-rc.3, <0.8.0", default-features = false }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
@@ -37,6 +37,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 apache-avro = { version = "0.22", features = ["derive"] }
+# Named explicitly, not taken through prost-reflect's re-export: the byte-lane surface bounds on
+# `prost::Message`, and a generated type only satisfies that bound if it was built against this
+# very version - so the version a service must match belongs in the manifest, not in a re-export.
+prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 

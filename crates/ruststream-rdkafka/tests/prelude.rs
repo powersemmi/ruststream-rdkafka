@@ -25,3 +25,11 @@ fn _policies_carry_the_concept_names() {
 fn _seek_vocabulary_resolves<S: Seeker<Position = KafkaPosition>>(seeker: &S) {
     let _ = (seeker, SeekHandle, Position);
 }
+
+/// The per-record vocabulary, the one part of this crate a handler body names: the options type
+/// its slot bound carries, and the step trait whose method it calls on the publish builder.
+fn _per_record_settings_resolve<P: Publisher<Options = KafkaOptions>>(_publisher: &P) {}
+
+fn _publish_steps_resolve<B: KafkaPublishSteps>(builder: B) -> B {
+    builder.partition(0)
+}

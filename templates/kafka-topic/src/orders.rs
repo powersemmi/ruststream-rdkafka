@@ -24,7 +24,11 @@ pub struct Order {
 }
 
 /// The reply published to the `confirmations` topic for each order.
-#[derive(Debug, Serialize, JsonSchema)]
+///
+/// `#[outgoing(name = "confirmations")]` is the topic every confirmation lands on, wherever it
+/// is published from.
+#[derive(Debug, Serialize, Outgoing, JsonSchema)]
+#[outgoing(name = "confirmations")]
 pub struct Confirmation {
     pub id: u64,
     pub accepted: bool,
@@ -32,9 +36,9 @@ pub struct Confirmation {
 
 /// Confirms an incoming order and publishes a `Confirmation` to the `confirmations` topic.
 ///
-/// The `publish("confirmations")` clause makes the runtime encode the `Ok` value and publish
-/// it through the publisher wired in `routes` (the outgoing message name is the destination
-/// topic); an `Err` settles the delivery by its `HandlerOutcome` instead.
+/// The `publish` clause makes the runtime encode the `Ok` value and publish it through the
+/// publisher wired in `routes`, at the topic the reply type declares; an `Err` settles the
+/// delivery by its `HandlerOutcome` instead.
 ///
 /// The descriptor wires the retry pipeline: `and_topic` puts the retry topic on the same
 /// subscription, so a `retry()` republishes there (with an attempt count riding in a header)
@@ -48,7 +52,7 @@ pub struct Confirmation {
         .retry(Retry::Topic("orders.retry".into()))
         .max_deliveries(5)
         .dead_letter("orders.dlq"),
-    publish("confirmations")
+    publish
 )]
 pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerOutcome> {
     if order.quantity == 0 {

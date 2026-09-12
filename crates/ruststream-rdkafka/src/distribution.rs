@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ruststream::runtime::{Outgoing, PublishContext, PublishTransform};
+use ruststream::runtime::{ContextKind, Outgoing, PublishTransform, Reads};
 
 use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 
@@ -19,6 +19,11 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 /// spread for long, near-constant-cost messages. A reply that already carries an explicit
 /// partition or a record key is left alone: keys exist for ordering, and overriding either
 /// would silently break the caller's placement.
+///
+/// A transform sees the record, not the publish call, which is why the placement travels as a
+/// header here while a call site names it with the builder's
+/// [`partition`](crate::KafkaPublishSteps::partition) step. A publish that used the step keeps
+/// that partition: the call site wins over the cycle.
 ///
 /// The count is explicit on purpose (cheap and predictable); it must match the destination
 /// topic's partition count, or the tail partitions simply receive nothing (a smaller count)
@@ -34,10 +39,11 @@ use crate::message::{PARTITION_HEADER, PARTITION_KEY_HEADER};
 /// use ruststream_rdkafka::prelude::*;
 /// # #[derive(serde::Deserialize)]
 /// # struct Order { id: u64 }
-/// # #[derive(serde::Serialize)]
+/// # #[derive(serde::Serialize, Outgoing)]
+/// # #[outgoing(name = "work-items")]
 /// # struct WorkItem { order_id: u64 }
 ///
-/// #[ruststream::subscriber("orders", publish("work-items"))]
+/// #[ruststream::subscriber("orders", publish)]
 /// async fn plan(order: &Order) -> WorkItem {
 ///     WorkItem { order_id: order.id }
 /// }
@@ -78,8 +84,12 @@ impl RoundRobin {
     }
 }
 
-impl<C> PublishTransform<C> for RoundRobin {
-    fn apply(&self, out: &mut Outgoing<'_>, _cx: &PublishContext<'_, C>) {
+impl<K: ContextKind> PublishTransform<K> for RoundRobin {
+    // It reads nothing from the position, so it mounts on a reply and on a slot alike, and the
+    // destination is not its business.
+    type Destination = Reads;
+
+    fn apply(&self, out: &mut Outgoing<'_>, _cx: &K::View<'_>) {
         if out.headers().get(PARTITION_HEADER).is_some()
             || out.headers().get(PARTITION_KEY_HEADER).is_some()
         {

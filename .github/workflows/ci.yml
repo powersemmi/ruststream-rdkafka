@@ -3,8 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
+  # No base filter: a pull request stacked on another one has a branch for its base, and a filter
+  # naming `main` leaves it with no checks at all - which reads as a conflicting branch rather
+  # than as a workflow that declined to run.
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -159,8 +161,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # `--wait` blocks until the healthcheck reports the node ready.
-      - name: Start Kafka
+      # The stand holds Kafka and the Confluent Schema Registry; `--wait` blocks until both
+      # healthchecks report ready.
+      - name: Start the broker stand
         run: docker compose -f docker-compose.test.yml up -d --wait
 
       - name: Run Kafka integration tests
@@ -174,7 +177,30 @@ jobs:
           KAFKA_TEST_URL: 127.0.0.1:9092
         run: cargo test -p ruststream-rdkafka --features testing --test conformance_rdkafka -- --test-threads=1
 
-      - name: Stop Kafka
+      # The registry suites: the client against a real registry, and the framing middleware end
+      # to end on all three flavors. They need both URLs, and the transcoding ones need their
+      # format features on.
+      - name: Run Schema Registry suites
+        env:
+          KAFKA_TEST_URL: 127.0.0.1:9092
+          SCHEMA_REGISTRY_TEST_URL: http://127.0.0.1:8081
+        run: |
+          cargo test -p ruststream-rdkafka --features schema-registry,avro,protobuf \
+            --test schema_registry --test avro_transcode --test protobuf_transcode \
+            -- --test-threads=1
+
+      # A live test whose URL is unset returns before it asserts anything and still reports ok,
+      # so a green step is no proof that the suites ran. The registry starts empty, and every
+      # suite above registers a subject in it, so its subject list is that proof.
+      - name: Assert the registry suites reached the registry
+        env:
+          SCHEMA_REGISTRY_TEST_URL: http://127.0.0.1:8081
+        run: |
+          subjects=$(curl -sf "$SCHEMA_REGISTRY_TEST_URL/subjects")
+          echo "subjects registered by the suites: $subjects"
+          test "$subjects" != "[]"
+
+      - name: Stop the broker stand
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 

@@ -1,6 +1,8 @@
 //! The crate error type shared by the broker, publishers, and subscribers.
 
 use std::error::Error as StdError;
+#[cfg(feature = "schema-registry")]
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -88,6 +90,34 @@ pub enum KafkaError {
     #[cfg(feature = "schema-registry")]
     #[error("schema registry error: {0}")]
     SchemaRegistry(#[source] Box<dyn StdError + Send + Sync>),
+
+    /// A Schema Registry request did not answer within the client's request timeout.
+    ///
+    /// A registry that accepts the connection and then goes silent is the case this separates
+    /// from an outright failure: both edges resolve schemas on the async delivery path, so
+    /// without a deadline one silent registry holds a delivery for as long as it stays silent.
+    /// [`SchemaRegistry::request_timeout`](crate::SchemaRegistry::request_timeout) sets the
+    /// deadline.
+    #[cfg(feature = "schema-registry")]
+    #[error("schema registry request {request} did not answer within {timeout:?}")]
+    SchemaRegistryTimeout {
+        /// The registry path the request targeted, for example `/schemas/ids/7`.
+        request: String,
+        /// The deadline that expired.
+        timeout: Duration,
+    },
+
+    /// A value could not be written to, or read from, its binary wire form.
+    ///
+    /// This is the byte lanes' own failure: the Avro or Protobuf encoder rejected the value,
+    /// the payload is not the datum a schema describes, or a delivery does not carry the
+    /// Confluent envelope the reader expected. It stays distinct from
+    /// [`SchemaRegistry`](Self::SchemaRegistry), which is the registry conversation failing -
+    /// the fixed-schema lane reaches no registry at all, so folding the two would make every
+    /// diagnostic point at a component that was never involved.
+    #[cfg(feature = "schema-registry")]
+    #[error("wire format error: {0}")]
+    WireFormat(#[source] Box<dyn StdError + Send + Sync>),
 }
 
 impl KafkaError {
@@ -102,6 +132,20 @@ impl KafkaError {
     #[cfg(feature = "schema-registry")]
     pub(crate) fn schema_registry(err: impl StdError + Send + Sync + 'static) -> Self {
         Self::SchemaRegistry(Box::new(err))
+    }
+
+    // Only a format's own encoder produces one of these; the envelope's own failures come
+    // through `malformed`, which the frame types report with no format feature enabled.
+    #[cfg(any(feature = "avro", feature = "protobuf"))]
+    pub(crate) fn wire_format(err: impl StdError + Send + Sync + 'static) -> Self {
+        Self::WireFormat(Box::new(err))
+    }
+
+    /// The wire-format failure the lanes report for a payload that is structurally wrong (not
+    /// framed, indexes truncated) rather than for another error's failure.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn malformed(message: impl Into<String>) -> Self {
+        Self::WireFormat(message.into().into())
     }
 
     pub(crate) fn subscribe(err: rdkafka::error::KafkaError) -> Self {

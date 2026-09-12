@@ -18,7 +18,7 @@ use ruststream_rdkafka::KafkaPublish;
 // --8<-- [start:producer]
 use ruststream::{HeaderMap, OutgoingMessage, Publisher};
 use ruststream_rdkafka::{
-    KafkaBroker, KafkaError, KafkaPublisher, PARTITION_HEADER, PARTITION_KEY_HEADER,
+    KafkaBroker, KafkaError, KafkaOptions, KafkaPublisher, PARTITION_KEY_HEADER,
 };
 
 // The partition-key header becomes the record's native key on publish, so Kafka itself routes
@@ -32,25 +32,30 @@ async fn publish_keyed(
     headers.insert(PARTITION_KEY_HEADER, tenant.to_owned());
     let payload = format!(r#"{{"id":{id},"tenant":"{tenant}"}}"#);
     publisher
-        .publish(OutgoingMessage::new("orders", payload.as_bytes()).with_headers(headers))
+        .publish(
+            OutgoingMessage::new("orders", payload.as_bytes()).with_headers(headers),
+            None,
+        )
         .await
 }
 // --8<-- [end:producer]
 
 // --8<-- [start:partition]
-// The partition header pins the record to an exact partition: the publisher consumes the
-// header (it never hits the wire) and targets the partition explicitly, winning over the
-// partitioner and the record key. The partition must exist, or the publish fails.
+// The partition is a per-record setting, so it travels as one: the publisher targets that
+// partition explicitly, winning over the partitioner and the record key. The partition must
+// exist, or the publish fails. On a publish builder the same setting is the `.partition(..)`
+// step.
 async fn publish_pinned(
     publisher: &KafkaPublisher,
     id: u64,
     partition: i32,
 ) -> Result<(), KafkaError> {
-    let mut headers = HeaderMap::new();
-    headers.insert(PARTITION_HEADER, partition.to_string());
     let payload = format!(r#"{{"id":{id},"tenant":"pinned"}}"#);
     publisher
-        .publish(OutgoingMessage::new("orders", payload.as_bytes()).with_headers(headers))
+        .publish(
+            OutgoingMessage::new("orders", payload.as_bytes()),
+            Some(&KafkaOptions::default().partition(partition)),
+        )
         .await
 }
 // --8<-- [end:partition]

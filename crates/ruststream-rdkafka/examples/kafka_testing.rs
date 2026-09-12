@@ -9,9 +9,12 @@
 //! ```
 
 use ruststream::codec::{Codec as _, DefaultCodec};
-use ruststream::runtime::{AppInfo, Ctx, HandlerOutcome, RustStream, SubscriberSettings as _};
+use ruststream::runtime::{AppInfo, Ctx, HandlerOutcome, Out, RustStream, SubscriberSettings as _};
 use ruststream::testing::TestApp;
-use ruststream::{Broker, OutgoingMessage, Publisher, Seeker as _, subscriber};
+use ruststream::{
+    Broker, OutSlot, Outgoing, OutgoingMessage, Publisher, Seeker as _, TransactionalPublisher,
+    subscriber,
+};
 use ruststream_rdkafka::context::keys::SeekHandle;
 use ruststream_rdkafka::testing::KafkaTestBroker;
 use ruststream_rdkafka::{KafkaPosition, KafkaPublish, KafkaTopic};
@@ -56,6 +59,58 @@ async fn settle_batch(batch: &Batch, Ctx(seeker): Ctx<SeekHandle>) -> HandlerOut
     HandlerOutcome::ack()
 }
 
+// --8<-- [start:transactions]
+#[derive(Debug, Serialize, Deserialize)]
+struct Refund {
+    order_id: u64,
+    lines: u64,
+    /// Whether the refund settles or is called off half-way, so one handler shows both paths.
+    settle: bool,
+}
+
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "refund-lines")]
+struct RefundLine {
+    order_id: u64,
+    line: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(RefundLine)]
+struct Lines;
+
+// The handler names the capability and the mount site names the production policy, so neither
+// line changes when this app is built on a real cluster.
+#[subscriber("refunds")]
+async fn refund(
+    order: &Refund,
+    Out(lines): Out<impl TransactionalPublisher, Lines>,
+) -> HandlerOutcome {
+    if lines.begin_transaction().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    for line in 0..order.lines {
+        let entry = RefundLine {
+            order_id: order.order_id,
+            line,
+        };
+        if lines.message(&entry).publish().await.is_err() {
+            lines.abort().await.ok();
+            return HandlerOutcome::retry();
+        }
+    }
+    let settled = if order.settle {
+        lines.commit().await
+    } else {
+        lines.abort().await
+    };
+    if settled.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+// --8<-- [end:transactions]
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     // --8<-- [start:testapp]
@@ -67,6 +122,12 @@ async fn main() {
     let app = RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
         b.include(accept);
         b.include(settle_batch.start_at(KafkaPosition::earliest()));
+        b.include(refund)
+            .out(
+                Lines,
+                KafkaPublish::default().transactional_id("refunds-svc-1"),
+            )
+            .build();
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -98,6 +159,41 @@ async fn main() {
     assert_eq!(handled, [0, 2], "the poisoned run must be skipped whole");
     // --8<-- [end:seek]
 
+    // --8<-- [start:transaction_asserts]
+    // The abort discards the whole fan-out: the slot recorded what the handler sent through it,
+    // and the broker's log - what actually became visible - stayed empty.
+    tb.broker::<KafkaTestBroker>()
+        .publish(
+            "refunds",
+            &Refund {
+                order_id: 1,
+                lines: 3,
+                settle: false,
+            },
+        )
+        .await
+        .expect("publish drives the handler to quiescence");
+    tb.broker::<KafkaTestBroker>()
+        .published::<RefundLine>("refund-lines")
+        .assert_not_called();
+
+    // The commit releases all three at once.
+    tb.broker::<KafkaTestBroker>()
+        .publish(
+            "refunds",
+            &Refund {
+                order_id: 2,
+                lines: 3,
+                settle: true,
+            },
+        )
+        .await
+        .expect("publish");
+    tb.broker::<KafkaTestBroker>()
+        .published::<RefundLine>("refund-lines")
+        .assert_called(3);
+    // --8<-- [end:transaction_asserts]
+
     tb.shutdown().await.expect("shutdown");
 
     println!("all in-process checks passed");
@@ -112,7 +208,7 @@ async fn seed_batches(broker: &KafkaTestBroker) {
             .encode(&Batch { id, resume_at })
             .expect("serializable");
         publisher
-            .publish(OutgoingMessage::new("batches", payload.as_ref()))
+            .publish(OutgoingMessage::new("batches", payload.as_ref()), None)
             .await
             .expect("seed");
     }

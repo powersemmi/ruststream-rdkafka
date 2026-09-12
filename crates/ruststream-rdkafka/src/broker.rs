@@ -10,7 +10,9 @@ use std::time::Duration;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
-use ruststream::{Broker, ConnectedBroker, DescribeServer, ServerSpec, Subscribe};
+use ruststream::{
+    Broker, ConnectedBroker, DescribeServer, RedeliveryAddress, ServerSpec, Subscribe,
+};
 use tokio::task;
 
 use crate::eos::EosSource;
@@ -39,6 +41,8 @@ pub(crate) struct ConnState {
     closed: AtomicBool,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
 }
 
 impl ConnState {
@@ -135,6 +139,8 @@ pub struct KafkaBroker {
     early_conn: EarlyConn,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
 }
 
 impl KafkaBroker {
@@ -157,6 +163,8 @@ impl KafkaBroker {
             early_conn: Arc::new(OnceLock::new()),
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: None,
         }
     }
 
@@ -194,8 +202,10 @@ impl KafkaBroker {
     /// The consumer group used by subscriptions that do not set one themselves
     /// ([`KafkaTopic::group`](crate::KafkaTopic::group) overrides it per subscription).
     ///
-    /// Kafka requires a group to subscribe, so the bare-string `#[subscriber("orders")]` form
-    /// needs this; a subscription that ends up with no group at all is a startup error.
+    /// Joining a group is what the bare-string `#[subscriber("orders")]` form does, so it needs
+    /// this; a subscription that ends up with no group at all is a startup error. A subscription
+    /// that names its partitions with [`KafkaTopic::partitions`](crate::KafkaTopic::partitions)
+    /// joins no group and needs none.
     #[must_use]
     pub fn default_group(mut self, group: impl Into<String>) -> Self {
         self.default_group = Some(group.into());
@@ -251,6 +261,25 @@ impl KafkaBroker {
         self
     }
 
+    /// Attaches a [`SchemaPrefetch`](crate::schema_registry::SchemaPrefetch), the async half of
+    /// a registry-backed codec: [`connect`](ruststream::Broker::connect) resolves the subjects
+    /// its codecs publish under, and every subscription resolves the writer schema an arriving
+    /// envelope names - both before the synchronous codec runs, which is the only way a sync
+    /// `encode` / `decode` can reach an async registry without blocking a runtime worker.
+    ///
+    /// Deliveries are not touched: this attachment fills a cache and nothing else. It is
+    /// therefore the opposite of [`schema_registry`](Self::schema_registry), which rewrites
+    /// framed deliveries into JSON for the transcoding compatibility path. The two are
+    /// alternatives, not layers: with both attached the transcode would hand a JSON document to
+    /// a codec expecting the wire format, so the prefetch runs first and still sees the
+    /// envelope, but the pairing is a configuration mistake either way.
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_prefetch(mut self, prefetch: crate::schema_registry::SchemaPrefetch) -> Self {
+        self.schema_prefetch = Some(prefetch);
+        self
+    }
+
     fn base_config(&self) -> ClientConfig {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", self.servers.join(","));
@@ -294,6 +323,14 @@ impl Broker for KafkaBroker {
             .map_err(|err| KafkaError::Connect(Box::new(err)))?
             .map_err(KafkaError::connect)?;
 
+        // Every subject a registry codec publishes under, resolved here rather than on the first
+        // publish: the codec's own encode is synchronous, and a subject that does not exist
+        // should stop the app coming up rather than surface as one failed message later.
+        #[cfg(feature = "schema-registry")]
+        if let Some(prefetch) = &self.schema_prefetch {
+            prefetch.warm_subjects().await?;
+        }
+
         let state = Arc::new(ConnState {
             producer,
             producer_config,
@@ -304,6 +341,8 @@ impl Broker for KafkaBroker {
             closed: AtomicBool::new(false),
             #[cfg(feature = "schema-registry")]
             schema_registry: self.schema_registry,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: self.schema_prefetch,
         });
         // Brings any early publisher handed out before this call alive. A second connect of a
         // clone lineage leaves the first connection in the cell rather than swapping it, so an
@@ -314,8 +353,18 @@ impl Broker for KafkaBroker {
 }
 
 impl DescribeServer for KafkaBroker {
+    /// The bootstrap coordinate clients connect to, one `host:port` per configured address.
+    ///
+    /// Each address goes through [`ServerSpec::host_from_url`], so a `PLAINTEXT://` or
+    /// `SASL_SSL://` prefix, and any userinfo an address carries, stay out of the generated
+    /// document: it is published, and a credential that reaches it has left the service.
     fn describe_server(&self) -> ServerSpec {
-        ServerSpec::new(self.servers.join(","), "kafka")
+        let hosts: Vec<String> = self
+            .servers
+            .iter()
+            .map(|server| ServerSpec::host_from_url(server))
+            .collect();
+        ServerSpec::new(hosts.join(","), "kafka")
     }
 }
 
@@ -519,7 +568,9 @@ impl ConnectedKafkaBroker {
             retry,
         );
         #[cfg(feature = "schema-registry")]
-        let subscriber = subscriber.with_schema_registry(self.state.schema_registry.clone());
+        let subscriber = subscriber
+            .with_schema_registry(self.state.schema_registry.clone())
+            .with_schema_prefetch(self.state.schema_prefetch.clone());
         Ok(subscriber)
     }
 }
@@ -580,6 +631,15 @@ impl Subscribe for ConnectedKafkaBroker {
     /// [`KafkaBroker::default_group`].
     async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
         self.subscribe_with(KafkaTopic::new(name)).await
+    }
+
+    /// The topic itself: on Kafka a publish to a topic reaches every group reading it, which is
+    /// what makes the framework's deferred `retry_after` copy work here.
+    ///
+    /// A `^`-anchored name is a librdkafka topic regex, and a publish cannot address a regex, so
+    /// that form answers nothing rather than an address no record would arrive at.
+    fn redelivery_address(&self, name: &str) -> Option<RedeliveryAddress> {
+        (!name.starts_with('^')).then(|| RedeliveryAddress::new(name.to_owned()))
     }
 }
 

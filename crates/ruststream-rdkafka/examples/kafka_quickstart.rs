@@ -6,7 +6,7 @@
 //! generated binary understands `run` and `asyncapi gen`.
 //!
 //! The bare-string subscriber form consumes the topic named `orders` through the broker's
-//! default consumer group (Kafka cannot subscribe without a group). Start a broker first:
+//! default consumer group. Start a broker first:
 //!
 //! ```text
 //! just brokers-up

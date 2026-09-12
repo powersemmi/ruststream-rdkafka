@@ -8,11 +8,10 @@
 //!
 //! A handler body imports `ruststream::prelude::*` and bounds an injected slot with the
 //! **capability trait** it needs - `Out<impl Publisher>`, `Out<impl TransactionalPublisher>`,
-//! `Out<impl OwnedTransactions>`, `Out<impl RequestReply>` - so it names no broker type at all.
-//! A mount site imports this prelude, which carries the core one plus the **policies** under
-//! their concept names: [`Publish`], [`TransactionalPublish`], [`PartitionedPublish`],
-//! [`EosPublish`]. Include sites therefore read the same on every broker, and the two
-//! vocabularies never meet in one file.
+//! `Out<impl PartitionLanes>` - so it names no broker type at all. A mount site imports this
+//! prelude, which carries the core one plus the **policies** under their concept names:
+//! [`Publish`], [`TransactionalPublish`], [`PartitionedPublish`], [`EosPublish`]. Include sites
+//! therefore read the same on every broker, and the two vocabularies never meet in one file.
 //!
 //! | Prelude name | Type |
 //! | --- | --- |
@@ -20,6 +19,11 @@
 //! | [`TransactionalPublish`] | [`KafkaTransactionalPublish`](crate::KafkaTransactionalPublish) |
 //! | [`PartitionedPublish`] | [`KafkaPartitionedPublish`](crate::KafkaPartitionedPublish) |
 //! | [`EosPublish`] | [`KafkaEosPublish`](crate::KafkaEosPublish) |
+//!
+//! One handler body imports this prelude too: the one that adjusts a per-record setting. Naming
+//! [`KafkaPublishSteps`]'s `partition(..)` step needs the trait in
+//! scope and the slot bounded as `Out<impl Publisher<Options = KafkaOptions>, Marker>`, and that
+//! bound is the stated exception to the rule above.
 //!
 //! Globbing two broker preludes conflicts on these names where one is used (E0659); the prefixed
 //! types at the crate root are the disambiguation.
@@ -50,10 +54,10 @@ pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
 pub use crate::context::keys::{Partition, Position, SeekHandle, Source};
 pub use crate::{
-    Assignment, Commit, EosReplies, KafkaBroker, KafkaEosPublish as EosPublish,
+    Assignment, Commit, EosReplies, KafkaBroker, KafkaEosPublish as EosPublish, KafkaOptions,
     KafkaPartitionedPublish as PartitionedPublish, KafkaPosition, KafkaPublish as Publish,
-    KafkaSeeker, KafkaTopic, KafkaTransactionalPublish as TransactionalPublish, LaneKey,
-    PartitionLanes, Retry, RoundRobin, StartOffset,
+    KafkaPublishSteps, KafkaSeeker, KafkaTopic, KafkaTransactionalPublish as TransactionalPublish,
+    LaneKey, PartitionLanes, Retry, RoundRobin, StartOffset,
 };
 
 // `Partitioned` stays out: the core's defaulted `IncomingMessage::partition_key` is already in

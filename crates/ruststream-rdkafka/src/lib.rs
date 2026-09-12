@@ -83,14 +83,18 @@ pub use distribution::RoundRobin;
 pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, KafkaEosPublish, SourceOffset};
 pub use error::KafkaError;
 pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
+#[cfg(feature = "protobuf")]
+pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};
 pub use publisher::{
-    KafkaPartitionedPublish, KafkaPublish, KafkaPublisher, KafkaRetryPublisher,
-    KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
+    KafkaOptions, KafkaPartitionedPublish, KafkaPublish, KafkaPublishSteps, KafkaPublisher,
+    KafkaRetryPublisher, KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
     TransactionalPartitions,
 };
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
-    RegisteredSchema, SchemaFrame, SchemaRegistry, SchemaType, SubjectStrategy,
+    HttpRegistryClient, MemorySchemaCache, MissingSubject, RegisteredSchema, RegistryClient,
+    SchemaCache, SchemaCachePolicy, SchemaFrame, SchemaFramed, SchemaPrefetch, SchemaRegistry,
+    SchemaType, SubjectStrategy,
 };
 pub use seek::{KafkaPosition, KafkaSeeker};
 

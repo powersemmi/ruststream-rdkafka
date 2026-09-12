@@ -16,7 +16,7 @@ use std::time::Duration;
 use futures::future::select_all;
 use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
-use ruststream::runtime::{Outgoing, PublishContext, PublishTransform};
+use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
     OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
 };
@@ -24,7 +24,9 @@ use tracing::{debug, error};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
-use crate::publisher::{KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher};
+use crate::publisher::{
+    KafkaOptions, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
+};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The Kafka Streams default for exactly-once commit intervals.
@@ -282,7 +284,8 @@ impl EosPipeline {
         &self.inner.id
     }
 
-    /// Publishes `msg` into the pipeline's open window on behalf of the delivery at `source`.
+    /// Publishes `msg` into the pipeline's open window on behalf of the delivery at `source`,
+    /// with the per-record settings in `options` (`None` for the producer's own placement).
     ///
     /// The record joins the window's transaction and becomes visible at its commit, atomically
     /// with the source position. Publish, then return `Ack`: the settled watermark is what
@@ -306,9 +309,10 @@ impl EosPipeline {
         &self,
         source: &SourceOffset,
         msg: OutgoingMessage<'_>,
+        options: Option<&KafkaOptions>,
     ) -> Result<(), KafkaError> {
         let epoch = self.admit(source).await?;
-        let sent = self.inner.publisher.publish(msg).await;
+        let sent = self.inner.publisher.publish(msg, options).await;
         if sent.is_err() {
             let mut window = self.inner.window.lock().expect("window mutex poisoned");
             // A failed produce poisons the transaction it was admitted into. The epoch guard
@@ -780,7 +784,7 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 /// The [`PublishTransform`] relaying [`EOS_SOURCE_HEADER`] from the originating delivery onto
 /// the reply, so the pipeline's [`Publisher`] impl can pair the reply with its consumed offset.
 ///
-/// A `publish("replies")` handler over an exactly-once pipeline names it as the mount site's
+/// A replying handler over an exactly-once pipeline names it as the mount site's
 /// transform step, right after the policy:
 /// `b.include(enrich).out(Reply, KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
 /// reply then joins the pipeline's open window paired with its delivery's consumed offset,
@@ -797,7 +801,11 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EosReplies;
 
-impl<C> PublishTransform<C> for EosReplies {
+impl<C> PublishTransform<ForReply<C>> for EosReplies {
+    // The coordinates come from the delivery being answered, and the destination is whatever the
+    // reply already declares: this transform reads, it never names.
+    type Destination = Reads;
+
     fn apply(&self, out: &mut Outgoing<'_>, cx: &PublishContext<'_, C>) {
         if let Some(source) = cx.headers().get(EOS_SOURCE_HEADER) {
             let source = source.to_vec();
@@ -808,6 +816,7 @@ impl<C> PublishTransform<C> for EosReplies {
 
 impl Publisher for EosPipeline {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Publishes a reply into the pipeline's open window, paired with the source coordinates
     /// the [`EOS_SOURCE_HEADER`] carries (stripped before the record is produced).
@@ -822,7 +831,11 @@ impl Publisher for EosPipeline {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in the window's transaction.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+    async fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> Result<(), Self::Error> {
         let Some(source) = msg
             .headers()
             .get_str(EOS_SOURCE_HEADER)
@@ -839,7 +852,7 @@ impl Publisher for EosPipeline {
         let mut headers = msg.headers().clone();
         headers.remove(EOS_SOURCE_HEADER);
         let stripped = OutgoingMessage::new(msg.name(), msg.payload()).with_headers(headers);
-        self.publish(&source, stripped).await
+        self.publish(&source, stripped, options).await
     }
 }
 
