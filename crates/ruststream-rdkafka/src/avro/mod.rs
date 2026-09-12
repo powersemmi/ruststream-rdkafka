@@ -1,41 +1,20 @@
-//! Avro on the byte lanes, and the JSON transcode it replaces.
+//! Avro behind the codec, and the JSON transcode it replaces.
 //!
-//! Avro owns its byte layout, so the wire form belongs on the core's `Serialized` /
-//! `Deserialized` lanes rather than behind a codec: an Avro payload arrives as the bytes it was
-//! written as, and a value is made from them by Avro's own reader, against Avro's own schema.
-//!
-//! # What rides the lane, and why it is the envelope
-//!
-//! The lane type is the Confluent envelope ([`IncomingFrame`], [`OutgoingFrame`]), not the
-//! message model, and the value is converted by an explicit call. That split is forced from two
-//! sides and neither of them is a preference:
-//!
-//! - `apache-avro` is a serde-driven implementation of Avro: reading and writing a Rust struct as
-//!   a datum goes through `Serialize` / `Deserialize`, guided by the schema. The core's lanes are
-//!   selected by the type and are reserved for types that are *not* serde types - `MessageWire`,
-//!   `ReplyShape` and `Input` are blanket-implemented for every `Serialize` / `DeserializeOwned`
-//!   value - so a type that Avro can encode is a type the lanes will not accept. This is why
-//!   `#[wire(prost)]` works and an equivalent `#[wire(avro)]` cannot: a `prost` message is not a
-//!   serde type.
-//! - Resolving a schema id is a registry conversation and therefore `async`, while
-//!   `Deserialized::from_payload` is a sync associated function with no context to reach a
-//!   registry from. The envelope needs nothing but the bytes, so it rides the lane; the
-//!   resolution stays where `async` is allowed.
-//!
-//! So the wire form is a lane type, the value's conversion is one call, and nothing hides an I/O
-//! stall inside a decode or reaches for a process-wide registry singleton.
+//! [`AvroCodec`] is how a service reads and writes Avro: the schema sits where a serializer
+//! belongs, handlers stay ordinary functions over ordinary structs, and nothing about the wire
+//! reaches a signature. That is the only way to consume an Avro payload here, and it is enough
+//! for both kinds of topic.
 //!
 //! # A registry-backed topic
 //!
-//! [`decode_framed`] awaits the writer schema the envelope names and resolves the datum onto the
-//! handler's own reader schema - which is what makes a datum written by an older producer
-//! readable by a newer consumer, and what a fixed-schema decoder cannot do. On the publish side a
-//! [`Subject`] resolves its id once, at startup, so publishing itself does no I/O:
+//! [`AvroCodec::registry`] speaks the Confluent wire format. Encoding frames each value with the
+//! id of its type's subject, and decoding reads every delivery with the writer schema that
+//! delivery's envelope names - which is what makes a datum written by an older producer readable
+//! by a newer consumer:
 //!
 //! ```no_run
 //! use apache_avro::AvroSchema;
 //! use ruststream::prelude::*;
-//! use ruststream_rdkafka::{IncomingFrame, OutgoingFrame, SchemaRegistry, avro};
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Serialize, Deserialize, AvroSchema)]
@@ -43,39 +22,23 @@
 //!     id: i64,
 //! }
 //!
-//! #[derive(Serialize, Deserialize, AvroSchema)]
+//! #[derive(Serialize, Deserialize, AvroSchema, Outgoing)]
 //! struct Confirmation {
 //!     id: i64,
 //! }
 //!
-//! /// Resolved once at startup and injected into the handler.
-//! #[derive(Clone)]
-//! struct Wiring {
-//!     registry: SchemaRegistry,
-//!     confirmations: avro::Subject<Confirmation>,
-//! }
-//!
 //! #[subscriber("orders", publish("confirmations"))]
-//! async fn confirm(
-//!     frame: &IncomingFrame<'_>,
-//!     State(wiring): State<Wiring>,
-//! ) -> Result<OutgoingFrame, HandlerOutcome> {
-//!     let order: Order = avro::decode_framed(&wiring.registry, frame)
-//!         .await
-//!         .map_err(|_| HandlerOutcome::drop())?;
-//!     wiring
-//!         .confirmations
-//!         .frame(&Confirmation { id: order.id })
-//!         .map_err(|_| HandlerOutcome::drop())
+//! async fn confirm(order: &Order) -> Confirmation {
+//!     Confirmation { id: order.id }
 //! }
 //! # let _ = confirm;
 //! ```
 //!
 //! # A topic with no registry
 //!
-//! [`encode`] and [`decode`] are the same conversion without the envelope: the type's own schema
-//! is both writer and reader, no registry is involved, and no JSON is in the path. They are what
-//! the framed pair is built on, and what a plain Avro topic uses directly.
+//! [`AvroCodec::local`] pins one schema: a bare datum on the wire, no envelope, no registry, and
+//! no I/O anywhere on the path. [`encode`] and [`decode`] are that same conversion as free
+//! functions, for a tool that works on datum bytes outside an app's dispatch.
 //!
 //! # The JSON transcode
 //!
@@ -95,7 +58,6 @@ pub use codec::AvroCodec;
 
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::{OnceLock, RwLock};
 
 use apache_avro::Schema;
@@ -108,19 +70,16 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::KafkaError;
-use crate::frame::{IncomingFrame, OutgoingFrame};
-use crate::schema_registry::{RegisteredSchema, SchemaRegistry, SchemaType};
+use crate::schema_registry::{RegisteredSchema, SchemaRegistry};
 
 /// One message type's Avro artefacts, built once per type.
 ///
 /// `AvroSchema::get_schema` is documented as expensive, and both a datum writer and a specific
 /// reader resolve the schema's names when they are built - so building either per message would
-/// put a schema-driven format's startup cost on the delivery path, which is exactly what the
-/// lanes exist to avoid. The map memoizes a pure function of the type (its own schema); no
-/// configuration, no registry and nothing about a running app reaches it, so two apps in one
-/// process share it without interfering.
+/// put a schema-driven format's startup cost on the delivery path. The map memoizes a pure
+/// function of the type (its own schema); no configuration, no registry and nothing about a
+/// running app reaches it, so two apps in one process share it without interfering.
 struct Prepared<T: AvroSchema> {
-    schema: &'static Schema,
     writer: GenericDatumWriter<'static>,
     reader: SpecificDatumReader<T>,
 }
@@ -152,11 +111,7 @@ where
     let reader = SpecificDatumReader::<T>::builder()
         .build()
         .map_err(KafkaError::wire_format)?;
-    let entry: &'static (dyn Any + Send + Sync) = Box::leak(Box::new(Prepared {
-        schema,
-        writer,
-        reader,
-    }));
+    let entry: &'static (dyn Any + Send + Sync) = Box::leak(Box::new(Prepared { writer, reader }));
 
     // A racing thread may have inserted first; either entry is the same schema, so the one
     // already in the map wins and this one is simply never looked up again.
@@ -183,7 +138,8 @@ fn downcast<T: AvroSchema + 'static>(
 /// The schema drives the encoding, so the value's Rust types reach the wire as the numeric and
 /// string types the schema names, with no JSON document in between. No registry is involved and
 /// no envelope is written: on a registry-backed topic the datum travels inside one, which
-/// [`Subject::frame`] adds.
+/// [`AvroCodec::registry`] adds. A service publishes through a codec; this is for a tool that
+/// works on datum bytes outside an app's dispatch.
 ///
 /// The buffer is written into rather than returned, so a caller that already holds one (a
 /// publish path, a batch) pays no intermediate allocation.
@@ -229,8 +185,8 @@ where
 ///
 /// Writer and reader schema are the same one here, which is what a topic with no registry means:
 /// there is no second schema to resolve against. A Confluent-framed delivery goes through
-/// [`decode_framed`] instead, which resolves the writer schema the envelope names - reading a
-/// framed payload with this function would decode the envelope's own bytes as if they were the
+/// [`AvroCodec::registry`] instead, which resolves the writer schema the envelope names - reading
+/// a framed payload with this function would decode the envelope's own bytes as if they were the
 /// datum.
 ///
 /// # Errors
@@ -272,215 +228,6 @@ where
         .map_err(KafkaError::wire_format)
 }
 
-/// Reads a Confluent-framed delivery, resolving the schema the envelope names onto `T`'s own.
-///
-/// This is the read half of a registry-backed topic, and the reason it is an `async` function
-/// the handler calls rather than a lane a type declares: the writer schema is discovered from
-/// the delivery and fetched from the registry, which no sync associated function can do. Every
-/// id resolves over the network once per process and from the shared cache afterwards.
-///
-/// The resolution is what distinguishes this from [`decode`]: a datum written under an older
-/// version of the subject's schema is projected onto the reader's, so added fields take their
-/// declared defaults and dropped ones are skipped.
-///
-/// # Errors
-///
-/// Returns [`KafkaError::SchemaRegistry`] when the registry cannot resolve the envelope's id,
-/// and [`KafkaError::WireFormat`] when the id names a non-Avro schema, the two schemas do not
-/// resolve against each other, or the datum does not match the writer schema.
-///
-/// # Examples
-///
-/// ```no_run
-/// use apache_avro::AvroSchema;
-/// use ruststream::prelude::*;
-/// use ruststream_rdkafka::{IncomingFrame, SchemaRegistry};
-/// use serde::{Deserialize, Serialize};
-///
-/// #[derive(Debug, Serialize, Deserialize, AvroSchema)]
-/// struct Order {
-///     id: i64,
-/// }
-///
-/// #[subscriber("orders")]
-/// async fn consume(
-///     frame: &IncomingFrame<'_>,
-///     State(registry): State<SchemaRegistry>,
-/// ) -> HandlerOutcome {
-///     let decoded = ruststream_rdkafka::avro::decode_framed::<Order>(&registry, frame).await;
-///     let Ok(order) = decoded else {
-///         return HandlerOutcome::drop();
-///     };
-///     println!("order {}", order.id);
-///     HandlerOutcome::ack()
-/// }
-/// # let _ = consume;
-/// ```
-pub async fn decode_framed<T>(
-    registry: &SchemaRegistry,
-    frame: &IncomingFrame<'_>,
-) -> Result<T, KafkaError>
-where
-    T: AvroSchema + DeserializeOwned + Send + Sync + 'static,
-{
-    let schema = registry.schema_by_id(frame.schema_id()).await?;
-    let writer = avro_schema(registry, &schema)?;
-    let reader = prepared::<T>()?.schema;
-    let mut cursor = frame.datum();
-    // Through a resolved `Value` rather than the direct reader: the writer schema is the
-    // delivery's, not the type's, so the projection onto the reader schema is the whole point of
-    // this path and the direct reader cannot express it.
-    let value = GenericDatumReader::builder(&writer)
-        .reader_schema(reader)
-        .build()
-        .map_err(KafkaError::wire_format)?
-        .read_value(&mut cursor)
-        .map_err(KafkaError::wire_format)?;
-    apache_avro::from_value(&value).map_err(KafkaError::wire_format)
-}
-
-/// A registry subject resolved to the id its schema has there, for one message type.
-///
-/// The id and the datum have to name the same schema or the payload is unreadable, so this type
-/// is the pairing: it is minted from `T`'s own schema and frames `T`'s values with the id the
-/// registry gave exactly that schema. A subject resolved for one type cannot frame another's
-/// value, and the resolution happens once, at startup, so [`frame`](Self::frame) does no I/O at
-/// all - a publish never stalls on the registry, and a subject that is missing or incompatible
-/// fails the app's startup instead of its first message.
-///
-/// # Examples
-///
-/// ```no_run
-/// use apache_avro::AvroSchema;
-/// use ruststream_rdkafka::{SchemaRegistry, avro::Subject};
-/// use serde::{Deserialize, Serialize};
-///
-/// #[derive(Serialize, Deserialize, AvroSchema)]
-/// struct Confirmation {
-///     id: i64,
-/// }
-///
-/// # async fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let registry = SchemaRegistry::new("http://localhost:8081");
-/// let subject = Subject::<Confirmation>::register(&registry, "confirmations-value").await?;
-///
-/// let frame = subject.frame(&Confirmation { id: 7 })?;
-/// assert_eq!(frame.schema_id(), subject.schema_id());
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug)]
-pub struct Subject<T> {
-    schema_id: u32,
-    // `fn() -> T` so the marker adds no auto-trait obligation of its own: a resolved subject is
-    // shared across handler tasks whether or not `T` is.
-    message: PhantomData<fn() -> T>,
-}
-
-impl<T> Clone for Subject<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T> Copy for Subject<T> {}
-
-impl<T> Subject<T>
-where
-    T: AvroSchema + Serialize + Send + Sync + 'static,
-{
-    /// Registers `T`'s schema under `subject` (idempotent registry-side: an identical schema
-    /// keeps its id) and takes the id back.
-    ///
-    /// The counterpart of [`resolve`](Self::resolve), for producers that own their subject.
-    /// Deployments where producers must not create schemas (Confluent's own guidance, with
-    /// `auto.register.schemas` off) use `resolve` instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable, rejects the
-    /// credentials, or refuses the schema as incompatible with the subject's history, and
-    /// [`KafkaError::WireFormat`] when `T`'s own schema cannot be built.
-    pub async fn register(registry: &SchemaRegistry, subject: &str) -> Result<Self, KafkaError> {
-        let schema_id = registry
-            .register(
-                subject,
-                SchemaType::Avro,
-                schema_json(prepared::<T>()?.schema)?,
-            )
-            .await?;
-        Ok(Self {
-            schema_id,
-            message: PhantomData,
-        })
-    }
-
-    /// A subject whose id is already known, taking no registry at all.
-    ///
-    /// The two async constructors exist to learn one number; a service that already has it - a
-    /// deployment pinning ids in configuration, a replay tool reading an id off a captured
-    /// record, a test with no registry in front of it - names it here instead of standing up a
-    /// registry to be told what it knows.
-    ///
-    /// The caller owns the pairing that [`register`](Self::register) and
-    /// [`resolve`](Self::resolve) establish: `schema_id` must be the id of `T`'s own schema, or
-    /// consumers decode this producer's datums against the wrong one.
-    #[must_use]
-    pub fn pinned(schema_id: u32) -> Self {
-        Self {
-            schema_id,
-            message: PhantomData,
-        }
-    }
-
-    /// Resolves the id `T`'s schema already has under `subject`, registering nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::SchemaRegistry`] when the registry is unreachable or does not hold
-    /// this exact schema under the subject - which is the diagnostic a producer wants at
-    /// startup, naming the subject rather than failing on its first message.
-    pub async fn resolve(registry: &SchemaRegistry, subject: &str) -> Result<Self, KafkaError> {
-        let schema_id = registry
-            .lookup_id(
-                subject,
-                SchemaType::Avro,
-                schema_json(prepared::<T>()?.schema)?,
-            )
-            .await?;
-        Ok(Self {
-            schema_id,
-            message: PhantomData,
-        })
-    }
-
-    /// The registry-assigned id of `T`'s schema under this subject.
-    #[must_use]
-    pub fn schema_id(&self) -> u32 {
-        self.schema_id
-    }
-}
-
-impl<T> Subject<T>
-where
-    T: AvroSchema + Serialize + Send + Sync + 'static,
-{
-    /// Writes `value` as an Avro datum and pairs it with this subject's id, ready to publish.
-    ///
-    /// Synchronous by construction: the only thing that needed the registry was the id, and
-    /// resolving the subject already took it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::WireFormat`] when the value does not fit the schema its type
-    /// declares.
-    pub fn frame(&self, value: &T) -> Result<OutgoingFrame, KafkaError> {
-        let mut buf = BytesMut::new();
-        encode(value, &mut buf)?;
-        Ok(OutgoingFrame::new(self.schema_id, buf.to_vec()))
-    }
-}
-
 /// The JSON definition a schema is registered under.
 ///
 /// Deliberately not `Schema::canonical_form`: the Parsing Canonical Form keeps only what two
@@ -489,22 +236,6 @@ where
 /// subject registered in canonical form can never carry an evolution.
 pub(crate) fn schema_json(schema: &Schema) -> Result<String, KafkaError> {
     serde_json::to_string(schema).map_err(KafkaError::wire_format)
-}
-
-/// The parsed Avro schema of a registered one, rejecting the other flavors by name.
-fn avro_schema(
-    registry: &SchemaRegistry,
-    schema: &RegisteredSchema,
-) -> Result<std::sync::Arc<Schema>, KafkaError> {
-    if schema.schema_type() != SchemaType::Avro {
-        return Err(KafkaError::malformed(format!(
-            "schema id {} is {:?}, not Avro; the delivery was written by a producer of another \
-             format",
-            schema.id(),
-            schema.schema_type(),
-        )));
-    }
-    registry.parsed_avro(schema)
 }
 
 /// Decodes an Avro datum against its registry schema and re-encodes it as JSON.
@@ -554,7 +285,6 @@ pub(crate) fn json_to_avro(
 
 #[cfg(test)]
 mod tests {
-    use ruststream::runtime::{Deserialized, Serialized};
     use serde::{Deserialize, Serialize};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -565,17 +295,6 @@ mod tests {
     struct Order {
         id: i64,
         item: String,
-    }
-
-    /// The same record with one field added, carrying a default - the evolution case Avro's
-    /// schema resolution exists for.
-    #[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
-    #[serde(rename = "Order")]
-    struct OrderV2 {
-        id: i64,
-        item: String,
-        #[avro(default = r#""""#)]
-        note: String,
     }
 
     async fn registry_with_order(id: u32) -> (MockServer, SchemaRegistry, RegisteredSchema) {
@@ -611,7 +330,7 @@ mod tests {
         assert_eq!(decode::<Order>(&buf).expect("decode"), order);
     }
 
-    /// The bug the JSON transcode carries and the lanes cannot: through serde a JSON document's
+    /// The bug the JSON transcode carries and the codec cannot: through serde a JSON document's
     /// every non-negative integer is a `u64`, which apache-avro writes as its own logical type.
     /// A value that never becomes a JSON document has real Rust types all the way down.
     #[test]
@@ -630,102 +349,6 @@ mod tests {
             decode::<Order>(&buf).expect("decode").id,
             i64::from(u32::MAX),
         );
-    }
-
-    #[test]
-    fn the_lane_traits_reach_the_same_bytes() {
-        struct Wire(Vec<u8>);
-
-        impl Serialized for Wire {
-            type Error = KafkaError;
-
-            fn wire_bytes<'a>(&'a self, _buf: &'a mut BytesMut) -> Result<&'a [u8], KafkaError> {
-                Ok(&self.0)
-            }
-        }
-
-        let mut buf = BytesMut::new();
-        encode(
-            &Order {
-                id: 1,
-                item: "x".to_owned(),
-            },
-            &mut buf,
-        )
-        .expect("encode");
-        let wire = Wire(buf.to_vec());
-        let mut lend = BytesMut::new();
-        assert_eq!(wire.wire_bytes(&mut lend).expect("lend"), &buf[..]);
-    }
-
-    #[tokio::test]
-    async fn a_framed_delivery_resolves_the_writer_schema_onto_the_reader() {
-        let (_server, registry, schema) = registry_with_order(7).await;
-
-        // Written by a producer on the old schema, read by a consumer on the new one.
-        let mut buf = BytesMut::new();
-        encode(
-            &Order {
-                id: 5,
-                item: "anvil".to_owned(),
-            },
-            &mut buf,
-        )
-        .expect("encode");
-        let framed = OutgoingFrame::new(schema.id(), buf.to_vec());
-        let mut wire = BytesMut::new();
-        let payload = framed.wire_bytes(&mut wire).expect("infallible").to_vec();
-
-        let frame = IncomingFrame::from_payload(&payload).expect("framed");
-        let read: OrderV2 = decode_framed(&registry, &frame).await.expect("resolve");
-        assert_eq!(
-            read,
-            OrderV2 {
-                id: 5,
-                item: "anvil".to_owned(),
-                note: String::new(),
-            },
-        );
-    }
-
-    #[tokio::test]
-    async fn a_non_avro_id_names_the_format_it_found() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/schemas/ids/3"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "schema": "{\"type\":\"object\"}",
-                "schemaType": "JSON",
-            })))
-            .mount(&server)
-            .await;
-        let registry = SchemaRegistry::new(server.uri());
-        let payload = [0u8, 0, 0, 0, 3, 1];
-
-        let frame = IncomingFrame::from_payload(&payload).expect("framed");
-        let err = decode_framed::<Order>(&registry, &frame)
-            .await
-            .expect_err("not avro");
-        assert!(err.to_string().contains("not Avro"));
-    }
-
-    #[tokio::test]
-    async fn a_subject_frames_with_the_id_of_its_own_schema() {
-        let (_server, registry, schema) = registry_with_order(11).await;
-
-        let subject = Subject::<Order>::register(&registry, "orders-value")
-            .await
-            .expect("register");
-        assert_eq!(subject.schema_id(), schema.id());
-
-        let frame = subject
-            .frame(&Order {
-                id: 1,
-                item: "x".to_owned(),
-            })
-            .expect("frame");
-        assert_eq!(frame.schema_id(), schema.id());
-        assert_eq!(decode::<Order>(frame.datum()).expect("decode").id, 1);
     }
 
     #[tokio::test]

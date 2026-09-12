@@ -138,7 +138,7 @@ Kafka 事务的保证真正依赖的一切都在 Broker 端，其中没有一样
 ## 字节路径的处理器 { #byte-lane-handlers }
 
 读 Confluent 传输格式的处理器在这里也是普通处理器：`IncomingFrame` 和 `OutgoingFrame` 自带字节，
-因此它们完全不需要集群，而在 Protobuf 这一侧，读取连注册表也不需要。`TestApp` 的写法和它的手写版
+因此它们完全不需要集群，而读一个 Protobuf 帧连注册表也不需要。`TestApp` 的写法和它的手写版
 对应形态，参见 [Schema Registry 这一页](schema-registry.md#testing-a-lane-handler)。
 
 ## 测试 Broker 不模拟什么 { #what-the-test-broker-does-not-simulate }

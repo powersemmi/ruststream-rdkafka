@@ -164,7 +164,7 @@ ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 
 Обработчик, который читает форму передачи Confluent, и здесь остаётся обычным обработчиком:
 `IncomingFrame` и `OutgoingFrame` несут собственные байты, поэтому кластер им ни для чего не
-нужен, а на стороне Protobuf чтению не нужен и реестр. Форма на `TestApp` и её ручной аналог
+нужен, а чтению кадра Protobuf не нужен и реестр. Форма на `TestApp` и её ручной аналог
 описаны на [странице Schema Registry](schema-registry.md#testing-a-lane-handler).
 
 ## Что тестовый брокер не моделирует {#what-the-test-broker-does-not-simulate}

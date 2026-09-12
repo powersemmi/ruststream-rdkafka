@@ -213,7 +213,7 @@ impl<T: prost::Message> Subject<T> {
     /// dependency this crate should not impose on a service that only wants to publish.
     ///
     /// For the same reason this takes the subject's registered schema at face value, where
-    /// [`avro::Subject`](crate::avro::Subject) resolves the id of the *producer's own* schema: a
+    /// [`AvroCodec`](crate::avro::AvroCodec) resolves the id of the *producer's own* schema: a
     /// generated Protobuf type carries no `.proto` source to look up. Protobuf's wire format is
     /// tag-addressed and stays readable across compatible schema versions, which is what makes
     /// that acceptable here and would not be for Avro.

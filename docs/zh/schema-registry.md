@@ -2,43 +2,42 @@
 
 统一到 Confluent Schema Registry 的 Kafka 部署，用 Confluent 传输格式给载荷加上信封 - 一个值为零的
 魔数字节、一个 4 字节大端的 schema id，然后是编码后的数据 - 而 schema 本身存放在注册表里。
-`schema-registry` 这个 cargo feature 覆盖两半，而消费它们有三条路。**首选编解码器。**
+`schema-registry` 这个 cargo feature 覆盖两半，而消费它们有两条路。**首选编解码器。**
 
-**编解码器**把 schema 放在序列化器该在的位置。`AvroCodec` 持有 schema，处理器仍是普通结构体之上的
-普通函数，签名里不出现任何与传输格式有关的东西 - 这正是编解码器的用处，也是它成为默认选择的原因。
-Avro 恰好合乎这个位置：它是一种由 schema 驱动、带 serde 前端的格式；信封下的 JSON 载荷，则是核心
-自己的 `JsonCodec` 放进 `SchemaFramed`。
+**编解码器**把 schema 放在序列化器该在的位置。`AvroCodec` 持有 schema，处理器收下模型、交回模型，
+签名里不出现任何与传输格式有关的东西 - 这正是编解码器的用处，也让它成为读写 Avro 或 JSON Schema
+载荷的唯一途径。Avro 恰好合乎这个位置：它是一种由 schema 驱动、带 serde 前端的格式；信封下的 JSON
+载荷，则是核心自己的 `JsonCodec` 放进 `SchemaFramed`。
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_avro_codec.rs:handler"
 ```
 
-**字节路径**反过来把传输格式摆进处理器的签名：一次投递以 `IncomingFrame` 的形式到达 - schema id
-和数据，与它们从主题上下来时一个字节不差 - 拿它怎么办由处理器决定。处理器必须看到传输格式本身时
-走这条路：一个主题里带着不止一种 schema、一个路由器按 id 分发、一个服务转发自己从不解码的帧。
-它也是 Protobuf 的唯一通路：`prost` 消息不是 serde 类型，因此根本进不了编解码器。
-
 **转码**在 Broker 的两个边缘上做转换，因此处理器在默认编解码器上保持普通的 serde 模型，从不见到
 传输格式。这是兼容之路：服务不能携带生成类型、也不能携带从 Avro 导出的模型时，它是对的选择，代价
 是每条消息多走一趟 JSON，以及失去 schema 解析 - JSON 处理器没有读取端 schema 可供解析。
 
-三条路在同一个 Broker 上互不混用。`KafkaBroker::schema_registry(registry)` 把转码挂到该 Broker 打开
-的每一条订阅上，因此编解码器或者读帧的处理器拿到的会是 JSON；编解码器和字节路径改用
+这两条路在同一个 Broker 上互不混用。`KafkaBroker::schema_registry(registry)` 把转码挂到该 Broker
+打开的每一条订阅上，因此编解码器拿到的会是 JSON；编解码器改用
 `KafkaBroker::schema_prefetch(..)`，它解析 schema，却不碰载荷。
+
+Protobuf 不是第三个选择。`prost` 消息不是 serde 类型，因此它永远进不了编解码器的位置，它的载荷
+就以 Confluent 信封本身的形式传递 - 或者出现在处理器的签名里，或者落在生成类型上。这条路见下面的
+[Protobuf 信封](#the-protobuf-envelope)。
 
 ## 每种格式能走到哪 { #what-each-format-reaches }
 
-三条路对三种格式的覆盖并不齐整。有一处空白是类型系统逼出来的，永远不会补上；其余的是缺口，这张表
+这些路对三种格式的覆盖并不齐整。有一处空白是类型系统逼出来的，永远不会补上；其余的是缺口，这张表
 标明哪个是哪个，免得读者去猜。
 
 | | Avro | JSON | Protobuf |
 | --- | --- | --- | --- |
 | 编解码器 | `AvroCodec::local`、`AvroCodec::registry` | `SchemaFramed<JsonCodec>` | 必然的空白，见下 |
-| 字节路径 | `avro::decode_framed`、`avro::Subject` | 只有帧类型本身 | `protobuf::decode_framed`、`protobuf::Subject` |
+| 信封进签名 | 只有帧类型本身 | 只有帧类型本身 | `protobuf::decode_framed`、`protobuf::Subject` |
 | 处理器直接面对消息 | 编解码器 | 编解码器 | `#[wire(..)]` + `ProtobufFrame` |
 | 转码 | 是 | 是 | 是 |
 | 从类型上读出 schema | `AvroSchema` | `schemars::JsonSchema` | **否** |
-| 从类型上注册 subject | `avro::Subject::register`、`register_avro::<T>` | `register_json::<T>` | **否** |
+| 从类型上注册 subject | `register_avro::<T>` | `register_json::<T>` | **否** |
 | schema 引用（`import`） | 不适用 | 不适用 | **不解析** |
 | 在 `connect` 时解析 subject | 编解码器 | 编解码器 | 必然的空白 |
 | `MissingSubject` | 编解码器 | 编解码器 | 必然的空白 |
@@ -47,7 +46,7 @@ Avro 恰好合乎这个位置：它是一种由 schema 驱动、带 serde 前端
 | 共享的 id 与 subject 缓存 | 所有路径 | 所有路径 | 所有路径 |
 
 **必然的空白。** Protobuf 永远不可能成为编解码器。关卡在 `Codec::encode<T: Serialize>`：`prost`
-消息不是 serde 类型，因此它根本进不了编解码器的位置 - 字节路径是它唯一的家，这是格式本身的性质，
+消息不是 serde 类型，因此它根本进不了编解码器的位置 - 信封是它唯一的家，这是格式本身的性质，
 不是没做完的角落。每一行写着“必然的空白”的 Protobuf 条目，都是同一个事实再往下一步：`SchemaPrefetch`
 预热的是编解码器注册过的东西，没有编解码器就没有东西可预热。
 
@@ -61,15 +60,15 @@ Avro 恰好合乎这个位置：它是一种由 schema 驱动、带 serde 前端
 器注册过的一切，因此 `SchemaFramed` 下的 JSON 今天与 Avro 一样拿到它们 - 包括 `AutoRegister`，它
 放回去的是由 `schemars` 导出的 JSON Schema。
 
-**字节路径用构造函数回答同一个问题，而不是用策略。** 它们没有 `MissingSubject`，因为它们不需要：
-`register` 就是 `AutoRegister`，`resolve` 就是 `Refuse`，`pinned` 两者都不是。选择在写代码的地方作出，
-而不是由一个连接时读到的值决定，这种形态更好 - 所以这里没有缺口要补。Protobuf 有后两者、没有第一个，
+**Protobuf 用构造函数回答同一个问题，而不是用策略。** `protobuf::Subject` 没有 `MissingSubject`，
+因为它不需要：`resolve` 就是 `Refuse`，`pinned` 两者都不是。选择在写代码的地方作出，而不是由一个
+连接时读到的值决定，这种形态更好 - 所以这里没有缺口要补。缺的只是 `AutoRegister` 那一半，
 那属于下面的缺口，而不是缺一条策略。
 
 **两处真正的缺口，都在 Protobuf，也都是同一件工作。** Protobuf 类型交不出自己的 schema，因此服务
 要把自己的 `.proto` 写两遍 - 一遍是 `prost-build` 编译的那个文件，一遍是用来注册的字符串字面量 -
 两份副本之间没有任何东西把它们绑在一起，`protobuf::Subject::register` 也因此不存在。而且这里没有
-哪条路径解析注册表里的 schema 引用，因此一个 `.proto` 只要 import 了已编译的 pool 里还没有的东西，
+任何东西解析注册表里的 schema 引用，因此一个 `.proto` 只要 import 了已编译的 pool 里还没有的东西，
 就够不着：`google/protobuf/*` 这些标准类型能解析，`confluent/*`（注册表自己视为随处可用）不能，
 你自己的任何 import 则需要 `references` 字段，而本 crate 从不写也从不读它。
 
@@ -230,40 +229,33 @@ subject 的*最新版本*，只要有人注册新版本就会挪动。
 因此这个期限限定的正是那种“接了连接然后沉默”的注册表。期限到了请求返回错误，两侧都把它当作任何别的
 注册表错误来处理。
 
-## 字节路径 { #the-byte-lanes }
+## Protobuf 信封 { #the-protobuf-envelope }
 
-信封在两端都是路径类型：`IncomingFrame` 经由核心的 `Deserialized` 路径到来，`OutgoingFrame` 经由
-`Serialized` 出去。走在路径上的是信封而不是消息模型，这是被迫的，不是选的。解析一个 schema id 是
-一次与注册表的对话，因而是 `async`，而 `Deserialized::from_payload` 是一个同步的关联函数，手上没有
-任何上下文可以够到注册表；而对 Avro 来说模型类型是 serde 类型，核心的路径把这类类型排除在外
-（`MessageWire`、`ReplyShape` 和 `Input` 对每一个 `Serialize` / `DeserializeOwned` 值都有通用实现 -
-`#[wire(prost)]` 对 `prost` 消息能用、而对等的 `#[wire(avro)]` 不可能存在，原因就在这里）。于是走在
-路径上的是传输格式，值的转换只是一次调用，任何解码都不会藏着一次 I/O 停顿，也不会去够一个进程级的
-注册表单例。
+信封在两端都是字节路径类型：`IncomingFrame` 经由核心的 `Deserialized` 路径到来，`OutgoingFrame`
+经由 `Serialized` 出去，两边都不解析编解码器。那正是 `prost` 消息住得下、而编解码器够不到的地方：
+核心的路径按类型挑选，并且只留给*不是* serde 类型的类型（`MessageWire`、`ReplyShape` 和 `Input`
+对每一个 `Serialize` / `DeserializeOwned` 值都有通用实现），`#[wire(prost)]` 对 `prost` 消息能用、
+而对等的 `#[wire(avro)]` 不可能存在，原因就在这里。
 
-读取会把信封所指的写入端 schema 解析到读取类型自己的 schema 上，还停在这个 subject 旧版本上的生产者
-因此可读。发布在启动时把自己的 subject 解析一次，因此发布本身不做 I/O，而缺失或不兼容的 subject 会
-让应用启动失败，而不是让它的第一条消息失败：
-
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_avro_lanes.rs:app"
-```
-
-`Subject::register` 发布这个类型自己的 schema 并取回 id；`Subject::resolve` 只查 id 不注册，用于
-生产者不得创建 schema 的部署（Confluent 自己的建议，`auto.register.schemas` 关闭）；`Subject::pinned`
-取用服务已经知道的一个 id，用于钉死的部署、重放工具，或者前面没有注册表的测试。
-
-Protobuf 那一半是同样的形态，只有一点不同：读取完全不需要注册表。信封里的消息索引路径只说明写下的是
-schema 的哪个消息，而读取类型早已决定它读哪一个，因此 `protobuf::decode_framed` 是一次普通的同步调用。
-只有发布侧才解析东西。
+读取完全不需要注册表。信封里的消息索引路径只说明写下的是 schema 的哪个消息，而读取类型早已决定它读
+哪一个，因此 `protobuf::decode_framed` 是一次普通的同步调用。只有发布侧才解析东西，而且在启动时
+解析一次，因此发布本身不做 I/O，缺失或不兼容的 subject 会让应用启动失败，而不是让它的第一条消息
+失败：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:handler"
 ```
 
+`Subject::resolve` 只查 id 不注册，生产者不得创建 schema 的部署要的也正是这个（Confluent 自己的
+建议，`auto.register.schemas` 关闭）；`Subject::pinned` 取用服务已经知道的一个 id，用于钉死的部署、
+重放工具，或者前面没有注册表的测试。
+
+帧类型自己不带任何 schema 知识，因此它们也是那种少见处理器的原始形态 - 按 schema id 分发，或者转发
+自己从不解码的帧，不论哪种格式。
+
 ## 签名里不带信封的 Protobuf { #protobuf-without-the-envelope-in-the-signature }
 
-上面那个路径处理器看得见信封，是因为它自己要求看。这并非必须：一个生成出来的类型可以在自己的传输
+上面那个处理器看得见信封，是因为它自己要求看。这并非必须：一个生成出来的类型可以在自己的传输
 路径上带着信封，此时处理器就是普通类型之上的普通函数，与它在 Avro 编解码器上一模一样。
 
 两半是不对称的，而知道为什么，能让这套形态读起来是一件事而不是两件。**读取不需要注册表**，因此它可以
@@ -416,13 +408,13 @@ schemars 从类型导出 JSON Schema，本 crate 把 schemars 重新导出。`wa
 码器、任意传输格式 - 而放弃的是 JSON 文档承载不了的东西。JSON 没有对应形状的 Avro 类型熬不过这一趟；
 而在 subject 旧版本下写入的数据只做解码、不做解析：处理器看到的是写入端的字段，没有读取端 schema
 来补上生产者从未写过的部分。服务必须在注册表支持的主题上保持普通 serde 模型时，走这条路；其余情况走
-字节路径。
+编解码器。
 
 ## 测试一个路径处理器 { #testing-a-lane-handler }
 
-路径处理器就是普通处理器，因此 `TestApp` 和进程内的 `KafkaTestBroker` 不用集群就能驱动它 - 在
-Protobuf 这一侧连注册表也不用，因为读取不需要。`OutgoingFrame` 和别的发布值一样，因此注入就是普通的
-类型化注入，帧自己的字节原样进入主题：
+面对信封的处理器就是普通处理器，因此 `TestApp` 和进程内的 `KafkaTestBroker` 不用集群、也不用注册表
+就能驱动它，因为读一个 Protobuf 帧不需要注册表。`OutgoingFrame` 和别的发布值一样，因此注入就是普通
+的类型化注入，帧自己的字节原样进入主题：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_lanes_testing.rs:testapp"

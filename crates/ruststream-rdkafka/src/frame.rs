@@ -6,17 +6,13 @@
 //! arrives through [`Deserialized`] and [`OutgoingFrame`] leaves through [`Serialized`], with no
 //! codec resolved for either.
 //!
-//! Splitting the envelope out of the value is what makes the lanes reachable at all. Resolving a
-//! schema id is a registry conversation and therefore `async`; [`Deserialized::from_payload`] is
-//! a sync associated function with no context to reach a registry from. So the envelope, which
-//! needs nothing but the bytes, rides the lane, and the resolution stays where `async` is
-//! allowed: one `await` in the handler on
-//! [`avro::decode_framed`](crate::avro::decode_framed), and, on the publish side, one resolution
-//! at startup ([`avro::Subject`](crate::avro::Subject)). Neither half needs a process-wide
-//! registry singleton, and neither hides an I/O stall inside a decode.
+//! This is Protobuf's path, and the reason it is a path at all: a `prost` message is not a serde
+//! type, so it cannot reach the codec position. Avro and JSON Schema payloads go through
+//! [`AvroCodec`](crate::avro::AvroCodec) and [`SchemaFramed`](crate::SchemaFramed) instead, where
+//! the handler takes the model and nothing about the wire reaches its signature.
 //!
-//! These two types are correct on their own: they carry no schema knowledge, so a service that
-//! resolves schemas some other way (a pinned id, an out-of-band catalogue) uses them unchanged.
+//! These two types also carry no schema knowledge of their own, which leaves them the raw form
+//! for the rare handler that dispatches on a schema id or forwards frames it never decodes.
 
 use std::convert::Infallible;
 
@@ -33,10 +29,8 @@ use crate::schema_registry::{WIRE_MAGIC, parse_envelope};
 ///
 /// As a handler input (`&IncomingFrame<'_>`) the delivery's bytes reach the body exactly as they
 /// arrived - the view borrows the broker's buffer, nothing is copied and no codec runs. The
-/// payload is turned into a value by the format's own reader, which for a registry-backed topic
-/// means resolving the writer schema first:
-/// [`avro::decode_framed`](crate::avro::decode_framed) does both, and
-/// [`protobuf::decode_framed`](crate::protobuf::decode_framed) needs no registry at all.
+/// payload is turned into a value by the format's own reader:
+/// [`protobuf::decode_framed`](crate::protobuf::decode_framed), which needs no registry at all.
 ///
 /// # Examples
 ///
@@ -101,8 +95,8 @@ impl Input for IncomingFrame<'_> {
 ///
 /// The two halves stay apart until the publish path asks for the bytes, so the envelope is
 /// written once, straight into the buffer that path already carries. Mint one from a resolved
-/// subject ([`avro::Subject::frame`](crate::avro::Subject::frame)) rather than by hand, so the
-/// id and the datum cannot disagree about which schema wrote it.
+/// subject ([`protobuf::Subject::frame`](crate::protobuf::Subject::frame)) rather than by hand,
+/// so the id and the datum cannot disagree about which schema wrote it.
 ///
 /// # Examples
 ///

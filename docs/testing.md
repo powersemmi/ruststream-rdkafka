@@ -154,8 +154,8 @@ mode on the descriptor whenever a test turns on what a retry does.
 ## Byte-lane handlers
 
 A handler reading the Confluent wire form is an ordinary handler here too: `IncomingFrame` and
-`OutgoingFrame` carry their own bytes, so nothing about them needs a cluster, and on the Protobuf
-side reading needs no registry either. See
+`OutgoingFrame` carry their own bytes, so nothing about them needs a cluster, and reading a
+Protobuf frame needs no registry either. See
 [the Schema Registry page](schema-registry.md#testing-a-lane-handler) for the `TestApp` shape and
 its manual-path counterpart.
 
