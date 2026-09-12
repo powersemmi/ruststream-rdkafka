@@ -18,8 +18,7 @@ fn kafka_url() -> Option<String> {
     std::env::var("KAFKA_TEST_URL").ok()
 }
 
-/// The lifecycle subject is fixed by the harness; create it up front so the first subscribe
-/// does not race topic auto-creation (a missing topic surfaces as consume errors).
+/// Creates `topic` on the cluster, accepting a topic that is already there.
 async fn create_topic(url: &str, topic: &str) {
     let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
         .set("bootstrap.servers", url)
@@ -43,40 +42,19 @@ async fn kafka_test_broker_passes_conformance_suite() {
     harness::run_suite(KafkaTestBroker::new).await;
 }
 
-/// Drops and recreates `topic`, so a suite that asserts on exact publish order never sees a
-/// previous run's messages. Deletion is asynchronous on the broker; creation is retried until
-/// the name frees up.
-async fn recreate_topic(url: &str, topic: &str) {
-    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
-        .set("bootstrap.servers", url)
-        .create()
-        .expect("admin client");
-    let deleted = admin
-        .delete_topics(&[topic], &AdminOptions::new())
-        .await
-        .expect("delete_topics call");
-    for result in deleted {
-        match result {
-            Ok(_) | Err((_, RDKafkaErrorCode::UnknownTopicOrPartition)) => {}
-            Err((name, code)) => panic!("deleting topic {name} failed: {code}"),
-        }
-    }
-    let new_topic = NewTopic::new(topic, 1, TopicReplication::Fixed(1));
-    for _ in 0..100 {
-        let results = admin
-            .create_topics([&new_topic], &AdminOptions::new())
-            .await
-            .expect("create_topics call");
-        match results.into_iter().next().expect("one result") {
-            Ok(_) => return,
-            Err((_, RDKafkaErrorCode::TopicAlreadyExists)) => {
-                // Still marked for deletion; poll the external state until the name frees up.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-            Err((name, code)) => panic!("recreating topic {name} failed: {code}"),
-        }
-    }
-    panic!("topic {topic} was not recreated in time");
+/// The subscription descriptor a suite subscribes through, over a topic created first.
+///
+/// Every suite publishes under a subject of its own, generated per run, and this factory is the
+/// first place that name is known: creating the topic here puts it on the cluster before the
+/// subscription opens. A consumer that subscribes to a name the cluster does not know waits for
+/// a metadata refresh to notice the topic auto-created by the publish, and that wait is longer
+/// than the suite's delivery deadline.
+fn topic_created(url: &str, group: &str, name: &str) -> KafkaTopic {
+    task::block_in_place(|| Handle::current().block_on(create_topic(url, name)));
+    KafkaTopic::new(name)
+        .group(group.to_owned())
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
 }
 
 /// The first consumer group on a fresh cluster makes the broker create `__consumer_offsets`
@@ -123,17 +101,10 @@ async fn warm_up_group_coordinator(url: &str) {
 async fn passes_batches_capability() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;
-    // The suite asserts exact publish order, so a previous run's messages must not survive.
-    recreate_topic(&url, "conformance.batches").await;
     let group = format!("conformance-batches-{}", std::process::id());
     capabilities::batches(
         || KafkaBroker::new([url.clone()]),
-        |name| {
-            KafkaTopic::new(name)
-                .group(group.clone())
-                .start(StartOffset::Earliest)
-                .commit(Commit::Tracked)
-        },
+        |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
@@ -145,19 +116,11 @@ async fn passes_batches_capability() {
 async fn passes_transactions_capability() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;
-    // The suite asserts nothing is visible before commit, so a previous run's committed
-    // messages must not survive.
-    recreate_topic(&url, "conformance.transactions").await;
     let group = format!("conformance-tx-group-{}", std::process::id());
     let tx_id = format!("conformance-tx-{}", std::process::id());
     capabilities::transactions(
         || KafkaBroker::new([url.clone()]),
-        |name| {
-            KafkaTopic::new(name)
-                .group(group.clone())
-                .start(StartOffset::Earliest)
-                .commit(Commit::Tracked)
-        },
+        |name| topic_created(&url, &group, name),
         |connected| {
             // The harness factory is synchronous, while a Kafka transactional publisher does
             // real work when it comes alive (`init_transactions` fences earlier producers with
@@ -178,18 +141,10 @@ async fn passes_transactions_capability() {
 async fn passes_seeking_capability() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;
-    // The suite pins exact offsets inside the subject, so a previous run's records must not
-    // survive.
-    recreate_topic(&url, "conformance.seeking").await;
     let group = format!("conformance-seeking-{}", std::process::id());
     capabilities::seeking(
         || KafkaBroker::new([url.clone()]),
-        |name| {
-            KafkaTopic::new(name)
-                .group(group.clone())
-                .start(StartOffset::Earliest)
-                .commit(Commit::Tracked)
-        },
+        |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
@@ -201,18 +156,10 @@ async fn passes_seeking_capability() {
 async fn passes_lifecycle() {
     let Some(url) = kafka_url() else { return };
     warm_up_group_coordinator(&url).await;
-    create_topic(&url, "conformance.lifecycle").await;
-    // A per-run group: the lifecycle subject is fixed, and a group that already committed the
-    // subject's tail would otherwise never see the fresh publish.
     let group = format!("conformance-lifecycle-{}", std::process::id());
     harness::lifecycle(
         || KafkaBroker::new([url.clone()]),
-        |name| {
-            KafkaTopic::new(name)
-                .group(group.clone())
-                .start(StartOffset::Earliest)
-                .commit(Commit::Tracked)
-        },
+        |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
