@@ -5,6 +5,8 @@
 
 #![cfg(feature = "schema-registry")]
 
+use std::time::{Duration, Instant};
+
 use ruststream::runtime::{App, AppInfo, Reply, RustStream};
 use ruststream::{
     Broker, ConnectedBroker, IncomingMessage, Outgoing, OutgoingMessage, Publisher, Subscriber,
@@ -45,6 +47,52 @@ async fn schema_by_id_caches_after_one_fetch() {
     let second = sr.schema_by_id(7).await.expect("cached");
     assert_eq!(second.id(), 7);
     assert!(sr.cached_schema(7).is_some());
+}
+
+/// A registry that accepts the connection and then says nothing: without a deadline this is an
+/// unbounded stall, because both edges resolve schemas while a delivery or a publish waits.
+#[tokio::test]
+async fn a_silent_registry_expires_instead_of_holding_the_caller() {
+    const DEADLINE: Duration = Duration::from_millis(150);
+    const SILENCE: Duration = Duration::from_secs(30);
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/schemas/ids/7"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({ "schema": ORDER_SCHEMA }))
+                .set_delay(SILENCE),
+        )
+        .mount(&server)
+        .await;
+
+    let sr = SchemaRegistry::new(server.uri()).request_timeout(DEADLINE);
+    let started = Instant::now();
+    let err = sr
+        .schema_by_id(7)
+        .await
+        .expect_err("the deadline must expire");
+    let waited = started.elapsed();
+
+    match err {
+        KafkaError::SchemaRegistryTimeout { request, timeout } => {
+            assert_eq!(request, "/schemas/ids/7", "the error names the request");
+            assert_eq!(
+                timeout, DEADLINE,
+                "the error names the deadline that expired"
+            );
+        }
+        other => panic!("expected the request to time out, got {other:?}"),
+    }
+    assert!(
+        waited < SILENCE / 2,
+        "the caller waited {waited:?} against a {DEADLINE:?} deadline, so nothing bounded it",
+    );
+    assert!(
+        sr.cached_schema(7).is_none(),
+        "a lookup that timed out must cache nothing",
+    );
 }
 
 #[tokio::test]
@@ -209,7 +257,7 @@ async fn scan_topic(
         .await
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
-    let found = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    let found = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let msg = stream
                 .next()
