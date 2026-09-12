@@ -59,8 +59,8 @@ include 处理器时用 `start_at(..)` 选定。
 
 在事务里发布的处理器挂在这里时，路由文件一行都不用改：处理器指定能力，挂载点指定生产环境的
 `Publish::default().transactional_id(..)` 策略，替身据此构造出一个进程内的事务发布者。
-`per_partition()` 同样能构造，因此取用 `Out<impl PartitionLanes>` 的处理器，每条通道各得一个独立
-事务。
+`per_partition()` 同样能构造，因此取用 `Out<impl PartitionLanes>` 的处理器，每个工作分区各得一个
+独立事务。
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_testing.rs:transactions"
@@ -144,15 +144,15 @@ Kafka 事务的保证真正依赖的一切都在 Broker 端，其中没有一样
 ## 测试 Broker 不模拟什么 { #what-the-test-broker-does-not-simulate }
 
 进程内 Broker 实现了核心的路由约定 - 按确切主题名路由、消费者组、结算、消息头、分区键消息头和工作
-通道 - 再加上其上保留的日志，以及事务中客户端可见的那一半。它不模拟 Kafka 本身：真实分区、比订阅
+分区 - 再加上其上保留的日志，以及事务中客户端可见的那一半。它不模拟 Kafka 本身：真实分区、比订阅
 活得更久的位置、再均衡、保留期和记录时间戳都属于集群行为，上面列的事务相关内容也一样。具体来说：
 
 - **分区。** 每个主题恰好一个分区，编号为零。`Ctx<Partition>` 永远读到 `0`，`partition(..)` 步骤
   和 `PARTITION_HEADER` 标记都改变不了记录的落点，定位到任何别的分区会被拒绝，而不是凭空造一个
-  出来。工作通道*是*重现了的：一条订阅的 `LaneKey` 在这里的解析方式与上游完全一致，因此在默认的
-  `LaneKey::Partition` 下，一个主题的记录共用一条通道（一个分区、一种顺序，没有 key 的记录也在
-  内），在 `LaneKey::RecordKey` 下则按 key 分通道。测试显示不出来的是：两个 key 落在不同分区、
-  多个分区并发运行，以及一个消费者组的工作摊到各个成员上。
+  出来。工作分区*是*重现了的：一条订阅的 `LaneKey` 在这里的解析方式与上游完全一致，因此在默认的
+  `LaneKey::Partition` 下，一个主题的记录共用一个工作分区（一个分区、一种顺序，没有 key 的记录也
+  在内），在 `LaneKey::RecordKey` 下则按 key 划分工作分区。测试显示不出来的是：两个 key 落在不同
+  分区、多个分区并发运行，以及一个消费者组的工作摊到各个成员上。
 - **已提交的位置活不过它的订阅。** 位置存在于订阅上，因此一次“重启”什么都留不下：同一个消费者组里
   后来的订阅者会在日志末尾打开，而不是从前一个停下的地方继续，`start(StartOffset::Earliest)` 也
   是空转。改用挂载点上的 `start_at(KafkaPosition::earliest())`，它确实会在保留的日志上打开订阅；

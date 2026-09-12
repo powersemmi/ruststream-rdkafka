@@ -76,7 +76,7 @@ ClosedKafkaBroker                  终结见证：unflushed_records()
 | `TransactionalPublisher` | 是 | 在 Kafka 事务里发布，每个句柄同时只有一个打开的事务：[事务](publishing.md#transactions)。 |
 | `OwnedTransactions` | 否 | 一个 Kafka 生产者同时只持有一个 Broker 端事务，因此事务不能是一个独立持有的值；并发的流程改用[按分区的发布者](publishing.md#transaction-scopes-and-worker-pools)或[精确一次管线](publishing.md#exactly-once-pipelines)。 |
 | `RequestReply` | 否 | Kafka 没有回复关联机制；请求-回复要靠你自己的回复主题加一个关联消息头。 |
-| `Partitioned` | 是 | 有序的工作通道，键取自投递的来源分区，或者在 `LaneKey::RecordKey` 下取自记录 key：[按键的工作通道](topics.md#keyed-worker-lanes)。 |
+| `Partitioned` | 是 | 有序的工作分区，键取自投递的来源分区，或者在 `LaneKey::RecordKey` 下取自记录 key：[按键的工作分区](topics.md#keyed-worker-lanes)。 |
 | `Seekable` + `Positioned` | 是 | 从处理器里重新定位这个消费者持有的分区，用的是 `SeekHandle` 上下文键，它和投递自身的 `Position` 并列：[重新定位订阅](topics.md#repositioning-a-subscription)。 |
 | `DescribeServer` | 是 | 生成的 AsyncAPI 文档在 `kafka` 协议下列出 bootstrap 服务器。 |
 
@@ -91,7 +91,7 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 
 ## 指南 { #guides }
 
-- [主题与消费者组](topics.md) - 描述符、起始偏移量、提交模式、按键的通道。
+- [主题与消费者组](topics.md) - 描述符、起始偏移量、提交模式、按键的工作分区。
 - [发布](publishing.md) - 发布策略、记录 key、事务、投递保证。
 - [Schema Registry](schema-registry.md) - Confluent 信封、Avro 与 Protobuf 转码。
 - [测试](testing.md) - 进程内测试 Broker 与真实集群上的测试。

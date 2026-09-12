@@ -38,7 +38,7 @@ Kafka 每个分区提交一个位置，而不是逐条结算消息。`Commit` �
   `auto.commit.interval.ms` 提交一次。`ack` 和 `nack` 不起作用。一次崩溃可能丢掉已处理但未提交的
   那一段尾巴，也可能跳过位置已经存下、却还没处理的投递。
 - `Commit::Tracked`：精确的至少一次。一次 `ack` 把已存的位置推进到最低的、仍未结算的投递之下，
-  因此来自并发工作通道的乱序 ack 绝不会把提交推过一条还没处理的消息。消费者根本收不到的那些偏移量
+  因此来自并发工作分区的乱序 ack 绝不会把提交推过一条还没处理的消息。消费者根本收不到的那些偏移量
   空洞（事务标记、被压实掉的记录）挡不住这个位置。这条订阅会关掉 `enable.auto.offset.store`，而
   自动提交仍然在后台把已存的位置刷出去，消费者关闭时再刷一次。
 - `Commit::Transactional("pipeline-id")`：精确一次。事务 id 与之匹配的 `EosPipeline` 在生产者事务
@@ -101,9 +101,9 @@ Kafka 每个分区提交一个位置，而不是逐条结算消息。`Commit` �
 `Commit::Transactional` 组合。进程内测试 Broker 不模拟分区，会拒绝这样的描述符，所以这属于真实集群
 上的测试。
 
-手动分配能与按键的工作通道组合。在默认的 `LaneKey::Partition` 下，每个分到的分区各得一条通道，
+手动分配能与按键的工作分区组合。在默认的 `LaneKey::Partition` 下，每个分到的分区各得一个工作分区，
 因此 `partitions([0, 2, 5])` 配上 `workers(n, by_key)`，会按顺序处理每一个分到的分区。`n` 要照着
-分区列表定：通道比分区少，分区就共用通道，顺序依然保持；通道比分区多，多出来的就闲着。
+分区列表定：工作分区比分区少，分区就共用工作分区，顺序依然保持；工作分区比分区多，多出来的就闲着。
 
 ## 重新定位订阅 { #repositioning-a-subscription }
 
@@ -158,26 +158,26 @@ Kafka 保留日志，因此你可以在日志里移动一条订阅：从更早�
 seeker 交给订阅，因此上面的处理器原封不动地挂在它上面。它能解析哪些位置、拒绝哪些位置，参见
 [进程内的重新定位](testing.md#repositioning-in-process)。
 
-## 按键的工作通道 { #keyed-worker-lanes }
+## 按键的工作分区 { #keyed-worker-lanes }
 
-Kafka 按原生的记录 key 分区，本 crate 能把这个 key 当作通道键，因此 `workers(n, by_key)` 把按键
+Kafka 按原生的记录 key 分区，本 crate 能把这个 key 当作分区键，因此 `workers(n, by_key)` 把按键
 的顺序从生产者一路保到处理器：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:consumer"
 ```
 
-通道键是什么，由 `KafkaTopic::lane_key` 决定。默认值 `LaneKey::Partition` 按来源分区分通道，也就是
-Kafka 自己的排序单位：一个分区投递的一切，包括没有 key 的记录，都在一条通道上按顺序处理，并发来自
-同时消费多个分区：
+分区键是什么，由 `KafkaTopic::lane_key` 决定。默认值 `LaneKey::Partition` 按来源分区划分工作分区，
+也就是 Kafka 自己的排序单位：一个分区投递的一切，包括没有 key 的记录，都在一个工作分区上按顺序
+处理，并发来自同时消费多个分区：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:partition_lanes"
 ```
 
-`LaneKey::RecordKey` 把通道收窄到记录 key，正如上面第一个例子：共用一个记录 key 的投递保持有序，
-同一个分区里不同的 key 并发处理。这时没有 key 的投递就没有通道键，它在各条通道之间轮转，连自己分区
-的顺序都丢掉了。
+`LaneKey::RecordKey` 把工作分区收窄到记录 key，正如上面第一个例子：共用一个记录 key 的投递保持
+有序，同一个分区里不同的 key 并发处理。这时没有 key 的投递就没有分区键，它在各个工作分区之间轮转，
+连自己分区的顺序都丢掉了。
 
 ## 重试与死信 { #retries-and-dead-lettering }
 
@@ -276,8 +276,8 @@ Kafka 每个分区提交一个位置，而不是每条消息一个，因此各�
 
 批量注册上的 `workers(n)` 让最多 `n` 个批次同时在处理中，它们的 ack 乱序到达时，跟踪的位置依然
 正确。`by_key` 对批次没有意义：那里的按键策略表现得就像一个同样大小的普通池。按键的顺序属于单条
-消息的处理器，在那里 `workers(n, by_key)` 把共用一个通道键的投递放在同一条通道上（参见按键通道的
-例子）。
+消息的处理器，在那里 `workers(n, by_key)` 把共用一个分区键的投递放在同一个工作分区上（参见按键
+工作分区的例子）。
 
 进程内测试 Broker 也用同样的方式原生成批，把已入队的排空，因此批量处理器挂在哪个 Broker 上都不用
 改。

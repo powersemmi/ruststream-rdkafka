@@ -50,9 +50,9 @@ trait，因此调用它的处理器主体要导入本 crate 的 prelude，并按
 策略在它背后构造出具体的 `TransactionalPartitions`（参见
 [事务作用域与工作池](#transaction-scopes-and-worker-pools)）。
 
-一条通道经由槽位交出来的那个发布者发布，因此它的消息进入 Broker 的发布日志，而不是槽位的测试记录
-（`tb.out::<Marker>()`）。在测试里，通道的流量用发布日志断言；槽位记录覆盖的是经由槽位本身发布的
-处理器。
+一个工作分区经由槽位交出来的那个发布者发布，因此它的消息进入 Broker 的发布日志，而不是槽位的测试
+记录（`tb.out::<Marker>()`）。在测试里，工作分区的流量用发布日志断言；槽位记录覆盖的是经由槽位
+本身发布的处理器。
 
 ## 记录 key { #record-keys }
 
@@ -145,12 +145,12 @@ id 由挂载点指定，每个并发的生产者一个：
 
 这里的一切由两个 Kafka 事实决定：一个生产者同一时刻只跑一个事务，一个事务 id 只属于一个活的生产者
 （初始化第二个会把第一个隔离掉）。因此 `workers(n, by_key)` 这样一个池不能共用一个事务发布者：把
-两条通道的消息并进一个事务，会把一条流程的记录和另一条的一起提交。
+两个工作分区的消息并进一个事务，会把一条流程的记录和另一条的一起提交。
 
-能与工作池组合的作用域是来源分区。在默认的 `LaneKey::Partition` 通道下，一个分区的投递在一条通道
-上串行处理。`per_partition()` 策略构造出 `TransactionalPartitions`：每个分区一个发布者，id 形如
-`"{base}-p{partition}"`，因此每条通道各跑一个独立的事务，彼此不需要协调。这组 id 跟随主题的分区，
-而不是工作者数量，因此改动 `workers(n)` 既不改 id，也不改隔离关系：
+能与工作池组合的作用域是来源分区。在默认的 `LaneKey::Partition` 工作分区下，一个分区的投递在一个
+工作分区上串行处理。`per_partition()` 策略构造出 `TransactionalPartitions`：每个分区一个发布者，
+id 形如 `"{base}-p{partition}"`，因此每个工作分区各跑一个独立的事务，彼此不需要协调。这组 id 跟随
+主题的分区，而不是工作者数量，因此改动 `workers(n)` 既不改 id，也不改隔离关系：
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:partitions"
@@ -161,13 +161,14 @@ id 由挂载点指定，每个并发的生产者一个：
 `TransactionalPartitions` 在第一次用到某个分区时才创建并初始化它的发布者，`for_partition` 因此是
 异步的，并且会返回初始化错误。
 
-按分区的作用域不与按记录 key 的通道（`LaneKey::RecordKey`）组合：那种通道把一个分区摊到多条通道上，
-于是两条通道会在这个分区的发布者上撞车。整个池共用一个 id，那是下面的精确一次管线。
+按分区的作用域不与按记录 key 的工作分区（`LaneKey::RecordKey`）组合：那种工作分区把一个分区摊到
+多个工作分区上，于是其中两个会在这个分区的发布者上撞车。整个池共用一个 id，那是下面的精确一次
+管线。
 
 ### 精确一次管线 { #exactly-once-pipelines }
 
 `KafkaEosPublish` 覆盖完整的 consume-transform-produce 形态（KIP-447），并构造出活的 `EosPipeline`。
-一个事务生产者服务所有通道，并在自己的事务内提交消费的偏移量（`send_offsets_to_transaction`），
+一个事务生产者服务所有工作分区，并在自己的事务内提交消费的偏移量（`send_offsets_to_transaction`），
 因此来源位置与发布出去的记录原子地一起前进。崩溃或者中止的窗口把两者一起回退：处理器重新处理这些
 投递，而输出主题绝不会看到重复。
 
@@ -223,7 +224,8 @@ id 只在一处指定：同一个事务 id 上的第二条管线会把第一条�
   破坏偏移量与记录的配对。
 - 回复这条路只对处于 `Commit::Transactional` 模式、并且指定了本管线 id 的订阅有效；来自其他订阅的
   回复会返回错误。
-- 它在默认的 `LaneKey::Partition` 通道上效果最好，那里每个分区都跟在自己通道的头部按顺序结算。
+- 它在默认的 `LaneKey::Partition` 工作分区上效果最好，那里每个分区都跟在自己工作分区的头部按顺序
+  结算。
 
 ## 背压与关闭 { #back-pressure-and-shutdown }
 
