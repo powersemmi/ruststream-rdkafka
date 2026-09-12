@@ -52,16 +52,17 @@ fn app() -> impl App {
     // payloads to JSON, and the `SchemaFrame` publish middleware frames outgoing ones by
     // their subject's registered flavor (subject = "{topic}-value" by default, resolved
     // lazily on the first publish; topics without a subject publish plain).
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
-        .schema_registry(sr.clone());
+        .schema_registry(registry.clone());
 
     RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .publish_layer(SchemaFrame::new(sr.clone()))
+        .publish_layer(SchemaFrame::new(registry.clone()))
         // Producers own their schemas: register (or `warm`) the reply subject at startup.
         .on_startup(async move |()| {
-            sr.register_json::<Confirmation>("confirmations-value")
+            registry
+                .register_json::<Confirmation>("confirmations-value")
                 .await?;
             Ok::<_, KafkaError>(())
         })

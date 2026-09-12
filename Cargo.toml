@@ -37,6 +37,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 apache-avro = { version = "0.22", features = ["derive"] }
+# Named explicitly, not taken through prost-reflect's re-export: the byte-lane surface bounds on
+# `prost::Message`, and a generated type only satisfies that bound if it was built against this
+# very version - so the version a service must match belongs in the manifest, not in a re-export.
+prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 

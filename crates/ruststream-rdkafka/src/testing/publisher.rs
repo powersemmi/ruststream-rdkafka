@@ -42,6 +42,25 @@ impl DefaultPublish for ConnectedKafkaTestBroker {
     type Policy = KafkaPublish;
 }
 
+/// And it pairs the framing policy too, so a mount site naming
+/// [`KafkaPublish::framed`](crate::KafkaPublish::framed) is testable in process: the envelope a
+/// reply carries on the in-process topic is the one a real broker would have put there.
+#[cfg(feature = "protobuf")]
+impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPublish {
+    type Live = crate::protobuf::KafkaFramedPublisher<KafkaTestPublisher>;
+
+    fn pair(
+        self,
+        connected: &ConnectedKafkaTestBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        let (publish, framing) = self.into_parts();
+        ready(Ok(crate::protobuf::KafkaFramedPublisher::new(
+            connected.publisher(publish),
+            framing,
+        )))
+    }
+}
+
 impl Publisher for KafkaTestPublisher {
     type Error = KafkaError;
 

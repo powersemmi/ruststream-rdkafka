@@ -83,6 +83,35 @@ impl KafkaPublish {
         }
     }
 
+    /// Frames every message this policy publishes in the Confluent wire format, resolving each
+    /// destination topic's subject through `registry`.
+    ///
+    /// This is what lets a Protobuf handler stay a plain function that returns its reply: the
+    /// value writes bare Protobuf through `#[wire(encode = ::prost::Message::encode)]`, and the
+    /// publisher this pairs into puts the schema id and the message-index path in front of it. A
+    /// value cannot do that itself - `Serialized::wire_bytes` is synchronous and has only
+    /// `&self` - while the publish path knows the destination topic, which is what names the
+    /// subject.
+    ///
+    /// Short for [`KafkaFramedPublish::over`](crate::KafkaFramedPublish::over) over the default
+    /// producer settings; take that one to keep the settings a configured [`KafkaPublish`]
+    /// holds. See [`KafkaFramedPublish`](crate::KafkaFramedPublish) for what it refuses, and for
+    /// when it resolves a subject.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::{KafkaPublish, SchemaRegistry};
+    ///
+    /// let registry = SchemaRegistry::new("http://localhost:8081");
+    /// let policy = KafkaPublish::framed(&registry);
+    /// # let _ = policy;
+    /// ```
+    #[cfg(feature = "protobuf")]
+    pub fn framed(registry: &crate::SchemaRegistry) -> crate::protobuf::KafkaFramedPublish {
+        crate::protobuf::KafkaFramedPublish::over(Self::default(), registry)
+    }
+
     pub(crate) const fn queue_timeout_setting(self) -> Option<Duration> {
         self.queue_timeout
     }

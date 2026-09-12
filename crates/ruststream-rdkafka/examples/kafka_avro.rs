@@ -2,6 +2,10 @@
 //! edges convert - incoming Avro datums arrive as JSON, and the `SchemaFrame` publish layer
 //! puts Avro on the wire because the reply topic's subject holds an Avro schema.
 //!
+//! This is the compatibility path, for a service that must keep plain serde models on a
+//! registry-backed topic. It costs a JSON hop per message and resolves no writer schema onto a
+//! reader schema, because a JSON handler has none. `kafka_avro_lanes` is the canonical path.
+//!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_avro --features avro -- run
@@ -50,15 +54,16 @@ fn app() -> impl App {
     // --8<-- [start:wiring]
     // The reply subject holds an Avro schema, so the SchemaFrame layer puts Avro on the
     // wire; nothing Avro-specific is declared on the publisher.
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
-        .schema_registry(sr.clone());
+        .schema_registry(registry.clone());
 
     RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .publish_layer(SchemaFrame::new(sr.clone()))
+        .publish_layer(SchemaFrame::new(registry.clone()))
         .on_startup(async move |()| {
-            sr.register_avro::<Confirmation>("confirmations-value")
+            registry
+                .register_avro::<Confirmation>("confirmations-value")
                 .await?;
             Ok::<_, KafkaError>(())
         })

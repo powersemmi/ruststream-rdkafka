@@ -3,6 +3,11 @@
 //! publish layer puts framed Protobuf on the wire because the reply topic's subject holds a
 //! Protobuf schema. No code generation anywhere.
 //!
+//! That last part is what this path is for: a service that must not carry generated types. It
+//! costs a JSON hop and a dynamic message per delivery, and it cannot decode anything while the
+//! registry is unreachable. `kafka_lanes_testing` shows the canonical path, where a generated
+//! message reads itself and only the publish side resolves a subject.
+//!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_protobuf --features protobuf -- run
@@ -53,23 +58,24 @@ async fn confirm(order: &Order) -> Confirmation {
 #[ruststream::app]
 fn app() -> impl App {
     // --8<-- [start:wiring]
-    let sr = SchemaRegistry::new("http://localhost:8081");
+    let registry = SchemaRegistry::new("http://localhost:8081");
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
-        .schema_registry(sr.clone());
+        .schema_registry(registry.clone());
 
     // The reply subject holds a Protobuf schema, so replies go out as framed Protobuf; the
     // message defaults to the schema's first top-level one (pin another per topic with
     // `.message("confirmations", "acme.Confirmation")`).
     RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .publish_layer(SchemaFrame::new(sr.clone()))
+        .publish_layer(SchemaFrame::new(registry.clone()))
         .on_startup(async move |()| {
-            sr.register(
-                "confirmations-value",
-                SchemaType::Protobuf,
-                CONFIRMATIONS_PROTO,
-            )
-            .await?;
+            registry
+                .register(
+                    "confirmations-value",
+                    SchemaType::Protobuf,
+                    CONFIRMATIONS_PROTO,
+                )
+                .await?;
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {

@@ -39,6 +39,8 @@ pub(crate) struct ConnState {
     closed: AtomicBool,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
 }
 
 impl ConnState {
@@ -135,6 +137,8 @@ pub struct KafkaBroker {
     early_conn: EarlyConn,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
 }
 
 impl KafkaBroker {
@@ -157,6 +161,8 @@ impl KafkaBroker {
             early_conn: Arc::new(OnceLock::new()),
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: None,
         }
     }
 
@@ -251,6 +257,25 @@ impl KafkaBroker {
         self
     }
 
+    /// Attaches a [`SchemaPrefetch`](crate::schema_registry::SchemaPrefetch), the async half of
+    /// a registry-backed codec: [`connect`](ruststream::Broker::connect) resolves the subjects
+    /// its codecs publish under, and every subscription resolves the writer schema an arriving
+    /// envelope names - both before the synchronous codec runs, which is the only way a sync
+    /// `encode` / `decode` can reach an async registry without blocking a runtime worker.
+    ///
+    /// Deliveries are not touched: this attachment fills a cache and nothing else. It is
+    /// therefore the opposite of [`schema_registry`](Self::schema_registry), which rewrites
+    /// framed deliveries into JSON for the transcoding compatibility path. The two are
+    /// alternatives, not layers: with both attached the transcode would hand a JSON document to
+    /// a codec expecting the wire format, so the prefetch runs first and still sees the
+    /// envelope, but the pairing is a configuration mistake either way.
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema_prefetch(mut self, prefetch: crate::schema_registry::SchemaPrefetch) -> Self {
+        self.schema_prefetch = Some(prefetch);
+        self
+    }
+
     fn base_config(&self) -> ClientConfig {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", self.servers.join(","));
@@ -294,6 +319,14 @@ impl Broker for KafkaBroker {
             .map_err(|err| KafkaError::Connect(Box::new(err)))?
             .map_err(KafkaError::connect)?;
 
+        // Every subject a registry codec publishes under, resolved here rather than on the first
+        // publish: the codec's own encode is synchronous, and a subject that does not exist
+        // should stop the app coming up rather than surface as one failed message later.
+        #[cfg(feature = "schema-registry")]
+        if let Some(prefetch) = &self.schema_prefetch {
+            prefetch.warm_subjects().await?;
+        }
+
         let state = Arc::new(ConnState {
             producer,
             producer_config,
@@ -304,6 +337,8 @@ impl Broker for KafkaBroker {
             closed: AtomicBool::new(false),
             #[cfg(feature = "schema-registry")]
             schema_registry: self.schema_registry,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: self.schema_prefetch,
         });
         // Brings any early publisher handed out before this call alive. A second connect of a
         // clone lineage leaves the first connection in the cell rather than swapping it, so an
@@ -519,7 +554,9 @@ impl ConnectedKafkaBroker {
             retry,
         );
         #[cfg(feature = "schema-registry")]
-        let subscriber = subscriber.with_schema_registry(self.state.schema_registry.clone());
+        let subscriber = subscriber
+            .with_schema_registry(self.state.schema_registry.clone())
+            .with_schema_prefetch(self.state.schema_prefetch.clone());
         Ok(subscriber)
     }
 }
