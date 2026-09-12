@@ -10,6 +10,9 @@ check:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo check --workspace --all-targets --all-features
     cargo check --workspace --no-default-features
+    # CI's stable leg denies rustdoc warnings, and broken intra-doc links are invisible to
+    # every step above; running it here is what keeps a local pass from turning CI red.
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 test:
     cargo test --workspace --all-features

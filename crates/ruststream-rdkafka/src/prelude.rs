@@ -21,7 +21,7 @@
 //! | [`EosPublish`] | [`KafkaEosPublish`](crate::KafkaEosPublish) |
 //!
 //! One handler body imports this prelude too: the one that adjusts a per-record setting. Naming
-//! [`KafkaPublishSteps`](crate::KafkaPublishSteps)'s `partition(..)` step needs the trait in
+//! [`KafkaPublishSteps`]'s `partition(..)` step needs the trait in
 //! scope and the slot bounded as `Out<impl Publisher<Options = KafkaOptions>, Marker>`, and that
 //! bound is the stated exception to the rule above.
 //!

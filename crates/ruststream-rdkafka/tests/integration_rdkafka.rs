@@ -38,8 +38,9 @@ use ruststream::{
 use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
-    KafkaEosPublish, KafkaError, KafkaMessage, KafkaPosition, KafkaPublish, KafkaTopic, LaneKey,
-    PARTITION_HEADER, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
+    KafkaEosPublish, KafkaError, KafkaMessage, KafkaOptions, KafkaPosition, KafkaPublish,
+    KafkaTopic, LaneKey, PARTITION_HEADER, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset,
+    StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1503,6 +1504,56 @@ async fn explicit_partition_header_targets_the_partition() {
         .await
         .expect_err("malformed partition must fail");
     assert!(matches!(err, KafkaError::InvalidOptions(_)));
+
+    drop(stream);
+    drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// The typed per-record setting reaches the cluster, and a call site outranks the header a
+/// publish transform would have stamped on the same record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_partition_setting_places_the_record_and_outranks_the_header() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("placed");
+    create_topic(&url, &topic, 2).await;
+    let broker = connected_broker(&url).await;
+
+    let mut subscriber = broker
+        .subscribe_with(tracked(&topic, &unique("group")))
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(
+            OutgoingMessage::new(&topic, b"placed".as_slice()),
+            Some(&KafkaOptions::default().partition(1)),
+        )
+        .await
+        .expect("publish placed");
+
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"placed");
+    assert_eq!(msg.partition(), 1, "the setting must place the record");
+    msg.ack().await.expect("ack");
+
+    let mut stamped = HeaderMap::new();
+    stamped.insert(PARTITION_HEADER, "1");
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(
+            OutgoingMessage::new(&topic, b"outranked".as_slice()).with_headers(stamped),
+            Some(&KafkaOptions::default().partition(0)),
+        )
+        .await
+        .expect("publish outranked");
+
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"outranked");
+    assert_eq!(msg.partition(), 0, "the call site must outrank the header");
+    msg.ack().await.expect("ack");
 
     drop(stream);
     drop(subscriber);
