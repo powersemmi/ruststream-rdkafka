@@ -5,7 +5,7 @@
 //!
 //! That last part is what this path is for: a service that must not carry generated types. It
 //! costs a JSON hop and a dynamic message per delivery, and it cannot decode anything while the
-//! registry is unreachable. `kafka_lanes_testing` shows the canonical path, where a generated
+//! registry is unreachable. `kafka_protobuf_plain` shows the canonical path, where a generated
 //! message reads itself and only the publish side resolves a subject.
 //!
 //! ```text
