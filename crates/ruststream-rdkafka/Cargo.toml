@@ -31,6 +31,10 @@ avro = ["schema-registry", "dep:apache-avro"]
 # the registry middleware - dynamic messages (prost-reflect) with descriptors compiled from the
 # registry's .proto sources (protox).
 protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
+# The protocol bindings this crate contributes to the generated AsyncAPI document: the Kafka
+# topic behind a channel, the consumer group of an operation, the schema-registry coordinate of
+# a server. Forwarded from the core, where the document is built.
+asyncapi = ["ruststream/asyncapi", "dep:serde"]
 # Ships the in-process test broker (`testing` module). The conformance harness is broker-author
 # tooling and stays in this repo's dev-dependencies, out of the user-facing feature.
 testing = ["ruststream/testing"]
@@ -61,8 +65,15 @@ prost-reflect = { workspace = true, optional = true }
 protox = { workspace = true, optional = true }
 
 [dev-dependencies]
-ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
+ruststream = { workspace = true, features = [
+    "asyncapi",
+    "conformance",
+    "testing",
+    "macros",
+    "json",
+] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
 schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }

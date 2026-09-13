@@ -140,6 +140,8 @@ impl Broker for KafkaTestBroker {
 }
 
 impl DescribeServer for KafkaTestBroker {
+    /// The same shape the real broker reports, minus a host: the in-process transport has no
+    /// address, and it speaks to no schema registry, so it contributes no server binding either.
     fn describe_server(&self) -> ServerSpec {
         ServerSpec::in_process("kafka")
     }

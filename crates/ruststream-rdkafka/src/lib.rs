@@ -53,6 +53,8 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "asyncapi")]
+mod bindings;
 mod broker;
 mod convert;
 mod distribution;

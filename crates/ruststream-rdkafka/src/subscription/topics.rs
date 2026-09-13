@@ -2,6 +2,8 @@
 
 use std::future::{Future, ready};
 
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::{NamedCopies, SubscriptionSource};
 
 use super::{Assignment, Commit, GroupSettings, LaneKey, Reader, StartOffset, SubscriptionPlan};
@@ -182,6 +184,16 @@ impl KafkaTopics {
         &self.name
     }
 
+    /// What this subscription adds to its `receive` operation: the consumer group it joins, and
+    /// the client id where the raw passthrough names one.
+    ///
+    /// There is no channel binding to go with it: the Kafka binding's `topic` names one topic,
+    /// and this subscription reads a set.
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        crate::bindings::operation(self.settings.group.as_deref(), &self.settings.config)
+    }
+
     fn into_plan(self) -> Result<SubscriptionPlan, KafkaError> {
         if self.entries.is_empty() {
             return Err(KafkaError::InvalidOptions(
@@ -223,6 +235,11 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopics {
     ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
         ready(self.into_plan().and_then(|plan| connected.open(plan)))
     }
+
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        Self::operation_bindings(self)
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -239,6 +256,11 @@ impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic
         broker: &crate::testing::ConnectedKafkaTestBroker,
     ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
         ready(self.into_plan().and_then(|plan| broker.open(plan)))
+    }
+
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        Self::operation_bindings(self)
     }
 }
 

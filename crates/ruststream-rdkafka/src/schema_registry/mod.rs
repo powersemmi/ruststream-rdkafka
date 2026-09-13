@@ -213,6 +213,15 @@ impl SchemaRegistry {
         )
     }
 
+    /// The registry's base URL, when this client is the shipped HTTP one. `None` for a
+    /// caller-supplied [`RegistryClient`], whose coordinate this crate does not know.
+    pub(crate) fn base_url(&self) -> Option<&str> {
+        self.inner
+            .shipped
+            .as_ref()
+            .map(|config| config.base_url.as_str())
+    }
+
     /// Replaces what this client remembers with a [`SchemaCache`] of your own.
     ///
     /// Configure before handing the client out: clones share one cache.

@@ -2,6 +2,8 @@
 
 use std::future::{Future, ready};
 
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::{NamedCopies, SubscriptionSource};
 
 use super::{Commit, GroupSettings, LaneKey, Reader, StartOffset, SubscriptionPlan};
@@ -103,6 +105,20 @@ impl KafkaPartitions {
         &self.partitions
     }
 
+    /// What this reader adds to its channel in the generated `AsyncAPI` document: the Kafka
+    /// topic its partitions belong to.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self) -> Bindings {
+        crate::bindings::channel(&self.topic)
+    }
+
+    /// What this reader adds to its `receive` operation: the group it commits into, and the
+    /// client id where the raw passthrough names one.
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        crate::bindings::operation(self.settings.group.as_deref(), &self.settings.config)
+    }
+
     fn into_plan(self) -> Result<SubscriptionPlan, KafkaError> {
         super::reject_empty(&self.topic)?;
         super::reject_pattern(&self.topic, "`KafkaPartitions`")?;
@@ -138,6 +154,16 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaPartitions {
     ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
         ready(self.into_plan().and_then(|plan| connected.open(plan)))
     }
+
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self) -> Bindings {
+        Self::channel_bindings(self)
+    }
+
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        Self::operation_bindings(self)
+    }
 }
 
 #[cfg(feature = "testing")]
@@ -154,6 +180,16 @@ impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaParti
         broker: &crate::testing::ConnectedKafkaTestBroker,
     ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
         ready(self.into_plan().and_then(|plan| broker.open(plan)))
+    }
+
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self) -> Bindings {
+        Self::channel_bindings(self)
+    }
+
+    #[cfg(feature = "asyncapi")]
+    fn operation_bindings(&self) -> Bindings {
+        Self::operation_bindings(self)
     }
 }
 

@@ -59,6 +59,11 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPub
             framing,
         )))
     }
+
+    #[cfg(feature = "asyncapi")]
+    fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+        Self::message_bindings(self)
+    }
 }
 
 impl Publisher for KafkaTestPublisher {

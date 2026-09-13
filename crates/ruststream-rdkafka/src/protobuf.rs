@@ -178,6 +178,10 @@ impl ProtobufFraming {
         self.subjects.set_strategy(strategy);
     }
 
+    pub(crate) fn strategy(&self) -> SubjectStrategy {
+        self.subjects.strategy()
+    }
+
     pub(crate) fn pin_subject(&mut self, topic: String, subject: String) {
         self.subjects.pin(topic, subject);
     }
@@ -524,6 +528,16 @@ impl KafkaFramedPublish {
     }
 }
 
+impl KafkaFramedPublish {
+    /// What the messages this policy publishes say about their schema: the Confluent envelope
+    /// puts the schema id in the payload, and the naming strategy says which subject it was
+    /// registered under.
+    #[cfg(feature = "asyncapi")]
+    pub(crate) fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+        crate::bindings::message(self.framing.strategy())
+    }
+}
+
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaFramedPublish {
     type Live = KafkaFramedPublisher<KafkaPublisher>;
 
@@ -532,6 +546,11 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaFramedPublish {
             self.publish.pair(connected).await?,
             self.framing,
         ))
+    }
+
+    #[cfg(feature = "asyncapi")]
+    fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+        Self::message_bindings(self)
     }
 }
 

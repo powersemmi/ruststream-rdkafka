@@ -321,7 +321,30 @@ impl DescribeServer for KafkaBroker {
             .iter()
             .map(|server| ServerSpec::host_from_url(server))
             .collect();
-        ServerSpec::new(hosts.join(","), "kafka")
+        let spec = ServerSpec::new(hosts.join(","), "kafka");
+        // `protocol_version` stays unset: the Kafka protocol negotiates its version per API key
+        // between the client and the cluster, so no one number describes what clients speak here.
+        #[cfg(feature = "asyncapi")]
+        let spec = spec.bindings(crate::bindings::server(self.registry_url()));
+        spec
+    }
+}
+
+#[cfg(feature = "asyncapi")]
+impl KafkaBroker {
+    /// The schema registry's coordinate, for the server binding. `None` without a registry, and
+    /// without the feature that speaks to one.
+    fn registry_url(&self) -> Option<&str> {
+        #[cfg(feature = "schema-registry")]
+        {
+            self.schema_registry
+                .as_ref()
+                .and_then(crate::schema_registry::SchemaRegistry::base_url)
+        }
+        #[cfg(not(feature = "schema-registry"))]
+        {
+            None
+        }
     }
 }
 
