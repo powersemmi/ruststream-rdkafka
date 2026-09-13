@@ -45,10 +45,9 @@
 //! shutdown keep aliasing the closed connection, so their operations report
 //! [`KafkaError::Closed`] rather than succeeding against a dead connection.
 //!
-//! One publisher stands outside that split: [`KafkaRetryPublisher`], minted from
-//! the unconnected broker for builder-time wiring that takes a live publisher rather than a
-//! policy - `retry_via`, the deferred republish behind `retry_after` that Kafka needs because
-//! it has no native delayed redelivery. See its documentation.
+//! Kafka has no delayed redelivery of its own, so `retry_after` becomes a deferred republish:
+//! the mount site names the publisher it leaves through with `.out_retry(policy)`, one
+//! registration at a time.
 //!
 //! [`rdkafka`]: https://docs.rs/rdkafka
 
@@ -87,7 +86,7 @@ pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
 pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};
 pub use publisher::{
     KafkaOptions, KafkaPartitionedPublish, KafkaPublish, KafkaPublishSteps, KafkaPublisher,
-    KafkaRetryPublisher, KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
+    KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
     TransactionalPartitions,
 };
 #[cfg(feature = "schema-registry")]

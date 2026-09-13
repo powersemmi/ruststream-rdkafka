@@ -2116,7 +2116,7 @@ async fn deferred_retry(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retry_after_republishes_through_the_retry_publisher() {
+async fn retry_after_republishes_through_the_retry_position() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("deferred-retry");
     create_topic(&url, &topic, 1).await;
@@ -2134,11 +2134,9 @@ async fn retry_after_republishes_through_the_retry_publisher() {
     let app = RustStream::new(AppInfo::new("deferred-retry", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            // The early publisher is what makes this wiring possible before the connection
-            // exists; `retry_via` takes a live publisher, not a policy.
-            let retries = b.broker().retry_publisher();
-            b.retry_via(retries);
-            b.include(deferred_retry);
+            // Kafka defers the copy itself, so the registration names the publisher it
+            // leaves through; the policy pairs at startup like every other one.
+            b.include(deferred_retry).out_retry(KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);
@@ -2154,32 +2152,6 @@ async fn retry_after_republishes_through_the_retry_publisher() {
         seen,
         vec![None, Some("1".to_owned())],
         "the original carries no retry count and the deferred copy carries the first one",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_early_publisher_errors_after_shutdown() {
-    let Some(url) = kafka_url() else { return };
-    let topic = unique("early-publisher");
-    create_topic(&url, &topic, 1).await;
-
-    let broker = KafkaBroker::new([url.clone()]);
-    let retries = broker.retry_publisher();
-    let connected = broker.connect().await.expect("connect");
-    retries
-        .publish(OutgoingMessage::new(&topic, b"live".as_slice()), None)
-        .await
-        .expect("the cell resolves once the broker connects");
-
-    connected.shutdown().await.expect("shutdown");
-
-    let err = retries
-        .publish(OutgoingMessage::new(&topic, b"after".as_slice()), None)
-        .await
-        .expect_err("publishing through a handle aliasing a closed connection must error");
-    assert!(
-        matches!(&err, KafkaError::Closed { topic: named } if named == &topic),
-        "the error must name the topic it could not reach, got: {err}",
     );
 }
 

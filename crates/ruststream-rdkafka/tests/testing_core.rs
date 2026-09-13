@@ -26,11 +26,12 @@ use futures::{Stream, StreamExt};
 use ruststream::codec::{Codec as _, DefaultCodec};
 use ruststream::nonzero;
 use ruststream::runtime::{
-    AppInfo, ContextKind, Ctx, DefaultSlot, HandlerOutcome, Out, Outgoing as OutgoingRecord,
-    PublishTransform, Reads, Reply, RustStream, SubscriberSettings as _,
+    AppInfo, ContextKind, Ctx, DefaultSlot, ForSlot, HandlerOutcome, Out,
+    Outgoing as OutgoingRecord, PublishTransform, RETRY_COUNT_HEADER, Reads, Reply, RustStream,
+    SlotContext, SubscriberSettings as _,
 };
 use ruststream::subscriber;
-use ruststream::testing::{TestApp, TestableBroker as _, expect_published};
+use ruststream::testing::{Outcome, TestApp, TestableBroker as _, expect_published};
 use ruststream::{
     Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutSlot, Outgoing,
     OutgoingMessage, Partitioned, PublishPolicy as _, Publisher, Seeker as _, Subscriber,
@@ -716,6 +717,75 @@ async fn test_app_requeue_stays_balanced() {
     tb.shutdown().await.expect("shutdown");
 }
 
+/// How long a not-ready-yet delivery waits before it comes back.
+const DEFER: Duration = Duration::from_secs(5);
+
+/// Stamps every message leaving the slot it is mounted on with that slot's name. The retry
+/// position is an `Out` slot, so its transforms read a `SlotContext` like any other slot's, and
+/// this one writes no per-record setting, so it is generic over them.
+struct DeferredStamp;
+
+impl<Options> PublishTransform<ForSlot, Options> for DeferredStamp {
+    type Destination = Reads;
+
+    fn apply(
+        &self,
+        out: &mut OutgoingRecord<'_>,
+        _options: &mut Option<Options>,
+        cx: &SlotContext<'_>,
+    ) {
+        out.headers_mut()
+            .insert("x-left-through", cx.slot().to_owned());
+    }
+}
+
+/// Defers the first delivery of a record and answers the copy that comes back.
+#[subscriber(KafkaTopic::new("deferred").commit(Commit::Tracked))]
+async fn defer_then_ack(order: &Order, ctx: &mut Context) -> HandlerOutcome {
+    let _ = order;
+    if ctx.headers().get(RETRY_COUNT_HEADER).is_none() {
+        HandlerOutcome::retry_after(DEFER)
+    } else {
+        HandlerOutcome::ack()
+    }
+}
+
+/// Kafka has no delayed redelivery of its own, so the runtime republishes a delayed copy through
+/// the publisher the registration named. The copy travels the position's whole pipeline: the
+/// transform below stamps it, and the handler sees the stamp when it comes back.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_copy_travels_the_retry_position() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(defer_then_ack)
+                .out_retry(KafkaPublish::default())
+                .transform(DeferredStamp);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("deferred", &Order { id: 3 })
+        .await
+        .expect("publish");
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("deferred")
+        .assert_called_once()
+        .settled(HandlerOutcome::retry_after(DEFER));
+
+    tb.advance(DEFER).await.expect("the delay elapses");
+
+    assert_eq!(
+        tb.broker::<KafkaTestBroker>()
+            .subscriber("deferred")
+            .outcomes(),
+        [Outcome::Nack, Outcome::Ack],
+        "the deferred copy must reach the handler and settle",
+    );
+    tb.broker::<KafkaTestBroker>()
+        .published::<Order>("deferred")
+        .with_header("x-left-through", "Retry");
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PlanOrder {
     id: u64,
@@ -1248,8 +1318,9 @@ async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
             .expect("seed");
     }
 
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
-        .with_broker(broker, |b| b.include(count_batches.batch(nonzero!(2))));
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
+        b.include(count_batches.batch(nonzero!(2)));
+    });
     let tb = TestApp::start(app).await.expect("start");
     tb.settle().await.expect("the replayed batches settle");
 

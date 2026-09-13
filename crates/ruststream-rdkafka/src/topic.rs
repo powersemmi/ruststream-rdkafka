@@ -559,7 +559,7 @@ mod tests {
     }
 
     // A copy published under either of these would not come back, so the descriptor says nothing
-    // and an application wiring `retry_via` over it refuses to start.
+    // and a registration bound with `out_retry` over it refuses to start.
     #[test]
     fn a_pattern_or_a_manual_assignment_reports_no_address() {
         assert!(

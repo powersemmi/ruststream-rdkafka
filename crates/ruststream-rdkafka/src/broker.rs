@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::{Future, ready};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
@@ -17,7 +17,7 @@ use tokio::task;
 
 use crate::eos::EosSource;
 use crate::error::KafkaError;
-use crate::publisher::{KafkaPublish, KafkaPublisher, KafkaRetryPublisher};
+use crate::publisher::{KafkaPublish, KafkaPublisher};
 use crate::retry::RetryContext;
 use crate::subscriber::KafkaSubscriber;
 use crate::topic::{Commit, KafkaTopic, StartOffset};
@@ -97,10 +97,6 @@ impl fmt::Debug for ConnState {
     }
 }
 
-/// The cell an unconnected broker hands to its [`KafkaRetryPublisher`], filled once
-/// [`Broker::connect`] has the live state. See that type for why this one path is cell-backed.
-pub(crate) type EarlyConn = Arc<OnceLock<Arc<ConnState>>>;
-
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -134,9 +130,6 @@ pub struct KafkaBroker {
     producer_config: Vec<(String, String)>,
     connect_timeout: Duration,
     flush_timeout: Duration,
-    /// Filled by [`Broker::connect`], read only by [`KafkaRetryPublisher`]; clones of this
-    /// broker share it, so the publisher a clone handed out still comes alive.
-    early_conn: EarlyConn,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<crate::schema_registry::SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
@@ -160,43 +153,11 @@ impl KafkaBroker {
             producer_config: Vec::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
-            early_conn: Arc::new(OnceLock::new()),
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
             #[cfg(feature = "schema-registry")]
             schema_prefetch: None,
         }
-    }
-
-    /// A publisher for builder-time wiring that needs a live
-    /// [`Publisher`](ruststream::Publisher) before the broker is connected - today that is
-    /// [`BrokerScope::retry_via`](ruststream::runtime::BrokerScope::retry_via), the deferred
-    /// republish behind `retry_after` on a broker without native delayed redelivery, which
-    /// Kafka is.
-    ///
-    /// It exists for exactly that: a publish policy cannot be used there, because `retry_via`
-    /// takes a publisher and a publisher may not exist before its connection does. This handle
-    /// is the narrow exception, backed by a cell [`Broker::connect`] fills; the regular publish
-    /// path stays policy-first and never sees a cell. Records go out through the broker's
-    /// shared producer, on the broker's producer configuration.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use ruststream::runtime::{App, AppInfo, RustStream};
-    /// use ruststream_rdkafka::KafkaBroker;
-    ///
-    /// # fn demo() -> impl App {
-    /// let broker = KafkaBroker::new(["localhost:9092"]).default_group("payments-svc");
-    /// RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
-    ///     let retries = b.broker().retry_publisher();
-    ///     b.retry_via(retries);
-    /// })
-    /// # }
-    /// ```
-    #[must_use]
-    pub fn retry_publisher(&self) -> KafkaRetryPublisher {
-        KafkaRetryPublisher::new(Arc::clone(&self.early_conn))
     }
 
     /// The consumer group used by subscriptions that do not set one themselves
@@ -344,10 +305,6 @@ impl Broker for KafkaBroker {
             #[cfg(feature = "schema-registry")]
             schema_prefetch: self.schema_prefetch,
         });
-        // Brings any early publisher handed out before this call alive. A second connect of a
-        // clone lineage leaves the first connection in the cell rather than swapping it, so an
-        // early publisher keeps publishing through the connection it was minted against.
-        let _ = self.early_conn.set(Arc::clone(&state));
         Ok(ConnectedKafkaBroker { state })
     }
 }
