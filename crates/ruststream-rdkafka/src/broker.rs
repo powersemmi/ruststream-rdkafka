@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::future::{Future, ready};
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -11,16 +11,16 @@ use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, RedeliveryAddress, ServerSpec, Subscribe,
+    AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Subscribe,
+    SubscriptionSource,
 };
 use tokio::task;
 
 use crate::eos::EosSource;
 use crate::error::KafkaError;
 use crate::publisher::{KafkaPublish, KafkaPublisher};
-use crate::retry::RetryContext;
 use crate::subscriber::KafkaSubscriber;
-use crate::topic::{Commit, KafkaTopic, StartOffset};
+use crate::subscription::{Commit, KafkaTopic, Reader, StartOffset, SubscriptionPlan};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The live client state behind [`ConnectedKafkaBroker`]: the shared producer every publisher
@@ -165,8 +165,8 @@ impl KafkaBroker {
     ///
     /// Joining a group is what the bare-string `#[subscriber("orders")]` form does, so it needs
     /// this; a subscription that ends up with no group at all is a startup error. A subscription
-    /// that names its partitions with [`KafkaTopic::partitions`](crate::KafkaTopic::partitions)
-    /// joins no group and needs none.
+    /// that names its partitions with [`KafkaPartitions`](crate::KafkaPartitions) joins no group
+    /// and needs none.
     #[must_use]
     pub fn default_group(mut self, group: impl Into<String>) -> Self {
         self.default_group = Some(group.into());
@@ -384,14 +384,13 @@ impl ConnectedKafkaBroker {
         &self.state
     }
 
-    /// Opens a subscription for `def`: one consumer joining `def`'s group on `def`'s topic(s)
-    /// or pattern.
+    /// Opens a subscription for `def`, whichever of this crate's descriptors it is.
     ///
     /// # Errors
     ///
     /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
     /// down, [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
-    /// consumer group (or the descriptor's pattern is not `^`-anchored), and
+    /// consumer group (or the descriptor's own options do not hold together), and
     /// [`KafkaError::Subscribe`] when the consumer cannot be created or the subscription is
     /// rejected.
     ///
@@ -410,40 +409,44 @@ impl ConnectedKafkaBroker {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn subscribe_with(
+    pub fn subscribe_with<Source>(
         &self,
-        def: KafkaTopic,
-    ) -> impl Future<Output = Result<KafkaSubscriber, KafkaError>> {
-        // librdkafka joins the group in the background, so opening a subscription never awaits;
-        // the async surface is what the SubscriptionSource contract and the call sites expect.
-        ready(self.open_subscription(def))
+        def: Source,
+    ) -> impl Future<Output = Result<KafkaSubscriber, KafkaError>>
+    where
+        Source: SubscriptionSource<Self, Subscriber = KafkaSubscriber>,
+    {
+        def.subscribe(self)
     }
 
-    /// The synchronous body behind [`subscribe_with`](Self::subscribe_with), kept apart so the
-    /// error paths stay `?` rather than a chain of early `ready(Err(..))` returns.
-    fn open_subscription(&self, def: KafkaTopic) -> Result<KafkaSubscriber, KafkaError> {
-        self.state.ensure_open(def.topic())?;
-        def.validate()?;
-        let manual = !def.assigned_partitions().is_empty();
-        let group = def
-            .group_or(self.state.default_group.as_deref())
-            .map(str::to_owned);
+    /// Opens the consumer a resolved descriptor asks for. The descriptors validate themselves
+    /// before they get here, so what is left is what needs the broker: the default group, the
+    /// base config, and the combinations manual assignment cannot honor.
+    pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaSubscriber, KafkaError> {
+        self.state.ensure_open(&plan.name)?;
+        let manual = matches!(plan.reader, Reader::Assigned { .. });
+        let group = plan
+            .settings
+            .group
+            .clone()
+            .or_else(|| self.state.default_group.clone());
         let group = match group {
             Some(group) => Some(group),
             // Manual assignment needs no group membership; everything else does.
             None if manual => None,
             None => {
                 return Err(KafkaError::InvalidOptions(format!(
-                    "subscription to {:?} has no consumer group: set `KafkaTopic::group` or \
-                     `KafkaBroker::default_group`",
-                    def.topic(),
+                    "subscription to {:?} has no consumer group: name one on the descriptor or \
+                     set `KafkaBroker::default_group`",
+                    plan.name,
                 )));
             }
         };
         if manual {
-            validate_manual_assignment(&def, group.as_deref())?;
+            validate_manual_assignment(&plan, group.as_deref())?;
         }
 
+        let def = &plan.settings;
         let mut config = self.state.base_config.clone();
         if let Some(group) = &group {
             config.set("group.id", group);
@@ -454,7 +457,7 @@ impl ConnectedKafkaBroker {
             config.set("group.id", "ruststream.standalone");
             config.set("enable.auto.commit", "false");
         }
-        match def.start_offset() {
+        match def.start {
             StartOffset::Committed => {}
             StartOffset::Earliest => {
                 config.set("auto.offset.reset", "earliest");
@@ -463,13 +466,13 @@ impl ConnectedKafkaBroker {
                 config.set("auto.offset.reset", "latest");
             }
         }
-        if let Some(assignment) = def.assignment_strategy() {
+        if let Some(assignment) = def.assignment {
             config.set(
                 "partition.assignment.strategy",
                 assignment.as_config_value(),
             );
         }
-        match def.commit_mode() {
+        match &def.commit {
             Commit::Auto => {}
             Commit::Tracked => {
                 config.set("enable.auto.offset.store", "false");
@@ -482,7 +485,7 @@ impl ConnectedKafkaBroker {
             }
         }
         // The raw passthrough is applied last on purpose: it wins over the typed options.
-        for (key, value) in def.config_entries() {
+        for (key, value) in &def.config {
             config.set(key, value);
         }
 
@@ -491,38 +494,28 @@ impl ConnectedKafkaBroker {
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
-        if manual {
-            assign_partitions(&consumer, &def)?;
-        } else {
-            let names: Vec<&str> = def.subscribed_topics().iter().map(String::as_str).collect();
-            consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
+        match &plan.reader {
+            Reader::Assigned { topic, partitions } => {
+                assign_partitions(&consumer, topic, partitions, def.start)?;
+            }
+            Reader::Subscribed(names) => {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
+            }
         }
 
         let consumer = Arc::new(consumer);
-        if let Commit::Transactional(pipeline) = def.commit_mode() {
+        if let Commit::Transactional(pipeline) = &def.commit {
             self.state
                 .register_eos(pipeline, EosSource::new(&tracker, &consumer));
         }
-        // The descriptor's configuration fields are spent by now, so the rest of it moves into
-        // the subscription rather than being cloned back out of a borrow.
-        let parts = def.into_parts();
-        let retry = (parts.retry.is_some() || parts.dead_letter.is_some()).then(|| {
-            Arc::new(RetryContext::new(
-                parts.retry,
-                parts.max_deliveries,
-                parts.dead_letter,
-                Arc::clone(&self.state),
-                Arc::clone(&consumer),
-                Arc::clone(&tracker),
-            ))
-        });
+        let settings = plan.settings;
         let subscriber = KafkaSubscriber::new(
             consumer,
-            parts.name,
-            parts.commit,
+            plan.name,
+            settings.commit,
             tracker,
-            parts.lane_key,
-            retry,
+            settings.lane_key,
         );
         #[cfg(feature = "schema-registry")]
         let subscriber = subscriber
@@ -584,25 +577,26 @@ impl ClosedKafkaBroker {
 impl Subscribe for ConnectedKafkaBroker {
     type Subscriber = KafkaSubscriber;
 
+    /// A bare name is one topic, and a record produced to a topic reaches every group reading
+    /// it, so `#[subscriber("orders")]` addresses its own deferred `retry_after` copies. A
+    /// `^`-anchored name is a librdkafka topic regex and is refused here; subscribe to a pattern
+    /// with [`KafkaTopics::pattern`](crate::KafkaTopics::pattern).
+    type Copies = AddressedCopies;
+
     /// Subscribes to the topic `name` with descriptor defaults; requires
     /// [`KafkaBroker::default_group`].
     async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
         self.subscribe_with(KafkaTopic::new(name)).await
     }
-
-    /// The topic itself: on Kafka a publish to a topic reaches every group reading it, which is
-    /// what makes the framework's deferred `retry_after` copy work here.
-    ///
-    /// A `^`-anchored name is a librdkafka topic regex, and a publish cannot address a regex, so
-    /// that form answers nothing rather than an address no record would arrive at.
-    fn redelivery_address(&self, name: &str) -> Option<RedeliveryAddress> {
-        (!name.starts_with('^')).then(|| RedeliveryAddress::new(name.to_owned()))
-    }
 }
 
 /// The option combinations manual assignment cannot honor, failed at subscribe time.
-fn validate_manual_assignment(def: &KafkaTopic, group: Option<&str>) -> Result<(), KafkaError> {
-    if matches!(def.commit_mode(), Commit::Transactional(_)) {
+fn validate_manual_assignment(
+    plan: &SubscriptionPlan,
+    group: Option<&str>,
+) -> Result<(), KafkaError> {
+    let def = &plan.settings;
+    if matches!(def.commit, Commit::Transactional(_)) {
         return Err(KafkaError::InvalidOptions(
             "manual partition assignment does not compose with `Commit::Transactional`: an \
              EOS pipeline commits through the consumer group protocol"
@@ -610,14 +604,14 @@ fn validate_manual_assignment(def: &KafkaTopic, group: Option<&str>) -> Result<(
         ));
     }
     if group.is_none() {
-        if def.commit_mode() == &Commit::Tracked {
+        if def.commit == Commit::Tracked {
             return Err(KafkaError::InvalidOptions(
                 "`Commit::Tracked` needs a group to commit into; name one with \
-                 `KafkaTopic::group` or drop the commit mode for a group-less reader"
+                 `KafkaPartitions::group` or drop the commit mode for a group-less reader"
                     .to_owned(),
             ));
         }
-        if def.start_offset() == StartOffset::Committed {
+        if def.start == StartOffset::Committed {
             return Err(KafkaError::InvalidOptions(
                 "a group-less manual assignment has no committed offsets to start from; set \
                  `start(StartOffset::Earliest)` or `Latest`, or name a group"
@@ -633,17 +627,19 @@ fn validate_manual_assignment(def: &KafkaTopic, group: Option<&str>) -> Result<(
 /// `Beginning`/`End` are the explicit group-less starts.
 fn assign_partitions(
     consumer: &StreamConsumer<TrackingContext>,
-    def: &KafkaTopic,
+    topic: &str,
+    partitions: &[i32],
+    start: StartOffset,
 ) -> Result<(), KafkaError> {
-    let offset = match def.start_offset() {
+    let offset = match start {
         StartOffset::Committed => Offset::Stored,
         StartOffset::Earliest => Offset::Beginning,
         StartOffset::Latest => Offset::End,
     };
     let mut assignment = TopicPartitionList::new();
-    for partition in def.assigned_partitions() {
+    for partition in partitions {
         assignment
-            .add_partition_offset(def.topic(), *partition, offset)
+            .add_partition_offset(topic, *partition, offset)
             .map_err(KafkaError::subscribe)?;
     }
     consumer.assign(&assignment).map_err(KafkaError::subscribe)
@@ -661,19 +657,6 @@ mod tests {
             Some("a:9092,b:9092")
         );
         assert_eq!(broker.describe_server().protocol, "kafka");
-    }
-
-    #[test]
-    fn descriptor_group_resolution_prefers_the_descriptor() {
-        let def = KafkaTopic::new("orders");
-        assert!(def.group_or(None).is_none());
-        assert_eq!(def.group_or(Some("fallback")), Some("fallback"));
-        assert_eq!(
-            KafkaTopic::new("orders")
-                .group("own")
-                .group_or(Some("fallback")),
-            Some("own"),
-        );
     }
 
     #[tokio::test]

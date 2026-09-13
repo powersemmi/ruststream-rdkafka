@@ -49,11 +49,7 @@ async fn confirm(order: &Order) -> Confirmation {
 // Manual assignment: consume exactly these partitions - no group membership, no rebalancing.
 // This reader names no group, so it cannot commit and the start offset must be explicit; add
 // `.group("...")` to commit positions into a group without joining it.
-#[subscriber(
-    KafkaTopic::new("orders")
-        .partitions([0])
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest))]
 async fn audit_partition_zero(order: &Order) -> HandlerOutcome {
     println!("partition 0 saw order {}", order.id);
     HandlerOutcome::ack()

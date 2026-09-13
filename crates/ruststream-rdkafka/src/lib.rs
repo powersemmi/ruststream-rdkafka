@@ -60,10 +60,9 @@ mod eos;
 mod error;
 mod message;
 mod publisher;
-mod retry;
 mod seek;
 mod subscriber;
-mod topic;
+mod subscription;
 mod tracker;
 
 #[cfg(feature = "avro")]
@@ -97,9 +96,7 @@ pub use schema_registry::{
 };
 pub use seek::{KafkaPosition, KafkaSeeker};
 
-pub use retry::{
-    DLQ_SOURCE_OFFSET_HEADER, DLQ_SOURCE_PARTITION_HEADER, DLQ_SOURCE_TOPIC_HEADER,
-    RETRY_COUNT_HEADER, Retry,
-};
 pub use subscriber::KafkaSubscriber;
-pub use topic::{Assignment, Commit, KafkaTopic, LaneKey, StartOffset};
+pub use subscription::{
+    Assignment, Commit, KafkaPartitions, KafkaTopic, KafkaTopics, LaneKey, StartOffset,
+};

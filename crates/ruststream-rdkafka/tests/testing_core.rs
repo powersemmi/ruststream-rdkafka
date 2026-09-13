@@ -26,9 +26,9 @@ use futures::{Stream, StreamExt};
 use ruststream::codec::{Codec as _, DefaultCodec};
 use ruststream::nonzero;
 use ruststream::runtime::{
-    AppInfo, ContextKind, Ctx, DefaultSlot, ForSlot, HandlerOutcome, Out,
-    Outgoing as OutgoingRecord, PublishTransform, RETRY_COUNT_HEADER, Reads, Reply, RustStream,
-    SlotContext, SubscriberSettings as _,
+    AppInfo, ContextKind, Ctx, DefaultSlot, ForReply, HandlerOutcome, Out,
+    Outgoing as OutgoingRecord, PublishContext, PublishTransform, RETRY_COUNT_HEADER, Reads, Reply,
+    RustStream, SubscriberSettings as _,
 };
 use ruststream::subscriber;
 use ruststream::testing::{Outcome, TestApp, TestableBroker as _, expect_published};
@@ -43,8 +43,8 @@ use ruststream_rdkafka::testing::{
     ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage, KafkaTestSubscriber,
 };
 use ruststream_rdkafka::{
-    Commit, KafkaError, KafkaOptions, KafkaPosition, KafkaPublish, KafkaPublishSteps as _,
-    KafkaTopic, PARTITION_KEY_HEADER, PartitionLanes,
+    Commit, KafkaError, KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish,
+    KafkaPublishSteps as _, KafkaTopic, KafkaTopics, PARTITION_KEY_HEADER, PartitionLanes,
 };
 use serde::{Deserialize, Serialize};
 
@@ -590,7 +590,7 @@ async fn multi_topic_descriptor_mounts_on_the_test_broker() {
     use ruststream::SubscriptionSource as _;
 
     let broker = connected().await;
-    let def = KafkaTopic::new("orders").and_topic("cancellations");
+    let def = KafkaTopics::new(["orders", "cancellations"]);
     let mut subscriber = def.subscribe(&broker).await.expect("subscribe");
 
     broker
@@ -613,7 +613,7 @@ async fn multi_topic_descriptor_mounts_on_the_test_broker() {
     assert_eq!(payloads, vec![b"c1".to_vec(), b"o1".to_vec()]);
 
     // Patterns are real-cluster behavior: the exact-name router refuses them loudly.
-    let err = KafkaTopic::pattern("^orders\\..*")
+    let err = KafkaTopics::pattern("^orders\\..*")
         .subscribe(&broker)
         .await
         .expect_err("patterns must be rejected in-process");
@@ -720,22 +720,22 @@ async fn test_app_requeue_stays_balanced() {
 /// How long a not-ready-yet delivery waits before it comes back.
 const DEFER: Duration = Duration::from_secs(5);
 
-/// Stamps every message leaving the slot it is mounted on with that slot's name. The retry
-/// position is an `Out` slot, so its transforms read a `SlotContext` like any other slot's, and
-/// this one writes no per-record setting, so it is generic over them.
+/// Stamps every copy with the subscription the delivery came from. A transform on the retry
+/// position reads the delivery being retried, the way a reply's does, and this one writes no
+/// per-record setting, so it is generic over them.
 struct DeferredStamp;
 
-impl<Options> PublishTransform<ForSlot, Options> for DeferredStamp {
+impl<C, Options> PublishTransform<ForReply<C>, Options> for DeferredStamp {
     type Destination = Reads;
 
     fn apply(
         &self,
         out: &mut OutgoingRecord<'_>,
         _options: &mut Option<Options>,
-        cx: &SlotContext<'_>,
+        cx: &PublishContext<'_, C>,
     ) {
         out.headers_mut()
-            .insert("x-left-through", cx.slot().to_owned());
+            .insert("x-retried-from", cx.name().to_owned());
     }
 }
 
@@ -783,7 +783,86 @@ async fn a_deferred_copy_travels_the_retry_position() {
     );
     tb.broker::<KafkaTestBroker>()
         .published::<Order>("deferred")
-        .with_header("x-left-through", "Retry");
+        .with_header("x-retried-from", "deferred");
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Charge {
+    id: u64,
+}
+
+/// Never settles: every delivery asks for a later one, so only the cap can end this message.
+#[subscriber(KafkaTopic::new("charges").commit(Commit::Tracked))]
+async fn defer_forever(charge: &Charge) -> HandlerOutcome {
+    let _ = charge;
+    HandlerOutcome::retry_after(DEFER)
+}
+
+/// Kafka counts no deliveries of its own, so the cap counts the framework's header, and the
+/// spent delivery leaves through the dead-letter topic the mount site declared.
+#[tokio::test(start_paused = true)]
+async fn a_capped_registration_dead_letters_a_spent_delivery() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(defer_forever)
+                .max_attempts(nonzero!(3u32))
+                .dead_letter("charges.dlq");
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("charges", &Charge { id: 7 })
+        .await
+        .expect("publish");
+    tb.advance(DEFER).await.expect("the first delay elapses");
+    tb.advance(DEFER).await.expect("the second delay elapses");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("charges")
+        .assert_called(3);
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("charges.dlq")
+        .assert_called_once()
+        .with(&Charge { id: 7 })
+        .with_header(RETRY_COUNT_HEADER, "3");
+}
+
+/// Always asks for an immediate retry: under a cap the runtime republishes at once, so the
+/// count travels with the copy.
+#[subscriber(KafkaTopics::new(["refunds", "refunds.retry"]).commit(Commit::Tracked))]
+async fn retry_forever(charge: &Charge) -> HandlerOutcome {
+    let _ = charge;
+    HandlerOutcome::retry()
+}
+
+/// A `KafkaTopics` subscription reads many topics and addresses none, so the mount site names
+/// the topic its copies go to. Here that topic is one the same subscription reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_retry_destination_carries_the_copies() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(retry_forever)
+                .max_attempts(nonzero!(2u32))
+                .dead_letter("refunds.dlq")
+                .out_retry(KafkaPublish::default())
+                .to("refunds.retry");
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("refunds", &Charge { id: 9 })
+        .await
+        .expect("publish");
+    tb.settle().await.expect("the reaction settles");
+
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("refunds.retry")
+        .assert_called_once()
+        .with_header(RETRY_COUNT_HEADER, "1");
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("refunds.dlq")
+        .assert_called_once()
+        .with(&Charge { id: 9 });
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1426,8 +1505,7 @@ async fn manual_assignment_is_rejected_in_process() {
 
     let broker = connected().await;
 
-    let err = KafkaTopic::new("orders")
-        .partitions([0])
+    let err = KafkaPartitions::new("orders", [0])
         .subscribe(&broker)
         .await
         .expect_err("partitions need a real cluster");

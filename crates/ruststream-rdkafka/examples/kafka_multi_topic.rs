@@ -16,8 +16,8 @@ struct OrderEvent {
 }
 
 // --8<-- [start:multi]
-// `and_topic` adds topics to the same subscription: one consumer joins the group for both.
-#[subscriber(KafkaTopic::new("orders").and_topic("cancellations").group("orders-svc"))]
+// `KafkaTopics` names the set the subscription reads: one consumer joins the group for both.
+#[subscriber(KafkaTopics::new(["orders", "cancellations"]).group("orders-svc"))]
 async fn on_order_event(event: &OrderEvent) -> HandlerOutcome {
     println!("order event {}", event.id);
     HandlerOutcome::ack()
@@ -27,7 +27,7 @@ async fn on_order_event(event: &OrderEvent) -> HandlerOutcome {
 // --8<-- [start:pattern]
 // A `^`-anchored librdkafka regex subscribes to every matching topic; topics created later are
 // picked up on the next metadata refresh.
-#[subscriber(KafkaTopic::pattern("^audit\\..*").group("audit-svc").start(StartOffset::Earliest))]
+#[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-svc").start(StartOffset::Earliest))]
 async fn on_audit(event: &OrderEvent) -> HandlerOutcome {
     println!("audit event {}", event.id);
     HandlerOutcome::ack()

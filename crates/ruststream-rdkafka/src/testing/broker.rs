@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use bytes::Bytes;
 use ruststream::testing::{Coordinator, TestableBroker};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage, RedeliveryAddress,
+    AddressedCopies, Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage,
     ServerSpec, Subscribe,
 };
 
@@ -18,7 +18,7 @@ use super::subscriber::KafkaTestSubscriber;
 use super::transaction::KafkaTestTransactionalPublisher;
 use crate::error::KafkaError;
 use crate::publisher::KafkaTransactionalPublish;
-use crate::topic::{Commit, LaneKey};
+use crate::subscription::{Commit, LaneKey, Reader, SubscriptionPlan};
 
 pub(crate) struct TestBrokerState {
     pub(crate) router: KeyRouter,
@@ -152,7 +152,7 @@ impl DescribeServer for KafkaTestBroker {
 /// suite enforces requires `nack(true)` to redeliver, while Kafka's auto-commit stores the
 /// position as a record is handed over and so cannot bring it back. A name carries no commit
 /// mode to resolve that with, so the bare path keeps the contract; a subscription that names
-/// [`Commit::Auto`] on a [`KafkaTopic`](crate::KafkaTopic) gets Kafka's advisory `nack` instead.
+/// [`Commit::Auto`] on a descriptor gets Kafka's advisory `nack` instead.
 const fn bare_commit() -> Commit {
     Commit::Tracked
 }
@@ -187,7 +187,7 @@ impl ConnectedKafkaTestBroker {
     }
 
     /// Subscribes to several topics as one subscription, mirroring
-    /// [`KafkaTopic::and_topic`](crate::KafkaTopic::and_topic): every name routes exactly.
+    /// [`KafkaTopics`](crate::KafkaTopics): every name routes exactly.
     ///
     /// # Errors
     ///
@@ -201,12 +201,33 @@ impl ConnectedKafkaTestBroker {
         ready(self.open_subscription(topics, None, LaneKey::default(), bare_commit()))
     }
 
-    /// The synchronous body behind both subscribe entry points, kept apart so the validation
+    /// Opens the subscription a resolved descriptor asks for, the way the real broker does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] for a manual partition assignment: the in-process
+    /// broker holds no partitions to assign, so that descriptor needs a real cluster.
+    pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaTestSubscriber, KafkaError> {
+        match plan.reader {
+            Reader::Subscribed(topics) => self.open_subscription(
+                &topics,
+                plan.settings.group.as_deref(),
+                plan.settings.lane_key,
+                plan.settings.commit,
+            ),
+            Reader::Assigned { .. } => Err(KafkaError::InvalidOptions(
+                "the in-process test broker does not simulate partitions; a `KafkaPartitions` \
+                 reader needs a real cluster"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    /// The synchronous body behind the subscribe entry points, kept apart so the validation
     /// errors stay `?` rather than a chain of early `ready(Err(..))` returns.
     ///
-    /// `group`, `lane_key` and `commit` are what a descriptor carries into the subscription;
-    /// [`KafkaTopic`](crate::KafkaTopic) passes its own, and the public entry points pass the
-    /// bare-name equivalents.
+    /// `group`, `lane_key` and `commit` are what a descriptor carries into the subscription; the
+    /// bare-name entry points pass the by-name equivalents.
     pub(crate) fn open_subscription(
         &self,
         topics: &[String],
@@ -308,14 +329,12 @@ impl ConnectedBroker for ConnectedKafkaTestBroker {
 impl Subscribe for ConnectedKafkaTestBroker {
     type Subscriber = KafkaTestSubscriber;
 
-    async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
-        self.subscribe_with(name).await
-    }
-
     /// The topic itself, as on a cluster: the in-process router delivers a publish to every
     /// group reading that name.
-    fn redelivery_address(&self, name: &str) -> Option<RedeliveryAddress> {
-        (!name.starts_with('^')).then(|| RedeliveryAddress::new(name.to_owned()))
+    type Copies = AddressedCopies;
+
+    async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
+        self.subscribe_with(name).await
     }
 }
 

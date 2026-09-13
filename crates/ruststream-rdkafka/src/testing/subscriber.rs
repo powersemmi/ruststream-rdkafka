@@ -21,7 +21,7 @@ use super::router::{DeliveryReceiver, SubscriptionId, TestDelivery};
 use super::seek::InProcessSeek;
 use crate::error::KafkaError;
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::topic::{Commit, LaneKey};
+use crate::subscription::{Commit, LaneKey};
 
 /// Offsets handed to the application and not yet settled, per topic.
 ///

@@ -42,6 +42,30 @@ async fn kafka_test_broker_passes_conformance_suite() {
     harness::run_suite(KafkaTestBroker::new).await;
 }
 
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kafka_test_broker_passes_lifecycle() {
+    harness::lifecycle(
+        KafkaTestBroker::new,
+        |name| KafkaTopic::new(name).group("conformance"),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn kafka_test_broker_reports_a_reachable_redelivery_address() {
+    harness::redelivery_address(
+        KafkaTestBroker::new,
+        |name| KafkaTopic::new(name).group("conformance"),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
 /// The subscription descriptor a suite subscribes through, over a topic created first.
 ///
 /// Every suite publishes under a subject of its own, generated per run, and this factory is the
@@ -158,6 +182,24 @@ async fn passes_lifecycle() {
     warm_up_group_coordinator(&url).await;
     let group = format!("conformance-lifecycle-{}", std::process::id());
     harness::lifecycle(
+        || KafkaBroker::new([url.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+/// `KafkaTopic` is the crate's one addressed descriptor, and this is the promise it makes: the
+/// topic it reports is a topic a publish on this broker reaches it through, which is exactly
+/// what the runtime does with a deferred `retry_after` copy.
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_redelivery_address() {
+    let Some(url) = kafka_url() else { return };
+    warm_up_group_coordinator(&url).await;
+    let group = format!("conformance-redelivery-{}", std::process::id());
+    harness::redelivery_address(
         || KafkaBroker::new([url.clone()]),
         |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),

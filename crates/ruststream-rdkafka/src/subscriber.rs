@@ -19,9 +19,8 @@ use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
-use crate::retry::RetryContext;
 use crate::seek::KafkaSeeker;
-use crate::topic::{Commit, LaneKey};
+use crate::subscription::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// Whether librdkafka is already retrying this error by itself, making a stream error item
@@ -52,7 +51,6 @@ pub struct KafkaSubscriber {
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
-    retry: Option<Arc<RetryContext>>,
     /// Minted once, when the subscription opens: every delivery carries a clone so a handler's
     /// context can hand out the reposition handle for one reference-count bump.
     seeker: Arc<KafkaSeeker>,
@@ -72,7 +70,6 @@ impl KafkaSubscriber {
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
-        retry: Option<Arc<RetryContext>>,
     ) -> Self {
         let seeker = Arc::new(KafkaSeeker::new(
             Arc::clone(&consumer),
@@ -84,7 +81,6 @@ impl KafkaSubscriber {
             commit,
             tracker,
             lane_key,
-            retry,
             seeker,
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
@@ -232,7 +228,6 @@ impl KafkaSubscriber {
             delivery.timestamp().to_millis(),
             settlement,
             lane,
-            self.retry.clone(),
             Arc::clone(&self.seeker),
         )
     }

@@ -1,7 +1,6 @@
-//! Retry policies and dead-lettering: `Retry::Topic` republishes a failed delivery to a retry
-//! topic and settles the original (the partition keeps flowing), `max_deliveries` caps the
-//! attempts, and the drop path routes poison messages to a dead-letter topic stamped with the
-//! origin of the failed delivery.
+//! Retries and dead-lettering on Kafka: the mount site declares the cap and the dead-letter
+//! topic, and the runtime publishes the copies, because Kafka holds no record back and counts
+//! no deliveries of its own.
 //!
 //! ```text
 //! just brokers-up
@@ -9,12 +8,10 @@
 //! ```
 
 use std::convert::Infallible;
+use std::time::Duration;
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, State};
-use ruststream::{FromRef, subscriber};
-use ruststream_rdkafka::{
-    Commit, DLQ_SOURCE_TOPIC_HEADER, KafkaBroker, KafkaTopic, Retry, StartOffset,
-};
+use ruststream::runtime::RETRY_COUNT_HEADER;
+use ruststream_rdkafka::prelude::*;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -46,69 +43,50 @@ struct AppState {
     gateway: PaymentGateway,
 }
 
-// --8<-- [start:retry_topic]
-// `and_topic` puts the retry topic on the same subscription, so retried copies come back to
-// this very handler: a fresh delivery arrives from "payments", each retry from
-// "payments.retry" with the attempt count riding in the `kafka-retry-count` header. Once the
-// next retry would exceed `max_deliveries`, the drop path dead-letters the message instead of
-// republishing it again.
-#[subscriber(
-    KafkaTopic::new("payments")
-        .and_topic("payments.retry")
-        .group("payments-svc")
-        .commit(Commit::Tracked)
-        .retry(Retry::Topic("payments.retry".into()))
-        .max_deliveries(5)
-        .dead_letter("payments.dlq")
-)]
+// --8<-- [start:retry_after]
+// A transient failure asks for a later delivery. Kafka cannot hold a record back, so the runtime
+// waits out the delay and publishes a copy to the topic this subscription reads, with the
+// retry-count header incremented.
+#[subscriber(KafkaTopic::new("payments").group("payments-svc").commit(Commit::Tracked))]
 async fn charge(payment: &Payment, State(gateway): State<PaymentGateway>) -> HandlerOutcome {
     if payment.amount_cents <= 0 {
-        // Malformed input is not worth retrying: `drop()` takes the drop path straight to the
-        // dead-letter topic.
+        // Malformed input is not worth retrying: dropping it settles the offset, and under a
+        // declared dead-letter topic the delivery leaves through it.
         return HandlerOutcome::drop();
     }
     match gateway.charge(payment).await {
         Ok(()) => HandlerOutcome::ack(),
-        // A transient failure: republish to "payments.retry" and settle the original, so the
-        // partition keeps flowing past it.
         Err(err) => {
             eprintln!("payment {} failed: {err}; retrying", payment.id);
-            HandlerOutcome::retry()
+            HandlerOutcome::retry_after(Duration::from_secs(5))
         }
     }
 }
-// --8<-- [end:retry_topic]
+// --8<-- [end:retry_after]
 
-// --8<-- [start:seek_back]
-// `Retry::SeekBack` re-consumes the failed delivery in place: redelivery is immediate and the
-// partition order holds (nothing overtakes the failed message), at the price of replaying
-// everything after it on that partition and of the attempt count only surviving within the
-// session.
-#[subscriber(
-    KafkaTopic::new("ledger")
-        .group("ledger-svc")
-        .commit(Commit::Tracked)
-        .retry(Retry::SeekBack)
-        .max_deliveries(3)
-        .dead_letter("ledger.dlq")
-)]
+// --8<-- [start:pattern]
+// A pattern subscription reads many topics, and a copy published to any one of them would come
+// back on the wrong topic, so this registration names its retry destination itself.
+#[subscriber(KafkaTopics::pattern("^ledger\\..*").group("ledger-svc").commit(Commit::Tracked))]
 async fn post_entry(payment: &Payment) -> HandlerOutcome {
+    if payment.amount_cents <= 0 {
+        return HandlerOutcome::retry();
+    }
     println!("posting ledger entry for payment {}", payment.id);
     HandlerOutcome::ack()
 }
-// --8<-- [end:seek_back]
+// --8<-- [end:pattern]
 
 // --8<-- [start:dead_letter]
-// The dead-letter consumer: dropped messages arrive stamped with the origin of the failed
-// delivery in the `kafka-dlq-source-*` headers, so alerting can trace them back without
-// parsing payloads.
+// The dead-letter consumer is an ordinary subscription. The framework's retry-count header says
+// how many copies the message went through before it was carried here.
 #[subscriber(KafkaTopic::new("payments.dlq").group("payments-dlq").start(StartOffset::Earliest))]
 async fn on_dead_letter(payment: &Payment, ctx: &mut Context<'_>) -> HandlerOutcome {
-    let source = ctx
-        .headers()
-        .get_str(DLQ_SOURCE_TOPIC_HEADER)
-        .unwrap_or("<unknown>");
-    println!("payment {} dead-lettered from {source}", payment.id);
+    let attempts = ctx.headers().get_str(RETRY_COUNT_HEADER).unwrap_or("0");
+    println!(
+        "payment {} dead-lettered after {attempts} retries",
+        payment.id
+    );
     HandlerOutcome::ack()
 }
 // --8<-- [end:dead_letter]
@@ -124,8 +102,23 @@ fn app() -> impl App {
             Ok::<_, Infallible>(AppState { gateway })
         })
         .with_broker(broker, |b| {
-            b.include(charge);
-            b.include(post_entry);
+            // --8<-- [start:declaration]
+            // Five deliveries of one payment, the first included; the sixth goes to
+            // "payments.dlq" instead, payload and headers as they arrived.
+            b.include(charge)
+                .max_attempts(nonzero!(5u32))
+                .dead_letter("payments.dlq");
+            // --8<-- [end:declaration]
+            // --8<-- [start:named]
+            // `.to(topic)` belongs to the publisher the copies leave through, so it follows
+            // `out_retry`. Without it a pattern subscription refuses to start: it has no topic
+            // of its own to publish a copy to.
+            b.include(post_entry)
+                .max_attempts(nonzero!(3u32))
+                .dead_letter("ledger.dlq")
+                .out_retry(Publish::default())
+                .to("ledger.retry");
+            // --8<-- [end:named]
             b.include(on_dead_letter);
         })
 }
