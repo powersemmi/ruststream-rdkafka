@@ -62,6 +62,7 @@ mod eos;
 mod error;
 mod message;
 mod publisher;
+mod redelivery;
 mod seek;
 mod subscriber;
 mod subscription;
@@ -90,6 +91,7 @@ pub use publisher::{
     KafkaTransactionalPublish, KafkaTransactionalPublisher, PartitionLanes,
     TransactionalPartitions,
 };
+pub use redelivery::ToSourceTopic;
 #[cfg(feature = "schema-registry")]
 pub use schema_registry::{
     HttpRegistryClient, MemorySchemaCache, MissingSubject, RegisteredSchema, RegistryClient,

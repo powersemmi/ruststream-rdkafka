@@ -7,11 +7,7 @@
 //! cargo run --example kafka_multi_topic -- run
 //! ```
 
-use ruststream::runtime::{ForReply, Names, Outgoing, PublishContext, PublishTransform};
-use ruststream_rdkafka::context::KafkaContext;
-use ruststream_rdkafka::context::keys::Topic;
 use ruststream_rdkafka::prelude::*;
-
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -41,23 +37,8 @@ async fn on_audit(event: &OrderEvent, Ctx(topic): Ctx<Topic>) -> HandlerOutcome 
 
 // --8<-- [start:naming_transform]
 // A subscription over a set of topics addresses no retry copy, so every registration over one
-// names where a copy goes. Here that is the topic the delivery itself came from, which a
-// transform on the retry position reads out of the Kafka context.
-struct ToSourceTopic;
-
-impl<Options> PublishTransform<ForReply<KafkaContext>, Options> for ToSourceTopic {
-    type Destination = Names;
-
-    fn apply(
-        &self,
-        out: &mut Outgoing<'_>,
-        _options: &mut Option<Options>,
-        cx: &PublishContext<'_, KafkaContext>,
-    ) {
-        out.set_name(cx.context(Topic).to_owned());
-    }
-}
-
+// names where a copy goes. `ToSourceTopic` names the topic the delivery itself arrived on, so a
+// retried order event comes back on its own topic rather than on a shared one.
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);

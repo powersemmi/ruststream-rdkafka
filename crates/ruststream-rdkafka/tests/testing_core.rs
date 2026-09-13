@@ -45,6 +45,7 @@ use ruststream_rdkafka::testing::{
 use ruststream_rdkafka::{
     Commit, KafkaError, KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish,
     KafkaPublishSteps as _, KafkaTopic, KafkaTopics, PARTITION_KEY_HEADER, PartitionLanes,
+    ToSourceTopic,
 };
 use serde::{Deserialize, Serialize};
 
@@ -863,6 +864,56 @@ async fn a_named_retry_destination_carries_the_copies() {
         .published::<Charge>("refunds.dlq")
         .assert_called_once()
         .with(&Charge { id: 9 });
+}
+
+/// Retries the first delivery of a record and acks the copy that comes back.
+#[subscriber(
+    KafkaTopics::new(["orders-eu", "orders-us"])
+        .group("orders-svc")
+        .commit(Commit::Tracked)
+)]
+async fn regional_order(charge: &Charge, ctx: &mut Context<'_, KafkaContext>) -> HandlerOutcome {
+    let _ = charge;
+    if ctx.headers().get(RETRY_COUNT_HEADER).is_none() {
+        HandlerOutcome::retry()
+    } else {
+        HandlerOutcome::ack()
+    }
+}
+
+/// A copy belongs on the topic its delivery arrived on, not on whichever topic of the set a
+/// fixed `.to(..)` would have named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_copy_returns_to_the_topic_it_arrived_on() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(regional_order)
+                .max_attempts(nonzero!(3u32))
+                .out_retry(KafkaPublish::default())
+                .transform(ToSourceTopic);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("orders-eu", &Charge { id: 4 })
+        .await
+        .expect("publish");
+    tb.settle().await.expect("the reaction settles");
+
+    // Two records on the topic: the one the test seeded, and the copy the retry published back.
+    // The assertions below read the latest, which is the copy.
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("orders-eu")
+        .assert_called(2)
+        .with(&Charge { id: 4 })
+        .with_header(RETRY_COUNT_HEADER, "1");
+    assert!(
+        tb.broker::<KafkaTestBroker>()
+            .published::<Charge>("orders-us")
+            .messages()
+            .is_empty(),
+        "a copy must not cross to the other topic of the set",
+    );
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -52,13 +52,13 @@ pub use ruststream::prelude::*;
 
 pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
-pub use crate::context::keys::{Partition, Position, SeekHandle, Source};
+pub use crate::context::keys::{Partition, Position, SeekHandle, Source, Topic};
 pub use crate::{
     Assignment, Commit, EosReplies, KafkaBroker, KafkaEosPublish as EosPublish, KafkaOptions,
     KafkaPartitionedPublish as PartitionedPublish, KafkaPartitions, KafkaPosition,
     KafkaPublish as Publish, KafkaPublishSteps, KafkaSeeker, KafkaTopic, KafkaTopics,
     KafkaTransactionalPublish as TransactionalPublish, LaneKey, PartitionLanes, RoundRobin,
-    StartOffset,
+    StartOffset, ToSourceTopic,
 };
 
 // `Partitioned` stays out: the core's defaulted `IncomingMessage::partition_key` is already in

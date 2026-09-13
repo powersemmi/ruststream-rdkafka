@@ -256,13 +256,19 @@ codec, a transform - once per registration. A registration over a set that names
 to start.
 
 Such a registration names a destination even when its handler never retries: the retry publisher
-is there either way, and a copy with nowhere to go is what the refusal prevents. A transform on
-the retry position is the other way to name one, and on Kafka it is usually the better one,
-because a copy then goes back to the topic its own delivery came from:
+is there either way, and a copy with nowhere to go is what the refusal prevents.
+
+`.to(topic)` is the form for a fixed retry topic. For `KafkaTopics` and `KafkaPartitions` the
+form to reach for is `ToSourceTopic`, which sends each copy back to the topic its own delivery
+arrived on, so a retried `orders-eu` record stays on `orders-eu`:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:naming_transform"
 ```
+
+It reads the topic out of the Kafka context, which reaches the retry position when the handler
+reads that context too - any `Ctx<..>` key of this crate. A batch handler carries the batch
+context, which holds no per-record topic, so a batch registration names `.to(topic)`.
 
 Retry and dead-letter topics are your infrastructure: the framework only publishes to them. A
 dead-letter consumer is an ordinary subscription, and the retry-count header says how far the
