@@ -1531,7 +1531,11 @@ async fn manual_assignment_composes_with_partition_lanes() {
     let app = RustStream::new(AppInfo::new("assign-lanes", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(assigned_lane);
+            // A partition reader addresses no retry copies, so every registration over one names
+            // where they would go, even a handler that never retries.
+            b.include(assigned_lane)
+                .out_retry(KafkaPublish::default())
+                .to(topic.clone());
         });
 
     let done = Arc::clone(&state.done);

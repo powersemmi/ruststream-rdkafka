@@ -255,6 +255,15 @@ back in the wrong place, so those registrations name the destination themselves:
 codec, a transform - once per registration. A registration over a set that names neither refuses
 to start.
 
+Such a registration names a destination even when its handler never retries: the retry publisher
+is there either way, and a copy with nowhere to go is what the refusal prevents. A transform on
+the retry position is the other way to name one, and on Kafka it is usually the better one,
+because a copy then goes back to the topic its own delivery came from:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:naming_transform"
+```
+
 Retry and dead-letter topics are your infrastructure: the framework only publishes to them. A
 dead-letter consumer is an ordinary subscription, and the retry-count header says how far the
 message got:
