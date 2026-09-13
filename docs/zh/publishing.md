@@ -19,7 +19,8 @@ Broker 上读起来都一样。
 - `b.include(handler).out(marker, policy).build()` - `Out<..>` 参数收到的发布者，用槽位的标记指定
   （参数没有声明标记时是 `DefaultSlot`）。
 - `b.include(handler).out_retry(policy)` - 延迟副本经由的发布者，也就是顶替 Kafka 所没有的延迟
-  重投的那个延迟重新发布（参见[批次结算](topics.md#how-batch-settlement-maps-onto-kafka)）。
+  重投的那个延迟重新发布。每条注册本来就有一个，取自 Broker 的默认策略；在这里指定就是替换掉它
+  （参见[重试与死信](topics.md#retries-and-dead-lettering)）。
 - `b.after_startup(policy, hook)` - 作用域一级的钩子，在所有订阅打开之后，带着活的发布者跑一次。
 - `connected.publisher(policy)` - 在运行时之外，用在你自己连接的 Broker 上（参见 `kafka_producer`
   这个例子）。

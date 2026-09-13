@@ -85,7 +85,38 @@ The framework's optional capability traits, and which of them this broker implem
 | `RequestReply` | no | Kafka has no reply correlation; request/reply is a reply topic of your own plus a correlation header. |
 | `Partitioned` | yes | Ordered worker lanes, keyed by the delivery's source partition or by the record key under `LaneKey::RecordKey`: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
 | `Seekable` + `Positioned` | yes | Reposition the partitions this consumer holds from a handler, through the `SeekHandle` context key next to the delivery's own `Position`: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
-| `DescribeServer` | yes | The generated AsyncAPI document lists the bootstrap servers under the `kafka` protocol. |
+| `DescribeServer` | yes | The generated AsyncAPI document lists the bootstrap servers under the `kafka` protocol, with the schema registry beside them: [The AsyncAPI document](#the-asyncapi-document). |
+
+## The AsyncAPI document
+
+`asyncapi gen` prints the document a service describes itself with, and this crate fills in
+Kafka's own vocabulary - the specification calls it the `kafka` binding. One feature turns it on:
+
+```toml
+ruststream-rdkafka = { version = "0.7", features = ["asyncapi"] }
+```
+
+A server then reports the schema registry it is configured with, a channel reports the topic
+behind it, and a `receive` operation reports the consumer group that reads it:
+
+```json
+--8<-- "docs/snippets/asyncapi-bindings.json"
+```
+
+The client id appears when the descriptor's raw passthrough names `client.id`. The group appears
+only when the descriptor names it: the document is built before anything connects, from the
+descriptor alone, which never sees the broker whose `default_group` it would otherwise inherit.
+`protocolVersion` stays out, because Kafka negotiates its version per API key between the client
+and the cluster, so no one number says what clients speak.
+
+A `KafkaTopics` subscription reports its group and no topic, because the binding's `topic` names
+one and such a subscription reads a set. A registry-backed publisher adds a message binding: the
+schema id rides in the payload under the Confluent encoding, under the subject its naming
+strategy found.
+
+The registry URL reaches the document with any userinfo stripped, for the reason the bootstrap
+addresses do - the document is published and shared, and a password that reaches it has left the
+service.
 
 ## Scaffold a service
 
@@ -94,7 +125,7 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 ```
 
 The starter wires one Kafka broker with a default consumer group, a tracked-commit subscriber
-with a retry and dead-letter pipeline, and a published reply. Its `#[ruststream::app]` entry
+under a declared attempt cap and dead-letter topic, and a published reply. Its `#[ruststream::app]` entry
 point gives the binary the `run` and `asyncapi gen` commands.
 
 ## Guides

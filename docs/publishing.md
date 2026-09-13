@@ -23,8 +23,9 @@ Where a policy is named:
 - `b.include(handler).out(marker, policy).build()` - the publisher an `Out<..>` parameter
   receives, named by the slot's marker (`DefaultSlot` when the parameter declares none).
 - `b.include(handler).out_retry(policy)` - the publisher a delayed copy leaves through, for the
-  deferred republish standing in for the delayed redelivery Kafka does not have (see
-  [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)).
+  deferred republish standing in for the delayed redelivery Kafka does not have. Every
+  registration already has one, taken from the broker's default policy; naming one replaces it
+  (see [retries and dead-lettering](topics.md#retries-and-dead-lettering)).
 - `b.after_startup(policy, hook)` - a scope-level hook that runs once with the live publisher,
   after every subscription is open.
 - `connected.publisher(policy)` - outside the runtime, on a broker you connected yourself (see

@@ -78,7 +78,35 @@ ClosedKafkaBroker                  终结见证：unflushed_records()
 | `RequestReply` | 否 | Kafka 没有回复关联机制；请求-回复要靠你自己的回复主题加一个关联消息头。 |
 | `Partitioned` | 是 | 有序的工作分区，键取自投递的来源分区，或者在 `LaneKey::RecordKey` 下取自记录 key：[按键的工作分区](topics.md#keyed-worker-lanes)。 |
 | `Seekable` + `Positioned` | 是 | 从处理器里重新定位这个消费者持有的分区，用的是 `SeekHandle` 上下文键，它和投递自身的 `Position` 并列：[重新定位订阅](topics.md#repositioning-a-subscription)。 |
-| `DescribeServer` | 是 | 生成的 AsyncAPI 文档在 `kafka` 协议下列出 bootstrap 服务器。 |
+| `DescribeServer` | 是 | 生成的 AsyncAPI 文档在 `kafka` 协议下列出 bootstrap 服务器，旁边还有 Schema Registry：[AsyncAPI 文档](#the-asyncapi-document)。 |
+
+## AsyncAPI 文档 { #the-asyncapi-document }
+
+`asyncapi gen` 打印一份服务自述的文档，而本 crate 在其中填上 Kafka 自己的词汇 - 规范把它叫做
+`kafka` binding。打开它只要一个 feature：
+
+```toml
+ruststream-rdkafka = { version = "0.7", features = ["asyncapi"] }
+```
+
+于是服务器报告它配置的 Schema Registry，channel 报告它背后的主题，`receive` 操作报告读它的消费者
+组：
+
+```json
+--8<-- "docs/snippets/asyncapi-bindings.json"
+```
+
+客户端标识在描述符的原样透传指定了 `client.id` 时出现。消费者组只在描述符自己指定时出现：文档在任
+何连接之前就已构建，只用描述符，而描述符从来看不到那个带着 `default_group` 的 Broker。文档里没有
+`protocolVersion`：Kafka 的协议版本由客户端和集群按每个 API key 分别协商，没有哪一个数字能说明它们
+讲的是什么。
+
+`KafkaTopics` 订阅报告自己的消费者组，不报告主题：binding 里的 `topic` 指的是一个，而这样的订阅读
+的是一组。走 Schema Registry 的发布者再加一条 message binding：schema id 以 Confluent 编码放在载荷
+里，subject 由它的命名策略找出。
+
+Registry 的地址进入文档时会去掉用户信息，理由和 bootstrap 地址一样 - 文档会被发布、被转手，而进入
+文档的密码就已经离开了服务。
 
 ## 生成服务骨架 { #scaffold-a-service }
 
@@ -86,8 +114,8 @@ ClosedKafkaBroker                  终结见证：unflushed_records()
 cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
 ```
 
-这个模板接好了：一个带默认消费者组的 Kafka Broker、一个带重试与死信的精确提交订阅者，以及一条发布
-出去的回复。它的 `#[ruststream::app]` 入口给二进制程序带来 `run` 和 `asyncapi gen` 两条命令。
+这个模板接好了：一个带默认消费者组的 Kafka Broker、一个在声明的尝试上限与死信主题之下精确提交的订
+阅者，以及一条发布出去的回复。它的 `#[ruststream::app]` 入口给二进制程序带来 `run` 和 `asyncapi gen` 两条命令。
 
 ## 指南 { #guides }
 

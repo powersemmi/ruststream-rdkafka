@@ -182,12 +182,12 @@ are cluster behavior, as is everything listed under transactions above. Concrete
   `start(StartOffset::Earliest)` is inert. Use the mount site's
   `start_at(KafkaPosition::earliest())`, which really does open the subscription on the retained
   log, and test resume-across-restart against a cluster.
-- **Retries and dead-lettering.** The crate's retry pipeline is not reproduced: `retry(..)`,
-  `dead_letter(..)` and `max_deliveries(..)` are built on the live consumer and are inert on the
-  stand-in, so a republish onto a retry or dead-letter topic never happens here. A test sees no
-  retry rather than a wrong one. `retry_after` is the exception: the deferred republish is the
-  runtime's, not the consumer's, so a registration with `.out_retry(..)` defers its copy in
-  process too, and `tb.advance(..)` brings it back.
+- **Retries and dead-lettering do run here**, because the framework performs them rather than the
+  consumer: a registration's `max_attempts(..)` and `dead_letter(..)` take effect on the stand-in,
+  `retry_after` defers its copy, and `tb.advance(..)` brings it back. What differs is the
+  redelivery underneath. A `nack(true)` that no declaration covers hands the delivery straight
+  back here, while a cluster leaves the offset unsettled and returns to it only on the next fetch
+  of the partition.
 - **Manual assignment and patterns** are refused loudly rather than approximated
   (`KafkaError::InvalidOptions`), for the same reason.
 

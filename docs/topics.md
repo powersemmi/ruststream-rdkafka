@@ -60,13 +60,13 @@ Negative settlement under `Tracked`:
   Kafka redelivers from there on the next fetch of the partition, which comes with a rebalance or
   a restart. The unsettled offset also holds the watermark back, so every later ack stays
   uncommitted until that offset settles: a handler that nacks in a loop pins the committed
-  position. Retry topics, seek-back redelivery and dead-letter routing are descriptor options, see
-  [Retries and dead-lettering](#retries-and-dead-lettering).
+  position. How many deliveries a message gets, and where it goes when they run out, is declared
+  at the mount site: see [Retries and dead-lettering](#retries-and-dead-lettering).
 
 ## Multiple topics and patterns
 
-One subscription can consume several topics through one consumer and one group. All matched
-topics share the handler, and therefore its payload type; each delivery reports the topic it came
+`KafkaTopics` consumes several topics through one consumer and one group. All matched topics
+share the handler, and therefore its payload type; each delivery still reports the topic it came
 from:
 
 ```rust
@@ -80,6 +80,11 @@ must start with `^`, the anchor that tells librdkafka a name is a pattern:
 --8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:pattern"
 ```
 
+`KafkaTopics` carries the same group, start-offset, commit and lane options `KafkaTopic` does.
+It is a type of its own because a subscription over a set has nowhere to put a retried copy:
+see [Retries and dead-lettering](#retries-and-dead-lettering). A `^` name handed to `KafkaTopic`
+is refused at startup, with the error pointing here.
+
 In-process tests cover a multi-topic subscription by exact name; a pattern needs a cluster.
 
 ## Partition assignment
@@ -92,8 +97,7 @@ default (`range,roundrobin`). A cooperative strategy and an eager one cannot mix
 
 ## Manual partition assignment
 
-`KafkaTopic::partitions` switches the subscription from the group protocol to manual assignment:
-the consumer takes exactly the partitions you name, without joining a group and without
+`KafkaPartitions` takes exactly the partitions you name, without joining a group and without
 rebalancing. That fits a reader pinned to a partition, an inspection or replay tool, and a
 one-consumer-per-partition deployment.
 
@@ -110,13 +114,15 @@ off, so the start offset has to be explicit (`Earliest` or `Latest`) and acks ar
 A group-less reader still runs under a `group.id`, because librdkafka requires one even for a
 manual assignment: the placeholder `ruststream.standalone` never joins and never commits.
 
-Manual assignment names exact partitions of one topic, so it does not combine with `and_topic` or
-`pattern`. It does not combine with `Commit::Transactional` either. The in-process test broker
-does not simulate partitions and refuses the descriptor, so this belongs in a live test.
+Manual assignment names exact partitions of one topic, which is why it is a descriptor of its own
+rather than an option on `KafkaTopic`: a subscription over a set of names has no partitions to
+name. It does not combine with `Commit::Transactional`, and it names at least one partition; both
+are startup errors. The in-process test broker does not simulate partitions and refuses the
+descriptor, so this belongs in a live test.
 
 Manual assignment composes with keyed worker lanes. Under the default `LaneKey::Partition` each
-assigned partition gets a lane of its own, so `partitions([0, 2, 5])` with `workers(n, by_key)`
-processes every assigned partition in order. Size `n` against the partition list: fewer lanes than
+assigned partition gets a lane of its own, so `KafkaPartitions::new("orders", [0, 2, 5])` with
+`workers(n, by_key)` processes every assigned partition in order. Size `n` against the partition list: fewer lanes than
 partitions makes partitions share lanes, which keeps their order, and more lanes than partitions
 leaves some idle.
 
@@ -209,50 +215,57 @@ its partition order.
 
 ## Retries and dead-lettering
 
-Without a policy, `nack(true)` keeps Kafka's native meaning: the offset stays unsettled and
-redelivers on the next fetch of the partition. `KafkaTopic::retry` replaces that with a policy
-that acts at once:
+Kafka holds no record back and counts no deliveries of its own, so the framework does both. A
+handler that answers `retry_after` has its delivery dropped, and once the delay is over a copy of
+it is published back to the subscription, carrying the framework's `x-ruststream-retry-count`
+header incremented by one.
 
-- `Retry::Topic("orders.retry")` republishes the message to the retry topic with the attempt count
-  in the `kafka-retry-count` header, then settles the original. It republishes before it settles,
-  so a crash between the two steps duplicates the message and never loses it.
-- `Retry::SeekBack` seeks the partition back and re-consumes the message in place; everything
-  after it on that partition replays too, and the attempt count is kept only for the current
-  session.
-- `Retry::Drop` treats `nack(true)` like the drop path.
-
-`max_deliveries(n)` caps how many times one message is delivered, the original counting as the
-first. Once the next retry would exceed the cap, the drop path runs instead. The cap counts
-against a retry policy or a dead-letter topic, so setting it alone is a startup error.
-
-`dead_letter("orders.dlq")` sends the drop path, `nack(false)` included, to a dead-letter topic
-and then settles the original. The copy is stamped with the `kafka-dlq-source-topic`,
-`-partition` and `-offset` headers. Without a dead-letter topic the drop path only settles.
-
-Retry and dead-letter topics are your infrastructure: the crate only publishes to them. These
-policies also need a cluster, because the in-process test broker re-enqueues `nack(true)` in place
-instead of running them.
-
-The usual arrangement puts the retry topic on the same subscription with `and_topic`, so a retried
-copy comes back to the same handler:
+Two steps right after `include` say how many deliveries one message gets and where it goes when
+they run out:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:retry_topic"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:declaration"
 ```
 
-`Retry::SeekBack` keeps strict partition order at the cost of throughput: nothing overtakes a
-failed message while it retries:
+`max_attempts(n)` counts the first delivery as one. `dead_letter(topic)` is where a spent
+delivery is republished, payload and headers as they arrived. A cap without a destination rejects
+the spent delivery instead; a destination without a cap carries every copy away rather than
+sending it back. Both read the same on every broker.
+
+The handler side is an ordinary outcome:
 
 ```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:seek_back"
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:retry_after"
 ```
 
-A dead-letter consumer is an ordinary subscription; the `kafka-dlq-source-*` headers name the
-origin of the failed delivery:
+An immediate `retry()` under a declared cap becomes the same copy, published at once rather than
+after a delay. That is what makes the count travel with the message: Kafka's own redelivery
+carries no count, so it could never reach the cap.
+
+A copy goes back to the topic the subscription reads, and `KafkaTopic` answers where that is.
+`KafkaTopics` and `KafkaPartitions` read a set, and a copy published to any one member would come
+back in the wrong place, so those registrations name the destination themselves:
+
+```rust
+--8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:named"
+```
+
+`.to(topic)` belongs to the publisher the copies leave through, which is why it follows
+`out_retry`. `out_retry(policy)` is also how you replace that publisher - another policy, another
+codec, a transform - once per registration. A registration over a set that names neither refuses
+to start.
+
+Retry and dead-letter topics are your infrastructure: the framework only publishes to them. A
+dead-letter consumer is an ordinary subscription, and the retry-count header says how far the
+message got:
 
 ```rust
 --8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:dead_letter"
 ```
+
+The copy is at-most-once over the delay window: a process that exits before the timer fires loses
+it. Under `Commit::Auto` none of this applies, because the position is stored the moment a record
+is handed over and the original can no longer be dropped.
 
 ## Batches
 
@@ -301,25 +314,21 @@ advisory no-op and none of it applies:
   redelivers, on the next fetch of the partition. The acked elements behind it replay then too:
   at-least-once duplicates, not loss. As far as the committed position is concerned, selective ack
   therefore reaches only up to the first retry; when one poison element must not hold the batch
-  back, you can give the subscription a retry topic.
+  back, declare a cap and a dead-letter topic on the registration.
 - **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the runtime
-  falls back to a deferred republish. With `.out_retry(Publish::default())` on the registration,
-  the element settles immediately and the position moves past it, and after the delay a copy is
-  published to the end of the topic with an incremented `x-ruststream-retry-count` header. The
-  copy loses its place in the order and is at-most-once across the delay window: a crash before
-  the timer fires loses it. Without the position the delay is dropped with a warning and the
-  element behaves like the plain `retry()` above.
+  falls back to a deferred republish. The element settles immediately and the position moves past
+  it, and after the delay a copy is published to the end of the topic with an incremented
+  `x-ruststream-retry-count` header. The copy loses its place in the order and is at-most-once
+  across the delay window: a crash before the timer fires loses it.
 
     The retry position is an ordinary slot, so `.codec(..)`, `.transform(..)` and
     `.map_publisher(..)` follow it. The copy carries the delivery's own bytes, so a codec named
     there resolves the position and encodes nothing, while the transforms run on the copy.
 
-    The subscription names where that copy goes. A `KafkaTopic` answers with its topic, and a
-    publish there reaches every group reading it. Two shapes answer nothing, because a copy
-    published under them would not come back: a pattern subscription, since a record goes to a
-    topic and never to a regex, and a manual partition assignment, since the partitioner may put
-    the copy on a partition the subscription does not read. A registration that binds the retry
-    position over one of those refuses to start and names the subscription, instead of dropping
+    The subscription decides where that copy goes. A `KafkaTopic` answers with its topic, and a
+    publish there reaches every group reading it. `KafkaTopics` and `KafkaPartitions` read a set
+    no single publish addresses, so the registration names the destination itself with
+    `.out_retry(policy).to(topic)`; one that names none refuses to start, instead of dropping
     copies at run time.
 - **A result vector shorter than the batch** - the elements it does not cover are retried, and the
   mismatch is logged.

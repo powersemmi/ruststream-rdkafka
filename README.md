@@ -29,8 +29,9 @@ configuration - the runtime climbs the lifecycle ladder around it.
 
 - **Consumer groups as descriptors** - `KafkaTopic::new("orders").group("workers")` describes
   one subscription; the bare-string `#[subscriber("orders")]` form rides on the broker's
-  `default_group`. `KafkaTopic::pattern` subscribes by regex instead, and `.partitions([0, 1])`
-  assigns partitions by hand, without group membership or rebalancing.
+  `default_group`. `KafkaTopics` reads several topics or a `^` regex as one subscription, and
+  `KafkaPartitions::new("orders", [0, 1])` assigns partitions by hand, without group membership
+  or rebalancing.
 - **Three commit modes** - librdkafka auto-commit (`Commit::Auto`, the default); precise
   per-message acknowledgement over a contiguous watermark (`Commit::Tracked`), correct under
   concurrent handler lanes; and `Commit::Transactional`, where the consumer stops committing
@@ -44,11 +45,16 @@ configuration - the runtime climbs the lifecycle ladder around it.
   the core's `BatchSubscriber` directly rather than buffering client-side: a batch is one
   delivery plus everything librdkafka has already fetched, cut off at the `batch(nonzero!(n))`
   the mount site names, with no added waiting.
-- **Retries and dead-lettering** - without a policy `nack(true)` keeps Kafka's native meaning
-  (the offset stays unsettled and redelivers on the next fetch); `Retry::Topic` republishes to
-  a retry topic with an attempt counter, `Retry::SeekBack` re-consumes in place,
-  `max_deliveries` caps the attempts, and `dead_letter` routes the drop path to a topic
-  stamped with the origin coordinates.
+- **Retries and dead-lettering** - `nack(true)` keeps Kafka's native meaning (the offset stays
+  unsettled and redelivers on the next fetch), and the mount site declares the rest:
+  `max_attempts(n).dead_letter("orders.dlq")` reads the same on every broker. Kafka holds no
+  record back, so the framework publishes each retry copy itself and counts them in a header;
+  `KafkaTopic` says where a copy reaches its subscription again, and a subscription over a set
+  of topics names that destination at the mount site.
+- **Kafka's own vocabulary in the document** - with the `asyncapi` feature the generated
+  document carries the `kafka` binding: the topic behind a channel, the consumer group of a
+  `receive` operation, the schema registry a server is configured with, and where a
+  registry-backed payload keeps its schema id.
 - **librdkafka delegation** - unset options mean librdkafka defaults; raw `config(key, value)`
   passthroughs on the broker, the producer, and the descriptor reach every property not
   surfaced as a typed option.
@@ -194,8 +200,9 @@ example: `examples/kafka_testing.rs`.
 cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
 ```
 
-The starter wires one broker with a default consumer group, a tracked-commit subscriber with a
-retry and dead-letter pipeline plus a published reply, and the `#[ruststream::app]` entry point.
+The starter wires one broker with a default consumer group, a tracked-commit subscriber under a
+declared attempt cap and dead-letter topic plus a published reply, and the `#[ruststream::app]`
+entry point.
 
 ## Documentation
 
