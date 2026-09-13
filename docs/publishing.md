@@ -19,20 +19,20 @@ Where a policy is named:
 
 - `b.include(handler)` alone - a returned reply is published through the broker's default policy,
   `KafkaPublish::default()`.
-- `b.include(handler).out(Reply, policy)` - the handler's reply publisher.
+- `b.include(handler).out_reply(policy)` - the handler's reply publisher.
 - `b.include(handler).out(marker, policy).build()` - the publisher an `Out<..>` parameter
   receives, named by the slot's marker (`DefaultSlot` when the parameter declares none).
+- `b.include(handler).out_retry(policy)` - the publisher a delayed copy leaves through, for the
+  deferred republish standing in for the delayed redelivery Kafka does not have (see
+  [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)).
 - `b.after_startup(policy, hook)` - a scope-level hook that runs once with the live publisher,
   after every subscription is open.
 - `connected.publisher(policy)` - outside the runtime, on a broker you connected yourself (see
   the `kafka_producer` example).
 
-One publisher does not come from a policy. `broker.retry_publisher()` comes from the
-*unconnected* broker, for the one wiring that takes a live publisher instead: `retry_via`, the
-deferred republish standing in for the delayed redelivery Kafka does not have (see
-[batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)). It resolves the connection
-at startup. Before `connect` it returns `KafkaError::NotConnected`, and after the broker shuts
-down `KafkaError::Closed`.
+Every one of them takes a policy, so a publisher that cannot yet send is not representable: the
+runtime pairs the policy with the connected broker at startup. A publisher that outlives the
+connection returns `KafkaError::Closed` rather than succeeding against a dead one.
 
 ## The publish builder
 
@@ -54,7 +54,8 @@ The record key travels in the publish's headers position instead: it is the fram
 partition-key contract, and Kafka maps it onto the native record key. Both are below.
 
 A placement rule that is not per-message is a `PublishTransform` step of the mount site's chain
-instead (`RoundRobin` below).
+instead (`RoundRobin` below). A transform writes the same per-record settings the builder steps
+write, so it mounts only over a publisher whose settings are `KafkaOptions`.
 
 An `Out` parameter names a capability, not a publisher type. This crate declares one of its own,
 `PartitionLanes`: it hands out one transactional publisher per source partition. A handler writes
@@ -107,10 +108,10 @@ The count is explicit and must match the destination topic's partition count: a 
 leaves the tail partitions idle, a larger one makes publishes to the missing partitions return an
 error.
 
-A transform reaches the record, not the publish call, so it names the partition through the
-`kafka-partition` header (an ASCII decimal) and the publisher reads it there; the header never
-reaches the wire. That is the channel a transform of your own uses for any other placement rule.
-A call site uses the step.
+The transform writes the same setting the `partition(..)` step writes. On an `Out` slot the
+setting arrives carrying whatever the call site chose, and `RoundRobin` steps aside for it; a
+reply has no call site, so there the cycle always places. A transform of your own reads and
+writes the same position, and that is how any other placement rule reaches the record.
 
 ## Delivery guarantees
 
@@ -257,7 +258,7 @@ Practical notes:
   commit, not at publish.
 - A `retry()` from a participant stalls its window until the transaction deadline and then aborts
   it, so prefer `drop()` and dead-lettering for poison messages in EOS handlers.
-- The `retry_after` deferred-republish fallback (`retry_via`, see
+- The `retry_after` deferred-republish fallback (`out_retry`, see
   [batch settlement](topics.md#how-batch-settlement-maps-onto-kafka)) does not apply to EOS
   replies: a delayed copy would break the offset-record pairing.
 - The reply path works only for subscriptions in `Commit::Transactional` mode naming this

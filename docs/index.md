@@ -67,7 +67,7 @@ Publishers follow the same split. `KafkaPublish` is the **policy** that construc
 turns that one into the per-partition policy, and `KafkaEosPublish` is the policy of an
 exactly-once pipeline.
 
-You name the policy when you register the handler (`b.include(handler).out(Reply, policy)` for
+You name the policy when you register the handler (`b.include(handler).out_reply(policy)` for
 the reply, `.out(marker, policy)` for an `Out<..>` slot), and at startup the policy instantiates
 the publisher on the connected broker. A handler that only replies names nothing, and the
 broker's default policy constructs the publisher.

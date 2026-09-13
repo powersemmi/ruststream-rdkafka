@@ -425,7 +425,7 @@ impl PublishLayer for ProtobufFrame {
 /// let registry = SchemaRegistry::new("http://localhost:8081");
 /// let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
 ///     .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///         b.include(confirm).out(Reply, KafkaPublish::framed(&registry));
+///         b.include(confirm).out_reply(KafkaPublish::framed(&registry));
 ///     });
 /// # let _ = app;
 /// ```

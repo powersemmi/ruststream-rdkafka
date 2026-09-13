@@ -167,8 +167,9 @@ partitions, positions that outlive a subscription, rebalancing, retention and re
 are cluster behavior, as is everything listed under transactions above. Concretely:
 
 - **Partitions.** Every topic has exactly one partition, numbered zero. `Ctx<Partition>` always
-  reads `0`, neither a `partition(..)` step nor a `PARTITION_HEADER` stamp changes where a record
-  lands, and a seek to any other partition is refused rather than invented. Worker lanes *are*
+  reads `0`, a `partition(..)` step changes where no record lands, and a seek to any other
+  partition is refused rather than invented. The setting is still recorded, so
+  `with_options(..)` reads back what a call site or a transform chose. Worker lanes *are*
   reproduced: a
   subscription's `LaneKey` resolves here exactly as it does upstream, so under the default
   `LaneKey::Partition` a topic's records share one lane (one partition, one order, keyless
@@ -183,9 +184,10 @@ are cluster behavior, as is everything listed under transactions above. Concrete
   log, and test resume-across-restart against a cluster.
 - **Retries and dead-lettering.** The crate's retry pipeline is not reproduced: `retry(..)`,
   `dead_letter(..)` and `max_deliveries(..)` are built on the live consumer and are inert on the
-  stand-in, so a republish onto a retry or dead-letter topic never happens here. `retry_after` is
-  out of reach too, because it needs a build-time publisher (`KafkaBroker::retry_publisher`) that
-  the in-process broker does not mint. A test sees no retry rather than a wrong one.
+  stand-in, so a republish onto a retry or dead-letter topic never happens here. A test sees no
+  retry rather than a wrong one. `retry_after` is the exception: the deferred republish is the
+  runtime's, not the consumer's, so a registration with `.out_retry(..)` defers its copy in
+  process too, and `tb.advance(..)` brings it back.
 - **Manual assignment and patterns** are refused loudly rather than approximated
   (`KafkaError::InvalidOptions`), for the same reason.
 

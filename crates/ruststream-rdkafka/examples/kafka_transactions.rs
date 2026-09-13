@@ -169,7 +169,7 @@ fn app() -> impl App {
         // what relays the delivery's source coordinates onto the reply, which is how the
         // pipeline pairs the two.
         b.include(enrich)
-            .out(Reply, EosPublish::new("enrich-svc-1"))
+            .out_reply(EosPublish::new("enrich-svc-1"))
             .transform(EosReplies);
         // --8<-- [end:eos_wiring]
     })

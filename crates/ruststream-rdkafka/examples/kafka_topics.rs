@@ -68,7 +68,7 @@ fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         // `confirm` replies through the broker's default publish policy, so the include site
-        // names no publisher; the explicit spelling is `.out(Reply, Publish::default())`.
+        // names no publisher; the explicit spelling is `.out_reply(Publish::default())`.
         b.include(confirm);
         b.include(audit_partition_zero);
     })

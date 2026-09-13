@@ -128,8 +128,9 @@ fn app() -> impl App {
 `cargo run -- asyncapi gen` prints its AsyncAPI document.
 
 The reply above rides the broker's default publish policy, so the mount site names no
-publisher. Everything else is named there: `.out(Reply, policy)` for the reply slot,
-`.out(DefaultSlot, policy)` (or your own marker) for an `Out<..>` handler parameter. A policy
+publisher. Everything else is named there: `.out_reply(policy)` for the reply slot,
+`.out(DefaultSlot, policy)` (or your own marker) for an `Out<..>` handler parameter, and
+`.out_retry(policy)` for the delayed copy `retry_after` republishes. A policy
 holds no connection - `Publish::default().transactional_id("orders-svc-1")`,
 `EosPublish::new("enrich-svc-1")` - which is why it can be written next to the `include`; the
 runtime pairs it into a live publisher after the broker connects.

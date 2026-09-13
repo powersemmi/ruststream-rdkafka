@@ -15,17 +15,17 @@ Broker 上读起来都一样。
 策略在哪里指定：
 
 - 只写 `b.include(handler)` - 返回的回复经由 Broker 的默认策略 `KafkaPublish::default()` 发布。
-- `b.include(handler).out(Reply, policy)` - 处理器的回复发布者。
+- `b.include(handler).out_reply(policy)` - 处理器的回复发布者。
 - `b.include(handler).out(marker, policy).build()` - `Out<..>` 参数收到的发布者，用槽位的标记指定
   （参数没有声明标记时是 `DefaultSlot`）。
+- `b.include(handler).out_retry(policy)` - 延迟副本经由的发布者，也就是顶替 Kafka 所没有的延迟
+  重投的那个延迟重新发布（参见[批次结算](topics.md#how-batch-settlement-maps-onto-kafka)）。
 - `b.after_startup(policy, hook)` - 作用域一级的钩子，在所有订阅打开之后，带着活的发布者跑一次。
 - `connected.publisher(policy)` - 在运行时之外，用在你自己连接的 Broker 上（参见 `kafka_producer`
   这个例子）。
 
-有一个发布者不来自策略。`broker.retry_publisher()` 来自*尚未连接*的 Broker，只为一处需要活发布者
-的接线：`retry_via`，也就是顶替 Kafka 所没有的延迟重投的那个延迟重新发布（参见
-[批次结算](topics.md#how-batch-settlement-maps-onto-kafka)）。它在启动时解析连接。`connect` 之前
-它返回 `KafkaError::NotConnected`，Broker 关闭之后返回 `KafkaError::Closed`。
+每一处接的都是策略，因此「还不能发送的发布者」无从表示：运行时在启动时把策略与已连接的 Broker
+配对。比连接活得更久的发布者返回 `KafkaError::Closed`，而不是对着死掉的连接假装发成功。
 
 ## 发布构建器 { #the-publish-builder }
 
@@ -44,6 +44,7 @@ trait，因此调用它的处理器主体要导入本 crate 的 prelude，并按
 都在下面。
 
 不逐条消息变化的放置规则，写成挂载点链上的一个 `PublishTransform` 步骤（下面的 `RoundRobin`）。
+变换写的就是构建器步骤写的那份逐条记录设置，因此它只能挂在选项为 `KafkaOptions` 的发布者之上。
 
 `Out` 参数指定的是一种能力，不是一个发布者类型。本 crate 声明了自己的一种，`PartitionLanes`：它按
 来源分区各交出一个事务发布者。处理器写 `Out(lanes): Out<impl PartitionLanes>`，而 `per_partition()`
@@ -89,9 +90,9 @@ trait，因此调用它的处理器主体要导入本 crate 的 prelude，并按
 这个数目要写明，而且必须与目的主题的分区数一致：少了会让末尾的分区闲着，多了会让发往不存在分区的
 发布返回错误。
 
-变换触及的是记录，不是那次发布调用，因此它经由 `kafka-partition` 消息头（一个 ASCII 十进制数）指定
-分区，发布者从那里读取；这个消息头本身不会发送出去。你自己的变换要表达别的放置规则，用的也是这
-条通路。调用点则用那个步骤。
+变换写的就是 `partition(..)` 步骤写的那一项设置。在 `Out` 槽位上，这项设置带着调用点选的值送到
+变换手里，`RoundRobin` 就让开；回复没有调用点，因此那里循环总是会放置。你自己的变换读写的是同一
+个位置，别的放置规则也是这样落到记录上的。
 
 ## 投递保证 { #delivery-guarantees }
 
@@ -219,7 +220,7 @@ id 只在一处指定：同一个事务 id 上的第二条管线会把第一条�
 - 端到端延迟至少是一个提交间隔：记录在窗口提交时才可见，而不是在发布时。
 - 参与者的一次 `retry()` 会把它的窗口拖到事务期限然后中止，因此在 EOS 处理器里，毒消息最好用
   `drop()` 和死信处理。
-- `retry_after` 的延迟重新发布退路（`retry_via`，参见
+- `retry_after` 的延迟重新发布退路（`out_retry`，参见
   [批次结算](topics.md#how-batch-settlement-maps-onto-kafka)）不适用于 EOS 回复：一份延迟的副本会
   破坏偏移量与记录的配对。
 - 回复这条路只对处于 `Commit::Transactional` 模式、并且指定了本管线 id 的订阅有效；来自其他订阅的

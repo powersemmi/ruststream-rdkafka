@@ -20,7 +20,7 @@
 //! ```
 
 use ruststream::prelude::*;
-use ruststream::runtime::{App, AppInfo, Reply, RustStream};
+use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream_rdkafka::{KafkaBroker, KafkaPublish, SchemaRegistry};
 
 // --8<-- [start:types]
@@ -72,7 +72,7 @@ fn app() -> impl App {
             // defaults to the schema's first top-level message, which Confluent optimises to a
             // single zero byte; `.message(topic, "pkg.Message")` pins another.
             b.include(confirm)
-                .out(Reply, KafkaPublish::framed(&registry));
+                .out_reply(KafkaPublish::framed(&registry));
         },
     )
     // --8<-- [end:wiring]

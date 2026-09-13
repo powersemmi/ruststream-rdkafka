@@ -303,20 +303,24 @@ advisory no-op and none of it applies:
   therefore reaches only up to the first retry; when one poison element must not hold the batch
   back, you can give the subscription a retry topic.
 - **Per-element with `retry_after(..)`** - Kafka has no native delayed redelivery, so the runtime
-  falls back to a deferred republish. With `retry_via(broker.retry_publisher())` on the scope, the
-  element settles immediately and the position moves past it, and after the delay a copy is
+  falls back to a deferred republish. With `.out_retry(Publish::default())` on the registration,
+  the element settles immediately and the position moves past it, and after the delay a copy is
   published to the end of the topic with an incremented `x-ruststream-retry-count` header. The
   copy loses its place in the order and is at-most-once across the delay window: a crash before
-  the timer fires loses it. Without `retry_via` the delay is dropped with a warning and the
+  the timer fires loses it. Without the position the delay is dropped with a warning and the
   element behaves like the plain `retry()` above.
+
+    The retry position is an ordinary slot, so `.codec(..)`, `.transform(..)` and
+    `.map_publisher(..)` follow it. The copy carries the delivery's own bytes, so a codec named
+    there resolves the position and encodes nothing, while the transforms run on the copy.
 
     The subscription names where that copy goes. A `KafkaTopic` answers with its topic, and a
     publish there reaches every group reading it. Two shapes answer nothing, because a copy
     published under them would not come back: a pattern subscription, since a record goes to a
     topic and never to a regex, and a manual partition assignment, since the partitioner may put
-    the copy on a partition the subscription does not read. An application that wires `retry_via`
-    over one of those refuses to start and names the subscription, instead of dropping copies at
-    run time.
+    the copy on a partition the subscription does not read. A registration that binds the retry
+    position over one of those refuses to start and names the subscription, instead of dropping
+    copies at run time.
 - **A result vector shorter than the batch** - the elements it does not cover are retried, and the
   mismatch is logged.
 

@@ -61,7 +61,7 @@ ClosedKafkaBroker                  终结见证：unflushed_records()
 `transactional_id` 把它变成事务策略，`per_partition` 再把事务策略变成按分区的策略，
 `KafkaEosPublish` 则是精确一次管线的策略。
 
-策略在注册处理器时指定（回复用 `b.include(handler).out(Reply, policy)`，`Out<..>` 槽位用
+策略在注册处理器时指定（回复用 `b.include(handler).out_reply(policy)`，`Out<..>` 槽位用
 `.out(marker, policy)`），启动时策略在已连接的 Broker 上实例化发布者。只做回复的处理器什么都不用
 指定，发布者由 Broker 的默认策略构造。
 
