@@ -39,8 +39,7 @@ use ruststream_rdkafka::context::keys;
 use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
     KafkaEosPublish, KafkaError, KafkaMessage, KafkaOptions, KafkaPosition, KafkaPublish,
-    KafkaTopic, LaneKey, PARTITION_HEADER, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset,
-    StartOffset,
+    KafkaTopic, LaneKey, PARTITION_KEY_HEADER, PartitionLanes, SourceOffset, StartOffset,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -1459,61 +1458,10 @@ async fn eos_aborted_window_replays_without_output_duplicates() {
     broker.shutdown().await.expect("shutdown");
 }
 
+/// The typed per-record setting reaches the cluster: the record lands where the call site said,
+/// ahead of the partitioner and the record key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_partition_header_targets_the_partition() {
-    let Some(url) = kafka_url() else { return };
-    let topic = unique("pinned");
-    create_topic(&url, &topic, 2).await;
-    let broker = connected_broker(&url).await;
-
-    let mut subscriber = broker
-        .subscribe_with(tracked(&topic, &unique("group")))
-        .await
-        .expect("subscribe");
-    let mut stream = Box::pin(subscriber.stream());
-
-    let mut headers = HeaderMap::new();
-    headers.insert(PARTITION_HEADER, "1");
-    broker
-        .publisher(KafkaPublish::default())
-        .publish(
-            OutgoingMessage::new(&topic, b"pinned".as_slice()).with_headers(headers),
-            None,
-        )
-        .await
-        .expect("publish pinned");
-
-    let msg = next_message(&mut stream).await;
-    assert_eq!(msg.payload(), b"pinned");
-    assert_eq!(msg.partition(), 1, "the explicit partition must win");
-    assert!(
-        msg.headers().get(PARTITION_HEADER).is_none(),
-        "the partition header must not hit the wire",
-    );
-    msg.ack().await.expect("ack");
-
-    // A malformed partition value fails the publish clearly instead of falling back.
-    let mut bad = HeaderMap::new();
-    bad.insert(PARTITION_HEADER, "one");
-    let err = broker
-        .publisher(KafkaPublish::default())
-        .publish(
-            OutgoingMessage::new(&topic, b"nope".as_slice()).with_headers(bad),
-            None,
-        )
-        .await
-        .expect_err("malformed partition must fail");
-    assert!(matches!(err, KafkaError::InvalidOptions(_)));
-
-    drop(stream);
-    drop(subscriber);
-    broker.shutdown().await.expect("shutdown");
-}
-
-/// The typed per-record setting reaches the cluster, and a call site outranks the header a
-/// publish transform would have stamped on the same record.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_partition_setting_places_the_record_and_outranks_the_header() {
+async fn the_partition_setting_places_the_record() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("placed");
     create_topic(&url, &topic, 2).await;
@@ -1539,20 +1487,18 @@ async fn the_partition_setting_places_the_record_and_outranks_the_header() {
     assert_eq!(msg.partition(), 1, "the setting must place the record");
     msg.ack().await.expect("ack");
 
-    let mut stamped = HeaderMap::new();
-    stamped.insert(PARTITION_HEADER, "1");
     broker
         .publisher(KafkaPublish::default())
         .publish(
-            OutgoingMessage::new(&topic, b"outranked".as_slice()).with_headers(stamped),
+            OutgoingMessage::new(&topic, b"other".as_slice()),
             Some(&KafkaOptions::default().partition(0)),
         )
         .await
-        .expect("publish outranked");
+        .expect("publish other");
 
     let msg = next_message(&mut stream).await;
-    assert_eq!(msg.payload(), b"outranked");
-    assert_eq!(msg.partition(), 0, "the call site must outrank the header");
+    assert_eq!(msg.payload(), b"other");
+    assert_eq!(msg.partition(), 0, "each record takes its own setting");
     msg.ack().await.expect("ack");
 
     drop(stream);
@@ -1568,13 +1514,11 @@ async fn manual_assignment_consumes_only_the_assigned_partition() {
     let broker = connected_broker(&url).await;
 
     for (payload, partition) in [(b"p0".as_slice(), 0), (b"p1", 1)] {
-        let mut headers = HeaderMap::new();
-        headers.insert(PARTITION_HEADER, partition.to_string());
         broker
             .publisher(KafkaPublish::default())
             .publish(
-                OutgoingMessage::new(&topic, payload).with_headers(headers),
-                None,
+                OutgoingMessage::new(&topic, payload),
+                Some(&KafkaOptions::default().partition(partition)),
             )
             .await
             .expect("publish pinned");
@@ -1755,14 +1699,12 @@ async fn manual_assignment_composes_with_partition_lanes() {
     let broker = connected_broker(&url).await;
     for seq in 0..PER_PARTITION {
         for partition in [0, 1] {
-            let mut headers = HeaderMap::new();
-            headers.insert(PARTITION_HEADER, partition.to_string());
             let payload = format!(r#"{{"partition":{partition},"seq":{seq}}}"#);
             broker
                 .publisher(KafkaPublish::default())
                 .publish(
-                    OutgoingMessage::new(&topic, payload.as_bytes()).with_headers(headers),
-                    None,
+                    OutgoingMessage::new(&topic, payload.as_bytes()),
+                    Some(&KafkaOptions::default().partition(partition)),
                 )
                 .await
                 .expect("publish");

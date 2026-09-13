@@ -155,7 +155,7 @@ struct PipelineInner {
 /// Wiring, all three naming the same id:
 ///
 /// 1. The policy: `KafkaEosPublish::new("pipeline-1")`, attached at the include site
-///    (`b.include(handler).out(Reply, policy)`) or bound for an `after_startup` hook.
+///    (`b.include(handler).out_reply(policy)`) or bound for an `after_startup` hook.
 /// 2. Each source subscription: `Commit::Transactional("pipeline-1".into())` - its consumer
 ///    stops committing offsets on its own and registers with the pipeline instead.
 /// 3. The handler: it receives the paired [`EosPipeline`] and calls
@@ -786,7 +786,7 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 ///
 /// A replying handler over an exactly-once pipeline names it as the mount site's
 /// transform step, right after the policy:
-/// `b.include(enrich).out(Reply, KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
+/// `b.include(enrich).out_reply(KafkaEosPublish::new("enrich-1")).transform(EosReplies)`. Every
 /// reply then joins the pipeline's open window paired with its delivery's consumed offset,
 /// making the publishing-handler form exactly-once end to end - the handler just returns the
 /// value. The chain takes the codec the same way, with a `.codec(..)` step.
@@ -801,12 +801,19 @@ fn decode_source(value: &str) -> Option<SourceOffset> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EosReplies;
 
-impl<C> PublishTransform<ForReply<C>> for EosReplies {
+// Generic over the per-record settings too: it writes none, so it mounts over the exactly-once
+// pipeline and over any other Kafka publisher alike.
+impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
     // The coordinates come from the delivery being answered, and the destination is whatever the
     // reply already declares: this transform reads, it never names.
     type Destination = Reads;
 
-    fn apply(&self, out: &mut Outgoing<'_>, cx: &PublishContext<'_, C>) {
+    fn apply(
+        &self,
+        out: &mut Outgoing<'_>,
+        _options: &mut Option<Options>,
+        cx: &PublishContext<'_, C>,
+    ) {
         if let Some(source) = cx.headers().get(EOS_SOURCE_HEADER) {
             let source = source.to_vec();
             out.headers_mut().insert(EOS_SOURCE_HEADER, source);
@@ -845,7 +852,7 @@ impl Publisher for EosPipeline {
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
                  relay them (add the `EosReplies` transform to the mount site's chain, \
-                 `.out(Reply, KafkaEosPublish::new(id)).transform(EosReplies)`)"
+                 `.out_reply(KafkaEosPublish::new(id)).transform(EosReplies)`)"
                     .to_owned(),
             ));
         };

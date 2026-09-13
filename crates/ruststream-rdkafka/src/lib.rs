@@ -81,7 +81,7 @@ pub use broker::{ClosedKafkaBroker, ConnectedKafkaBroker, KafkaBroker};
 pub use distribution::RoundRobin;
 pub use eos::{EOS_SOURCE_HEADER, EosPipeline, EosReplies, KafkaEosPublish, SourceOffset};
 pub use error::KafkaError;
-pub use message::{KafkaMessage, PARTITION_HEADER, PARTITION_KEY_HEADER};
+pub use message::{KafkaMessage, PARTITION_KEY_HEADER};
 #[cfg(feature = "protobuf")]
 pub use protobuf::{KafkaFramedPublish, KafkaFramedPublisher, ProtobufFrame};
 pub use publisher::{

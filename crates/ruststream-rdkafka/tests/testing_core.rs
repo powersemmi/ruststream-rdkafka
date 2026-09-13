@@ -809,65 +809,62 @@ async fn plan_keyed(order: &PlanOrder) -> PlanItem {
 }
 
 /// Stamps the reply with a record key, standing in for a handler that picked its placement.
+/// It writes no per-record setting, so it is generic over them and mounts anywhere.
 struct KeyStamp;
 
-impl<K: ContextKind> PublishTransform<K> for KeyStamp {
+impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
     type Destination = Reads;
 
-    fn apply(&self, out: &mut OutgoingRecord<'_>, _cx: &K::View<'_>) {
+    fn apply(
+        &self,
+        out: &mut OutgoingRecord<'_>,
+        _options: &mut Option<Options>,
+        _cx: &K::View<'_>,
+    ) {
         out.headers_mut().insert(PARTITION_KEY_HEADER, "tenant-1");
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn round_robin_stamps_cycling_partitions() {
-    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+async fn round_robin_places_replies_around_the_cycle() {
+    use ruststream_rdkafka::RoundRobin;
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             b.include(plan)
-                .out(Reply, KafkaPublish::default())
+                .out_reply(KafkaPublish::default())
                 .transform(RoundRobin::partitions(2));
         });
     let tb = TestApp::start(app).await.expect("start");
 
-    for id in 0..4 {
+    // One delivery at a time: the harness reads back the settings of the most recent reply, so
+    // the cycle is proved step by step rather than in bulk.
+    for (id, partition) in [0, 1, 2, 3].into_iter().zip([0, 1, 0, 1]) {
         tb.broker::<KafkaTestBroker>()
             .publish("plan-orders", &PlanOrder { id })
             .await
             .expect("publish");
+        tb.settle().await.expect("the delivery settles");
+        tb.broker::<KafkaTestBroker>()
+            .published::<PlanItem>("work-items")
+            .with_options(&KafkaOptions::default().partition(partition));
     }
 
-    let published = tb
-        .broker::<KafkaTestBroker>()
-        .published::<PlanItem>("work-items");
-    let stamped: Vec<String> = published
-        .messages()
-        .iter()
-        .map(|msg| {
-            msg.headers()
-                .get_str(PARTITION_HEADER)
-                .expect("stamped partition")
-                .to_owned()
-        })
-        .collect();
-    assert_eq!(
-        stamped,
-        ["0", "1", "0", "1"],
-        "the cycle targets one partition per message",
-    );
+    tb.broker::<KafkaTestBroker>()
+        .published::<PlanItem>("work-items")
+        .assert_called(4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_leaves_keyed_replies_alone() {
-    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+    use ruststream_rdkafka::RoundRobin;
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
             b.include(plan_keyed)
-                .out(Reply, KafkaPublish::default())
+                .out_reply(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
         });
@@ -887,10 +884,8 @@ async fn round_robin_leaves_keyed_replies_alone() {
         messages[0].headers().get_str(PARTITION_KEY_HEADER),
         Some("tenant-1")
     );
-    assert!(
-        messages[0].headers().get(PARTITION_HEADER).is_none(),
-        "a keyed reply keeps its key-implied placement",
-    );
+    // A keyed reply keeps its key-implied placement: the cycle set no partition on it.
+    published.assert_called_once().assert_options_default();
 }
 
 // -------------------------------------------------------------- where a reply lands on Kafka

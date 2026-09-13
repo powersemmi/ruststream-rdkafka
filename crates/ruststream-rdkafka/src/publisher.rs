@@ -271,17 +271,12 @@ async fn send_via(
     msg: OutgoingMessage<'_>,
     options: Option<&KafkaOptions>,
 ) -> Result<(), KafkaError> {
-    let parts = convert::headers_for_publish(msg.headers())?;
+    let parts = convert::headers_for_publish(msg.headers());
     let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
     if let Some(key) = &parts.key {
         record = record.key(key.as_ref());
     }
-    // The call site's own setting first, then the one a publish transform stamped: a transform
-    // sees only the `Outgoing`, which carries no options, so the header stays its channel.
-    if let Some(partition) = options
-        .and_then(|options| options.partition_setting())
-        .or(parts.partition)
-    {
+    if let Some(partition) = options.and_then(|options| options.partition_setting()) {
         // An explicit partition wins over the partitioner and the record key.
         record = record.partition(partition);
     }
@@ -898,10 +893,11 @@ impl<M, L, EncodeCodec, Pipe, Body> PartitionLanes for Slot<M, L, EncodeCodec, P
 where
     L: PartitionLanes,
     EncodeCodec: Send + Sync,
-    // The entry's publish path. A lane's traffic never travels it (it leaves through the
-    // unwrapped value), but naming the bound the mount site's entry already carries keeps this
-    // impl on exactly the slots the runtime builds.
-    Pipe: OutPipeline,
+    // The entry's publish path, over the wired value whose per-record settings its transforms
+    // write. A lane's traffic never travels it (it leaves through the unwrapped value), but
+    // naming the bound the mount site's entry already carries keeps this impl on exactly the
+    // slots the runtime builds.
+    Pipe: OutPipeline<L>,
 {
     type Publisher = L::Publisher;
 
