@@ -484,6 +484,11 @@ channel the topic behind it, and a `receive` operation the consumer group that r
 bootstrap addresses reach the document as bare `host:port` coordinates, with the scheme and any
 userinfo stripped, for the reason a registry URL does - the document is published and shared.
 
+A channel the service publishes to reports its topic too, and that topic is the destination the
+mount site resolved: a registration's `publish("dest")` clause, a reply type's own
+`#[outgoing(name)]`, the name of a slot entry, a declared dead-letter topic. A publish policy
+carries producer settings and no destination, so it has none of its own to report.
+
 What it cannot report follows from when it is built, which is before anything connects, from
 the descriptor alone. A group appears only when the descriptor names one, never the broker's
 `default_group`; a client id appears only when the `config` passthrough sets `client.id`; a
