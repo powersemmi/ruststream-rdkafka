@@ -105,6 +105,10 @@ ruststream-rdkafka = { version = "0.7", features = ["asyncapi"] }
 的是一组。走 Schema Registry 的发布者再加一条 message binding：schema id 以 Confluent 编码放在载荷
 里，subject 由它的命名策略找出。
 
+服务发布过去的 channel 也报告自己的主题。这个主题就是挂载点解析出的目的地：注册上的
+`publish("dest")` 从句、回复类型自己的 `#[outgoing(name)]`、槽位条目的名字、声明的死信主题。发布
+策略带的是生产者设置，不带目的地，所以它没有自己的主题可报。
+
 Registry 的地址进入文档时会去掉用户信息，理由和 bootstrap 地址一样 - 文档会被发布、被转手，而进入
 文档的密码就已经离开了服务。
 

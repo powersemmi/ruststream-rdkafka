@@ -114,6 +114,11 @@ one and such a subscription reads a set. A registry-backed publisher adds a mess
 schema id rides in the payload under the Confluent encoding, under the subject its naming
 strategy found.
 
+A channel the service publishes to reports its topic too. That topic is the destination the mount
+site resolved: a registration's `publish("dest")` clause, the reply type's own
+`#[outgoing(name)]`, the name of a slot entry, a declared dead-letter topic. A publish policy
+carries producer settings and no destination, so it has no topic of its own to report.
+
 The registry URL reaches the document with any userinfo stripped, for the reason the bootstrap
 addresses do - the document is published and shared, and a password that reaches it has left the
 service.
