@@ -391,7 +391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1386,7 +1386,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1641,9 +1641,9 @@ dependencies = [
 
 [[package]]
 name = "ruststream"
-version = "0.7.0-rc.1"
+version = "0.7.0-rc.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c43622b8d46d3458fc0e2fb5ee7b4e291ba8f8c5987f57b6b004d58aa13153c"
+checksum = "8dcdd86f86819f9573d26c146e85fe1271d5b4e379dbcaf2106ceca84d35170e"
 dependencies = [
  "bytes",
  "ciborium",
@@ -1661,9 +1661,9 @@ dependencies = [
 
 [[package]]
 name = "ruststream-macros"
-version = "0.7.0-rc.1"
+version = "0.7.0-rc.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cbe4738998343ed8c5dbea1364ad8cd1fbdb135af74a3b858dcbbd89a9680b6"
+checksum = "e7a0e5e0b23f92ddd0a7981ee267491abb4f103e4ecd5940ef634941920e4fbf"
 dependencies = [
  "proc-macro2",
  "quote",
