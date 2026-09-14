@@ -206,15 +206,13 @@ entry point.
 
 ## Documentation
 
-- [Topics and groups](https://powersemmi.github.io/ruststream-rdkafka/latest/topics/) -
-  descriptors, start offsets, commit modes, keyed lanes, retries, batches.
-- [Publishing](https://powersemmi.github.io/ruststream-rdkafka/latest/publishing/) - policies,
-  record keys, transactions, exactly-once pipelines.
-- [Schema Registry](https://powersemmi.github.io/ruststream-rdkafka/latest/schema-registry/) -
-  Confluent framing, Avro and Protobuf transcoding.
-- [Testing](https://powersemmi.github.io/ruststream-rdkafka/latest/testing/) - the in-process
-  broker and the live-cluster suites.
-- API reference: <https://docs.rs/ruststream-rdkafka>
+- [Subscribing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) - descriptors, start offsets, commit modes, keyed lanes,
+  retries, batches, repositioning.
+- [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) - policies, record keys, transactions, exactly-once pipelines.
+- [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - Confluent framing, with
+  [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it.
+- [`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) - the in-process broker and what it does not simulate.
+- Entry pages, installation and the tutorial: <https://powersemmi.github.io/ruststream/>
 
 ## Contributing
 

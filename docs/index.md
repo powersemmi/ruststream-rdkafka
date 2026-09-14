@@ -22,18 +22,18 @@ A minimal service is one handler and one app function:
 
 ## The transport model
 
-- A subscription is one consumer reading one topic. [`KafkaTopic`](topics.md) describes it, the
+- A subscription is one consumer reading one topic. [`KafkaTopic`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) describes it, the
   consumer group included; the bare-string `#[subscriber("orders")]` form takes the group from
   the broker's `default_group`.
 - The name an outgoing message declares is the destination topic. A reply type that declares
   `#[outgoing(name = "confirmations")]` is published to `confirmations`, and the subscriber
   writes the bare `publish` clause. A reply type that declares no name is published to the topic
   the mount site names, `publish("enriched-orders")`. A partition-key header becomes the record's
-  native key, so Kafka itself keeps per-key ordering (see [Publishing](publishing.md)).
+  native key, so Kafka itself keeps per-key ordering (see [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing)).
 - Settlement follows Kafka's committed position rather than a per-message frame. `Commit::Auto`,
   the default, leaves that position to librdkafka's auto-commit; `Commit::Tracked` makes each
   `ack` a precise per-message acknowledgement over a contiguous watermark. See
-  [Topics and groups](topics.md).
+  [Topics and groups](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing).
 - Configuration delegates to librdkafka. An option you leave unset keeps the librdkafka default,
   and `config(key, value)` on the broker and on the descriptor, `producer_config(key, value)` for
   the producer, reach every property this crate does not surface as a typed option.
@@ -78,13 +78,13 @@ The framework's optional capability traits, and which of them this broker implem
 
 | Capability | Native | Detail |
 |---|---|---|
-| `Subscribe` | yes | `#[subscriber("orders")]` subscribes by topic name alone, in the broker's [default consumer group](topics.md#consumer-groups). |
-| `BatchSubscriber` | yes | Consume whole batches, one delivery plus everything librdkafka has already fetched, with no added waiting, up to the size the mount site names: [Batches](topics.md#batches). |
-| `TransactionalPublisher` | yes | Publish inside Kafka transactions, one open transaction per handle: [Transactions](publishing.md#transactions). |
-| `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows take [per-partition publishers](publishing.md#transaction-scopes-and-worker-pools) or an [exactly-once pipeline](publishing.md#exactly-once-pipelines). |
+| `Subscribe` | yes | `#[subscriber("orders")]` subscribes by topic name alone, in the broker's [default consumer group](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing). |
+| `BatchSubscriber` | yes | Consume whole batches, one delivery plus everything librdkafka has already fetched, with no added waiting, up to the size the mount site names: [Batches](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#batches). |
+| `TransactionalPublisher` | yes | Publish inside Kafka transactions, one open transaction per handle: [Transactions](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#transactions). |
+| `OwnedTransactions` | no | A Kafka producer holds one broker-side transaction at a time, so a transaction cannot be an independently owned value; concurrent flows take [per-partition publishers](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#transactions) or an [exactly-once pipeline](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#exactly-once-pipelines). |
 | `RequestReply` | no | Kafka has no reply correlation; request/reply is a reply topic of your own plus a correlation header. |
-| `Partitioned` | yes | Ordered worker lanes, keyed by the delivery's source partition or by the record key under `LaneKey::RecordKey`: [Keyed worker lanes](topics.md#keyed-worker-lanes). |
-| `Seekable` + `Positioned` | yes | Reposition the partitions this consumer holds from a handler, through the `SeekHandle` context key next to the delivery's own `Position`: [Repositioning a subscription](topics.md#repositioning-a-subscription). |
+| `Partitioned` | yes | Ordered worker lanes, keyed by the delivery's source partition or by the record key under `LaneKey::RecordKey`: [Keyed worker lanes](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing). |
+| `Seekable` + `Positioned` | yes | Reposition the partitions this consumer holds from a handler, through the `SeekHandle` context key next to the delivery's own `Position`: [Repositioning a subscription](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#positions-and-seeking). |
 | `DescribeServer` | yes | The generated AsyncAPI document lists the bootstrap servers under the `kafka` protocol, with the schema registry beside them: [The AsyncAPI document](#the-asyncapi-document). |
 
 ## The AsyncAPI document
@@ -133,9 +133,16 @@ The starter wires one Kafka broker with a default consumer group, a tracked-comm
 under a declared attempt cap and dead-letter topic, and a published reply. Its `#[ruststream::app]` entry
 point gives the binary the `run` and `asyncapi gen` commands.
 
-## Guides
+## Where the documentation is
 
-- [Topics and groups](topics.md) - descriptors, start offsets, commit modes, keyed lanes.
-- [Publishing](publishing.md) - publish policies, record keys, transactions, delivery guarantees.
-- [Schema Registry](schema-registry.md) - Confluent framing, Avro and Protobuf transcoding.
-- [Testing](testing.md) - the in-process test broker and the live-cluster suites.
+The reference is on docs.rs, one section per task.
+[Subscribing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) covers the descriptors, consumer groups, start offsets, commit
+modes, keyed worker lanes, batches, retries and repositioning.
+[Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) covers the policies, record keys and explicit partitions,
+delivery guarantees, transactions and exactly-once pipelines.
+[`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) covers the Confluent envelope, with
+[`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it, and
+[`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) covers the in-process broker.
+
+Installation, the tutorial and the list of brokers are on the framework's own site:
+<https://powersemmi.github.io/ruststream/>.

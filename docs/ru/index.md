@@ -23,18 +23,18 @@ serde = { version = "1", features = ["derive"] }
 ## Модель транспорта {#the-transport-model}
 
 - Подписка - это один консьюмер, который читает одну тему. Её описывает
-  [`KafkaTopic`](topics.md), вместе с группой консьюмеров; форма с голой строкой,
+  [`KafkaTopic`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing), вместе с группой консьюмеров; форма с голой строкой,
   `#[subscriber("orders")]`, берёт группу из `default_group` брокера.
 - Имя, объявленное исходящим сообщением, - это тема-адресат. Тип ответа с
   `#[outgoing(name = "confirmations")]` публикуется в `confirmations`, а подписчик пишет `publish`
   без имени. Тип ответа, который имени не объявляет, публикуется в тему, названную точкой
   монтирования: `publish("enriched-orders")`. Заголовок с ключом партиционирования становится
   родным ключом записи, поэтому порядок для одного ключа держит сам Kafka (см.
-  [Публикацию](publishing.md)).
+  [Публикацию](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing)).
 - Завершение идёт по зафиксированной позиции Kafka, а не по кадру отдельного сообщения. Режим
   по умолчанию `Commit::Auto` оставляет эту позицию автоматической фиксации librdkafka;
   `Commit::Tracked` делает каждый `ack` точным подтверждением одного сообщения поверх непрерывной
-  отметки. См. [Темы и группы](topics.md).
+  отметки. См. [Темы и группы](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing).
 - Настройка передоверена librdkafka. Незаданная опция сохраняет умолчание librdkafka, а
   `config(key, value)` на брокере и на дескрипторе и `producer_config(key, value)` для продюсера
   дают доступ к любому свойству, которое крейт не вынес в типизированную опцию.
@@ -78,13 +78,13 @@ ClosedKafkaBroker                  терминальный свидетель: 
 
 | Совместимость | Нативно | Подробности |
 |---|---|---|
-| `Subscribe` | да | `#[subscriber("orders")]` подписывается по одному имени темы, в [группе консьюмеров брокера по умолчанию](topics.md#consumer-groups). |
-| `BatchSubscriber` | да | Читайте целыми пакетами: одна доставка плюс всё, что librdkafka уже вычитал, без дополнительного ожидания и не больше размера, названного точкой монтирования, - [Пакеты](topics.md#batches). |
-| `TransactionalPublisher` | да | Публикуйте внутри транзакций Kafka, по одной открытой транзакции на дескриптор: [Транзакции](publishing.md#transactions). |
-| `OwnedTransactions` | нет | Продюсер Kafka держит одновременно одну транзакцию на стороне брокера, поэтому транзакция не может быть отдельным значением во владении; параллельные потоки берут [издателей на партицию](publishing.md#transaction-scopes-and-worker-pools) или [конвейер exactly-once](publishing.md#exactly-once-pipelines). |
+| `Subscribe` | да | `#[subscriber("orders")]` подписывается по одному имени темы, в [группе консьюмеров брокера по умолчанию](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing). |
+| `BatchSubscriber` | да | Читайте целыми пакетами: одна доставка плюс всё, что librdkafka уже вычитал, без дополнительного ожидания и не больше размера, названного точкой монтирования, - [Пакеты](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#batches). |
+| `TransactionalPublisher` | да | Публикуйте внутри транзакций Kafka, по одной открытой транзакции на дескриптор: [Транзакции](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#transactions). |
+| `OwnedTransactions` | нет | Продюсер Kafka держит одновременно одну транзакцию на стороне брокера, поэтому транзакция не может быть отдельным значением во владении; параллельные потоки берут [издателей на партицию](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#transactions) или [конвейер exactly-once](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#exactly-once-pipelines). |
 | `RequestReply` | нет | В Kafka нет сопоставления ответа с запросом; запрос-ответ строится на собственной теме ответов и заголовке корреляции. |
-| `Partitioned` | да | Упорядоченные партиции воркеров с ключом по исходной партиции доставки или по ключу записи при `LaneKey::RecordKey`: [Партиции воркеров по ключу](topics.md#keyed-worker-lanes). |
-| `Seekable` + `Positioned` | да | Перемещайте партиции, которыми владеет этот консьюмер, прямо из обработчика - через ключ контекста `SeekHandle` рядом с `Position` самой доставки: [Перемотка подписки](topics.md#repositioning-a-subscription). |
+| `Partitioned` | да | Упорядоченные партиции воркеров с ключом по исходной партиции доставки или по ключу записи при `LaneKey::RecordKey`: [Партиции воркеров по ключу](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing). |
+| `Seekable` + `Positioned` | да | Перемещайте партиции, которыми владеет этот консьюмер, прямо из обработчика - через ключ контекста `SeekHandle` рядом с `Position` самой доставки: [Перемотка подписки](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#positions-and-seeking). |
 | `DescribeServer` | да | Сгенерированный документ AsyncAPI перечисляет bootstrap-серверы под протоколом `kafka`, а рядом с ними - реестр схем: [Документ AsyncAPI](#the-asyncapi-document). |
 
 ## Документ AsyncAPI {#the-asyncapi-document}
@@ -134,10 +134,16 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 фиксацией смещений под объявленным пределом попыток и темой dead-letter, и опубликованный ответ. Её точка входа
 `#[ruststream::app]` даёт бинарнику команды `run` и `asyncapi gen`.
 
-## Руководства {#guides}
+## Где искать документацию {#where-the-documentation-is}
 
-- [Темы и группы](topics.md) - дескрипторы, стартовые смещения, режимы фиксации, партиции воркеров
-  по ключу.
-- [Публикация](publishing.md) - политики публикации, ключи записей, транзакции, гарантии доставки.
-- [Schema Registry](schema-registry.md) - конверт Confluent, перекодирование Avro и Protobuf.
-- [Тестирование](testing.md) - внутрипроцессный тестовый брокер и наборы тестов на живом кластере.
+Справочник лежит на docs.rs, по разделу на задачу.
+[Подписка](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) - дескрипторы, группы консьюмеров, стартовые смещения, режимы
+фиксации, партиции воркеров по ключу, пакеты, повторы и перемотка.
+[Публикация](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) - политики, ключи записей и явные партиции, гарантии доставки,
+транзакции и конвейеры exactly-once.
+[`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - конверт Confluent, рядом с ним
+[`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) и [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html), а
+[`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) - внутрипроцессный брокер.
+
+Установка, учебник и список брокеров - на собственном сайте фреймворка:
+<https://powersemmi.github.io/ruststream/>.

@@ -4,7 +4,8 @@
 //! held back between `begin_transaction` and `commit`, released together on commit, discarded on
 //! abort, with the same misuse errors the real publisher reports. The guarantees a Kafka
 //! transaction actually rests on are broker-side and are not reproduced; each type names its own
-//! gaps, and `docs/testing.md` collects them next to the live suite that covers them.
+//! gaps, and the [module overview](crate::testing) collects them next to the live suite that
+//! covers them.
 
 use std::collections::HashMap;
 use std::fmt;
