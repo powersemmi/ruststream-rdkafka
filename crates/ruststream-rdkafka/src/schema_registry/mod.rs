@@ -1,20 +1,145 @@
-//! The Confluent Schema Registry client, the wire-format envelope, and the registry
-//! middleware.
+//! The Confluent Schema Registry: the client, the wire-format envelope, and the two ways a
+//! service speaks it.
 //!
-//! Payloads on registry-backed topics carry the Confluent wire format: a zero magic byte, a
-//! big-endian 4-byte schema id, then the encoded datum. The registry integrates as
-//! middleware on the broker's async edges, so handlers and publishers keep speaking plain
-//! JSON through the default codec:
+//! A registry-backed payload carries the Confluent wire format - a zero magic byte, a
+//! big-endian 4-byte schema id, then the encoded datum - and the schemas themselves live in
+//! the registry. There are two ways to meet that, and **the codec is the one to reach for
+//! first**.
 //!
-//! - Consuming: [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)
-//!   transcodes framed deliveries to plain JSON on the subscription's delivery path.
-//! - Publishing: [`SchemaFrame`], added app-wide with `RustStream::publish_layer`, frames
-//!   outgoing JSON for the wire by the destination subject's registered flavor.
+//! **The codec** puts the schema where a serializer belongs: [`AvroCodec`](crate::avro::AvroCodec)
+//! holds it, the handler takes the model and returns the model, and nothing about the wire
+//! appears in a signature. A JSON document under the envelope is the core's own `JsonCodec`
+//! inside [`SchemaFramed`]. The async half is [`SchemaPrefetch`], attached with
+//! [`KafkaBroker::schema_prefetch`](crate::KafkaBroker::schema_prefetch).
 //!
-//! [`SchemaRegistry`] is the shared async client both sides resolve and cache schemas
-//! through. Registering schemas stays an explicit step ([`register`](SchemaRegistry::register)
-//! and the typed shorthands), mirroring Confluent's production guidance of not
-//! auto-registering schemas from producers.
+//! **The transcode** converts at the broker's edges, so handlers keep plain serde models on the
+//! default codec and never see the wire:
+//! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) rewrites a framed
+//! delivery to plain JSON on the way in, and [`SchemaFrame`], added app-wide with
+//! `RustStream::publish_layer`, frames an outgoing JSON payload in the destination subject's
+//! registered flavor. It is the compatibility path, for a service that must not carry generated
+//! types or Avro-derived models, and it costs a JSON hop per message and loses schema
+//! resolution.
+//!
+//! The two do not mix on one broker: a broker carrying
+//! [`schema_registry`](crate::KafkaBroker::schema_registry) transcodes every subscription it
+//! opens, so a codec on it would be handed JSON.
+//!
+//! Protobuf is not a third choice. A `prost` message is not a serde type, so it can never reach
+//! the codec position; it serializes itself and the publish path puts the envelope on. That path
+//! is [`protobuf`](crate::protobuf).
+//!
+//! | | Avro | JSON | Protobuf |
+//! | --- | --- | --- | --- |
+//! | Codec | [`AvroCodec`](crate::avro::AvroCodec) | [`SchemaFramed`] over `JsonCodec` | not possible |
+//! | Transcode | yes | yes | yes |
+//! | Schema read off the type | `AvroSchema` | [`JsonSchema`] | no |
+//! | Subject registered from the type | [`register_avro`](SchemaRegistry::register_avro) | [`register_json`](SchemaRegistry::register_json) | no |
+//! | Schema references (`import`) | not applicable | not applicable | not resolved |
+//!
+//! The Protobuf column is two different things. "Not possible" is the type system: `Codec::encode`
+//! bounds its value by `Serialize`, which a generated message does not implement, so the envelope
+//! is its only home and the prefetch machinery that hangs off the codec position has nothing to
+//! warm. The two blanks below it are real gaps: a `.proto` is written twice, once for
+//! `prost-build` and once as a string to register, and an import outside the well-known types is
+//! out of reach.
+//!
+//! # Registration is the publish side
+//!
+//! [`register`](crate::avro::AvroCodec::register) says which subject a type's values are framed
+//! under, keyed by the name serde gives that type. Decoding needs none of it - the writer schema
+//! comes off the envelope's id - so one codec serves a whole scope and decodes types it was never
+//! told about, and two registered types sharing a serde name are rejected before the app runs.
+//! A type nobody registered is an error at its first publish, naming the type and listing the
+//! ones the codec does carry.
+//!
+//! ```
+//! # #[cfg(all(feature = "avro", feature = "json"))]
+//! # mod demo {
+//! use apache_avro::AvroSchema;
+//! use ruststream_rdkafka::avro::AvroCodec;
+//! use ruststream_rdkafka::prelude::*;
+//! use ruststream_rdkafka::schema_registry::{SchemaPrefetch, SchemaRegistry};
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize, AvroSchema)]
+//! pub struct Order {
+//!     pub id: i64,
+//! }
+//!
+//! #[derive(Serialize, Deserialize, AvroSchema, Outgoing)]
+//! #[outgoing(name = "confirmations")]
+//! pub struct Confirmation {
+//!     pub id: i64,
+//! }
+//!
+//! #[subscriber("orders", publish)]
+//! async fn confirm(order: &Order) -> Confirmation {
+//!     Confirmation { id: order.id }
+//! }
+//!
+//! pub fn app() -> RustStream {
+//!     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+//!     let codec = AvroCodec::registry(&prefetch).register::<Confirmation>("confirmations-value");
+//!     let broker = KafkaBroker::new(["localhost:9092"])
+//!         .default_group("orders-svc")
+//!         .schema_prefetch(prefetch);
+//!     RustStream::new(AppInfo::new("orders", "0.1.0"))
+//!         .with_broker_codec(broker, codec, |b| {
+//!             b.include(confirm);
+//!         })
+//! }
+//! # }
+//! # fn main() {}
+//! ```
+//!
+//! The registry is named twice in an app and never at a mount site: once building the prefetch,
+//! once attaching it. Every codec is minted from that one prefetch, so what varies per mount is
+//! the subject - and the core's codec cascade does the scoping, a router inside a broker scope
+//! overriding it for the handlers it carries. That override is how a handler gets Avro's own
+//! schema resolution ([`resolve_onto`](crate::avro::AvroCodec::resolve_onto) applies to every
+//! delivery its codec decodes, so a codec carrying one reads a single type).
+//!
+//! # When the subject is gone
+//!
+//! [`MissingSubject`] is the policy, and its default is [`Refuse`](MissingSubject::Refuse):
+//! creating subjects in someone else's registry as a side effect of starting up is worse than not
+//! starting. [`AutoRegister`](MissingSubject::AutoRegister) puts the type's own schema back and
+//! warns, [`PublishUnframed`](MissingSubject::PublishUnframed) writes the bare datum and warns.
+//! [`check_compatibility`](SchemaPrefetch::check_compatibility) is on by default: at `connect`
+//! each registered type's schema is checked against the version its subject holds, so a model
+//! that has drifted stops the app with the registry's own account of the difference.
+//!
+//! The transcoding layer is deliberately lenient where the codec is not. It resolves a subject
+//! for every topic the app publishes to, most of which are not registry-backed, so a subject the
+//! registry does not know means "plain topic" there and the payload goes out untouched. Naming a
+//! codec declares its topic registry-backed, so an absent subject there is an anomaly.
+//!
+//! A soft delete and a permanent delete differ, and this was checked against a live registry: a
+//! soft delete hides the subject while `GET /schemas/ids/{id}` still answers, so consumers keep
+//! working and only the producer is stuck; a permanent delete removes the id, and then nothing
+//! decodes a record naming it. Re-registering afterwards mints a new id.
+//!
+//! # The client and what it remembers
+//!
+//! [`SchemaRegistry::new`] records the URL and sends no request until the first lookup. Basic and
+//! bearer authentication are set on the client, HTTPS goes through rustls, and every clone reads
+//! and writes one cache, so a schema or a subject is fetched once per process. Every request
+//! carries a deadline, ten seconds unless
+//! [`request_timeout`](SchemaRegistry::request_timeout) says otherwise, which is what bounds a
+//! registry that accepts the connection and then goes silent.
+//!
+//! [`SchemaCachePolicy`] follows a property of the registry rather than a preference: a schema id
+//! is immutable, assigned by content, while a subject's latest version moves whenever someone
+//! registers one. So id-keyed entries take a bound and no expiry, subject-keyed entries an expiry
+//! and no bound. [`Disabled`](SchemaCachePolicy::Disabled) turns the cache off, with the
+//! consequence that the synchronous codecs, which read the cache and cannot await a miss, cannot
+//! work under it.
+//!
+//! Registering stays an explicit step ([`register`](SchemaRegistry::register) and the typed
+//! shorthands), mirroring Confluent's guidance of not auto-registering from producers.
+//! [`warm`](SchemaRegistry::warm) registers nothing: it resolves an existing subject and caches
+//! it, for deployments where producers must not create schemas.
 
 mod cache;
 mod client;
