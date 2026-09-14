@@ -12,6 +12,8 @@ use std::future::{Future, ready};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::{
     HeaderMap, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
@@ -304,6 +306,12 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaTransactionalPublish {
             self,
         )))
     }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
 }
 
 /// The in-process stand-in for [`TransactionalPartitions`](crate::TransactionalPartitions).
@@ -449,5 +457,11 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaPartitionedPublish {
             template: self.template().clone(),
             lanes: Arc::new(Mutex::new(HashMap::new())),
         }))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }

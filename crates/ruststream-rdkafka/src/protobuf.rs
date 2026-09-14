@@ -35,6 +35,8 @@ use std::sync::{Arc, Mutex};
 
 use prost::Message as _;
 use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
 use ruststream::{OutgoingMessage, PairError, PublishPolicy, Publisher};
 
@@ -533,7 +535,7 @@ impl KafkaFramedPublish {
     /// puts the schema id in the payload, and the naming strategy says which subject it was
     /// registered under.
     #[cfg(feature = "asyncapi")]
-    pub(crate) fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+    pub(crate) fn message_bindings(&self) -> Bindings {
         crate::bindings::message(self.framing.strategy())
     }
 }
@@ -548,8 +550,15 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaFramedPublish {
         ))
     }
 
+    /// The destination topic of this publish, which is what the channel stands for.
     #[cfg(feature = "asyncapi")]
-    fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
+
+    /// The framing says where the schema id lives, which the destination does not change.
+    #[cfg(feature = "asyncapi")]
+    fn message_bindings(&self, _channel: &str) -> Bindings {
         Self::message_bindings(self)
     }
 }

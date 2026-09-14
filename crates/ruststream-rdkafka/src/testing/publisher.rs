@@ -4,6 +4,8 @@ use std::future::{Future, ready};
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::{DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher};
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
@@ -36,6 +38,12 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaPublish {
     ) -> impl Future<Output = Result<Self::Live, PairError>> {
         ready(Ok(connected.publisher(self)))
     }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
 }
 
 impl DefaultPublish for ConnectedKafkaTestBroker {
@@ -60,8 +68,15 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPub
         )))
     }
 
+    /// The destination topic of this publish, which is what the channel stands for.
     #[cfg(feature = "asyncapi")]
-    fn message_bindings(&self) -> ruststream::asyncapi::Bindings {
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
+
+    /// The framing says where the schema id lives, which the destination does not change.
+    #[cfg(feature = "asyncapi")]
+    fn message_bindings(&self, _channel: &str) -> Bindings {
         Self::message_bindings(self)
     }
 }

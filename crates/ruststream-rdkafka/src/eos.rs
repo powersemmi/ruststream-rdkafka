@@ -16,6 +16,8 @@ use std::time::Duration;
 use futures::future::select_all;
 use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
     OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
@@ -223,6 +225,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaEosPublish {
         let interval = self.interval;
         let publisher = self.transactional.pair(connected).await?;
         Ok(EosPipeline::new(publisher, interval))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 

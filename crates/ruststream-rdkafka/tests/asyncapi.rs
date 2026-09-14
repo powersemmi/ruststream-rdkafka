@@ -4,10 +4,12 @@
 
 use ruststream::asyncapi::build_spec;
 use ruststream::conformance::harness;
-use ruststream::runtime::{AppInfo, HandlerOutcome, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::{KafkaBroker, KafkaPartitions, KafkaTopic, KafkaTopics, SchemaRegistry};
-use serde::Deserialize;
+use ruststream::runtime::{AppInfo, HandlerOutcome, Out, RustStream};
+use ruststream::{OutSlot, Outgoing, Publisher, subscriber};
+use ruststream_rdkafka::{
+    KafkaBroker, KafkaPartitions, KafkaPublish, KafkaTopic, KafkaTopics, SchemaRegistry,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +104,59 @@ fn a_partition_reader_describes_the_topic_it_reads() {
     );
 }
 
+/// A reply that leaves its destination open, so the mount site's `publish("dest")` clause names
+/// the topic it goes to.
+#[derive(Debug, Serialize, Outgoing)]
+struct Confirmation {
+    id: u64,
+}
+
+/// A slot message that names its own topic, which is then the slot's destination.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "shipments")]
+struct Shipment {
+    id: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(Shipment)]
+struct Shipments;
+
+#[subscriber("placed", publish("confirmations"))]
+async fn place(order: &Order, Out(_shipments): Out<impl Publisher, Shipments>) -> Confirmation {
+    Confirmation { id: order.id }
+}
+
+/// A publish policy holds producer settings and never a topic, so the topic a published channel
+/// stands for is the destination the mount site resolved: the `publish("dest")` clause for the
+/// reply, the message's own `#[outgoing(name)]` for the slot.
+#[test]
+fn a_published_channel_reports_the_topic_it_publishes_to() {
+    let app = RustStream::new(AppInfo::new("orders", "1.0.0")).with_broker_labeled(
+        "kafka",
+        KafkaBroker::new(["broker-1:9092"]),
+        |b| {
+            b.include(place)
+                .out_reply(KafkaPublish::default())
+                .out(Shipments, KafkaPublish::default())
+                .build();
+        },
+    );
+    let json = build_spec(&app)
+        .to_json()
+        .expect("the document must serialize");
+    let value: Value = serde_json::from_str(&json).expect("the document must be valid JSON");
+
+    assert_eq!(
+        value["channels"]["confirmations"]["bindings"]["kafka"]["topic"],
+        "confirmations",
+    );
+    assert_eq!(
+        value["channels"]["shipments"]["bindings"]["kafka"]["topic"],
+        "shipments",
+    );
+}
+
 /// The Kafka protocol negotiates its version per API key between client and cluster, so no one
 /// number describes what clients speak; the field stays out rather than claiming a version.
 #[test]
@@ -141,15 +196,21 @@ fn the_description_carries_no_credentials() {
 #[test]
 fn a_registry_backed_publisher_says_where_its_schema_id_lives() {
     use ruststream::PublishPolicy;
-    use ruststream_rdkafka::{ConnectedKafkaBroker, KafkaPublish, SubjectStrategy};
+    use ruststream_rdkafka::{ConnectedKafkaBroker, SubjectStrategy};
 
     let policy = KafkaPublish::framed(&SchemaRegistry::new("http://registry.internal:8081"))
         .subject_strategy(SubjectStrategy::TopicRecordName);
-    let bindings = PublishPolicy::<ConnectedKafkaBroker>::message_bindings(&policy).expect_kafka();
+    let bindings =
+        PublishPolicy::<ConnectedKafkaBroker>::message_bindings(&policy, "orders").expect_kafka();
 
     assert_eq!(bindings["schemaIdLocation"], "payload");
     assert_eq!(bindings["schemaIdPayloadEncoding"], "confluent");
     assert_eq!(bindings["schemaLookupStrategy"], "TopicRecordNameStrategy");
+
+    // The framing is the same wherever the policy is mounted; the channel is what moves.
+    let channel =
+        PublishPolicy::<ConnectedKafkaBroker>::channel_bindings(&policy, "orders").expect_kafka();
+    assert_eq!(channel["topic"], "orders");
 }
 
 /// Reads one binding set back as JSON, the way the document carries it.

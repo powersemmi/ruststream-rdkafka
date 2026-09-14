@@ -10,6 +10,8 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{OutPipeline, PublishBuilder, PublishSink, Slot};
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
@@ -221,6 +223,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaPublish {
     ) -> impl Future<Output = Result<Self::Live, PairError>> {
         ready(Ok(connected.publisher(self)))
     }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
 }
 
 impl DefaultPublish for ConnectedKafkaBroker {
@@ -409,6 +417,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaTransactionalPublish {
             .transactional_publisher(self)
             .await
             .map_err(PairError::new)
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 
@@ -738,6 +752,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
                 publishers: Mutex::new(HashMap::new()),
             }),
         }))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 
