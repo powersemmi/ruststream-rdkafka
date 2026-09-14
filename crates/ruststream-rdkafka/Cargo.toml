@@ -79,10 +79,11 @@ wiremock = "0.6"
 schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }
 
 # The crate overview links into the feature-gated modules (`schema_registry`, `avro`,
-# `protobuf`, `testing`), so a page built on the default features would have nowhere to send a
-# reader. That is what carries the vendored TLS backends onto the docs.rs builder with it.
+# `protobuf`, `testing`, the document), so a page built on the default features would have
+# nowhere to send a reader. The list stops short of the TLS/SASL backends: the vendored
+# librdkafka build is what docs.rs shies away from, and the API surface is identical either way.
 [package.metadata.docs.rs]
-all-features = true
+features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 
 # The kafka_* examples are the docs-site snippet sources; keep them runnable and snippet-checked.
 [[example]]
