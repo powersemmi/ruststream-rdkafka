@@ -27,8 +27,11 @@ test-brokers: brokers-up
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'just brokers-down' EXIT
+    # This recipe starts the stand, so a gated test that skips itself here is a fault, not a
+    # developer without a cluster.
     KAFKA_TEST_URL=127.0.0.1:9092 \
     SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+    RUSTSTREAM_REQUIRE_LIVE=1 \
         cargo test --workspace --all-features -- --test-threads=1
 
 fmt:

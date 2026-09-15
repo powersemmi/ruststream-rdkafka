@@ -47,8 +47,10 @@ use tokio::sync::Notify;
 
 const WAIT: Duration = Duration::from_secs(15);
 
+mod live;
+
 fn kafka_url() -> Option<String> {
-    std::env::var("KAFKA_TEST_URL").ok()
+    live::url("KAFKA_TEST_URL")
 }
 
 /// Per-run unique names so reruns never see another run's topics or committed positions.

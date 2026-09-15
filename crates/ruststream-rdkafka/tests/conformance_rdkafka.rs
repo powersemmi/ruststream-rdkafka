@@ -14,8 +14,10 @@ use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPublish, KafkaTopic, StartOff
 use tokio::runtime::Handle;
 use tokio::task;
 
+mod live;
+
 fn kafka_url() -> Option<String> {
-    std::env::var("KAFKA_TEST_URL").ok()
+    live::url("KAFKA_TEST_URL")
 }
 
 /// Creates `topic` on the cluster, accepting a topic that is already there.

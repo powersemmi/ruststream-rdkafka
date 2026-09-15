@@ -166,15 +166,20 @@ jobs:
       - name: Start the broker stand
         run: docker compose -f docker-compose.test.yml up -d --wait
 
+      # RUSTSTREAM_REQUIRE_LIVE turns a suite that finds no address into a failure: this job
+      # started the stand, so a test that skips past it would report ok without asserting
+      # anything.
       - name: Run Kafka integration tests
         env:
           KAFKA_TEST_URL: 127.0.0.1:9092
+          RUSTSTREAM_REQUIRE_LIVE: "1"
         run: cargo test -p ruststream-rdkafka --test integration_rdkafka -- --test-threads=1
 
       # run_suite in-process plus lifecycle and the commit-mode semantics against the live node.
       - name: Run Kafka conformance suite
         env:
           KAFKA_TEST_URL: 127.0.0.1:9092
+          RUSTSTREAM_REQUIRE_LIVE: "1"
         run: cargo test -p ruststream-rdkafka --features testing --test conformance_rdkafka -- --test-threads=1
 
       # The registry suites: the client against a real registry, and the framing middleware end
@@ -184,21 +189,12 @@ jobs:
         env:
           KAFKA_TEST_URL: 127.0.0.1:9092
           SCHEMA_REGISTRY_TEST_URL: http://127.0.0.1:8081
+          RUSTSTREAM_REQUIRE_LIVE: "1"
         run: |
-          cargo test -p ruststream-rdkafka --features schema-registry,avro,protobuf \
+          cargo test -p ruststream-rdkafka --features schema-registry,avro,protobuf,testing \
             --test schema_registry --test avro_transcode --test protobuf_transcode \
+            --test protobuf_lanes --test codec_registry \
             -- --test-threads=1
-
-      # A live test whose URL is unset returns before it asserts anything and still reports ok,
-      # so a green step is no proof that the suites ran. The registry starts empty, and every
-      # suite above registers a subject in it, so its subject list is that proof.
-      - name: Assert the registry suites reached the registry
-        env:
-          SCHEMA_REGISTRY_TEST_URL: http://127.0.0.1:8081
-        run: |
-          subjects=$(curl -sf "$SCHEMA_REGISTRY_TEST_URL/subjects")
-          echo "subjects registered by the suites: $subjects"
-          test "$subjects" != "[]"
 
       - name: Stop the broker stand
         if: always()

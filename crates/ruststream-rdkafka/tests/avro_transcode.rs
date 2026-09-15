@@ -18,6 +18,8 @@ use ruststream_rdkafka::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+mod live;
+
 /// The fixed reply topic (the macro's `publish(..)` takes a string literal). Runs share it:
 /// each pins its own uniquely-named subject on the `SchemaFrame`, so its messages carry a
 /// schema id no other run has, and the probe filters deliveries by a marker id range.
@@ -84,10 +86,10 @@ async fn live_avro_middleware_end_to_end() {
     const COUNT: usize = 3;
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    let Some(registry) = std::env::var("SCHEMA_REGISTRY_TEST_URL").ok() else {
+    let Some(registry) = live::url("SCHEMA_REGISTRY_TEST_URL") else {
         return;
     };
-    let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+    let Some(kafka) = live::url("KAFKA_TEST_URL") else {
         return;
     };
     let run = format!(

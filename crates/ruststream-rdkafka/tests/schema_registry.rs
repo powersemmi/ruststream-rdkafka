@@ -391,8 +391,10 @@ async fn unknown_ids_and_subjects_error_clearly() {
 
 // --- live tests: a real registry (and, for the prefetch path, a real Kafka) ---
 
+mod live;
+
 fn registry_url() -> Option<String> {
-    std::env::var("SCHEMA_REGISTRY_TEST_URL").ok()
+    live::url("SCHEMA_REGISTRY_TEST_URL")
 }
 
 fn unique(base: &str) -> String {
@@ -490,7 +492,7 @@ async fn live_json_frame_and_transcode_end_to_end() {
     let Some(registry) = registry_url() else {
         return;
     };
-    let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+    let Some(kafka) = live::url("KAFKA_TEST_URL") else {
         return;
     };
     let trigger = unique("sr-json-trigger");

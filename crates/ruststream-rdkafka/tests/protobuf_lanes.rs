@@ -14,6 +14,8 @@ use ruststream::{IncomingMessage, Subscriber};
 use ruststream_rdkafka::{ConnectedKafkaBroker, KafkaTopic, StartOffset};
 use serde::Deserialize;
 
+mod live;
+
 /// What the transcoding consumer sees: the same shape as plain JSON.
 #[derive(Debug, PartialEq, Deserialize)]
 struct ConfirmationJson {
@@ -218,10 +220,10 @@ message Confirmation {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_a_plain_protobuf_handler_reads_and_writes_the_confluent_wire() {
-        let Some(registry) = std::env::var("SCHEMA_REGISTRY_TEST_URL").ok() else {
+        let Some(registry) = crate::live::url("SCHEMA_REGISTRY_TEST_URL") else {
             return;
         };
-        let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+        let Some(kafka) = crate::live::url("KAFKA_TEST_URL") else {
             return;
         };
         let trigger = unique("proto-plain-trigger");
@@ -504,10 +506,10 @@ message Confirmation {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_a_returned_protobuf_reply_lands_framed() {
-        let Some(registry_url) = std::env::var("SCHEMA_REGISTRY_TEST_URL").ok() else {
+        let Some(registry_url) = crate::live::url("SCHEMA_REGISTRY_TEST_URL") else {
             return;
         };
-        let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+        let Some(kafka) = crate::live::url("KAFKA_TEST_URL") else {
             return;
         };
         let trigger = unique("proto-reply-trigger");

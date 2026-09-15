@@ -119,10 +119,13 @@ fn unique(base: &str) -> String {
     )
 }
 
-fn live() -> Option<(String, String)> {
+mod live;
+
+/// The registry and cluster addresses, or `None` to skip.
+fn live_urls() -> Option<(String, String)> {
     Some((
-        std::env::var("SCHEMA_REGISTRY_TEST_URL").ok()?,
-        std::env::var("KAFKA_TEST_URL").ok()?,
+        live::url("SCHEMA_REGISTRY_TEST_URL")?,
+        live::url("KAFKA_TEST_URL")?,
     ))
 }
 
@@ -173,7 +176,7 @@ async fn first_payload(broker: &ConnectedKafkaBroker, topic: &str) -> Vec<u8> {
 /// version 1 of a subject, read by a service whose model is version 2.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_avro_registry_codec_reads_an_older_writer() {
-    let Some((registry, kafka)) = live() else {
+    let Some((registry, kafka)) = live_urls() else {
         return;
     };
     let topic = unique("codec-avro");
@@ -252,7 +255,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
 /// The Avro local codec: one pinned schema, a bare datum on the wire, and no registry at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_avro_local_codec_puts_a_bare_datum_on_the_wire() {
-    let Some((_, kafka)) = live() else {
+    let Some((_, kafka)) = live_urls() else {
         return;
     };
     let topic = unique("codec-avro-local");
@@ -282,7 +285,7 @@ async fn live_avro_local_codec_puts_a_bare_datum_on_the_wire() {
 /// by a consumer whose registry client starts cold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_json_registry_codec_round_trips_through_the_envelope() {
-    let Some((registry, kafka)) = live() else {
+    let Some((registry, kafka)) = live_urls() else {
         return;
     };
     let topic = unique("codec-json");
@@ -375,7 +378,7 @@ struct JsonOrderSchema {
 /// stuck; a permanent delete takes the id too, and then no policy here helps a consumer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_missing_subject_policies_do_what_they_say() {
-    let Some((registry, kafka)) = live() else {
+    let Some((registry, kafka)) = live_urls() else {
         return;
     };
     let subject = unique("codec-missing");
@@ -443,7 +446,7 @@ struct Drifted {
 /// connect, with the registry's own account of the difference in the error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_a_drifted_model_is_caught_at_connect() {
-    let Some((registry, kafka)) = live() else {
+    let Some((registry, kafka)) = live_urls() else {
         return;
     };
     let subject = unique("codec-drift");
