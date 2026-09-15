@@ -212,7 +212,9 @@ Kafka keeps the log, so a subscription can be moved through it. [`KafkaPosition:
 [`timestamp`](KafkaPosition::timestamp) (epoch milliseconds, resolved per partition) are the
 positions. `start_at(position)` at the mount site opens the subscription there on every
 startup, whatever the group committed before: the position lands on the first assignment the
-group hands over, ahead of its first record. A handler repositions the running subscription
+group hands over, ahead of its first record. Under [`Assignment::CooperativeSticky`] that first
+assignment may be a part of the group's share, and partitions arriving in a later increment are
+not repositioned. A handler repositions the running subscription
 through the [`SeekHandle`](context::keys::SeekHandle) context key, reading where it currently
 sits from [`Position`](context::keys::Position).
 
@@ -587,9 +589,12 @@ same reason. [`testing`] names each gap, and the live suites cover them against 
   three default to this crate's own values rather than a librdkafka property.
 - Passthroughs. `config(key, value)` on the broker, the descriptor and
   `producer_config(key, value)` on the broker reach every property not surfaced as a typed
-  option. A descriptor's passthrough is applied last, so it wins over the typed options, and
-  setting a key a commit mode relies on (`enable.auto.offset.store`) changes what that mode
-  does.
+  option. A descriptor's passthrough is applied last, so it wins over the typed options - except
+  over a property the subscription's [`Commit`] mode owns (`enable.auto.offset.store`,
+  `enable.auto.commit`). Setting one of those under [`Commit::Tracked`] or
+  [`Commit::Transactional`] would leave the committed position to librdkafka while every ack
+  decided nothing, so the subscription refuses to open and the error names the property and the
+  mode. [`Commit::Auto`] owns neither and takes both.
 - Known gaps. There is no request/reply capability and no owned transaction, for the Kafka
   reasons above. The registry paths do not resolve schema references, so a `.proto` importing
   anything outside the well-known types is out of reach, and a Protobuf schema cannot be derived

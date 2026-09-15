@@ -3129,49 +3129,48 @@ async fn the_group_settles_on_the_assignment_strategy_the_descriptor_named() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_descriptor_passthrough_wins_over_the_commit_mode_it_clashes_with() {
+async fn a_passthrough_that_would_undo_the_commit_mode_is_refused() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("store-clash");
     let group = unique("group");
     create_topic(&url, &topic, 1).await;
     let broker = connected_broker(&url).await;
 
-    publish(&broker, &topic, b"unsettled").await;
-    {
-        // `Commit::Tracked` switches librdkafka's own offset store off so that an ack decides
-        // the position. The descriptor's raw passthrough is applied after the typed options, so
-        // putting the store back takes the position away again: this delivery is never settled,
-        // and the group commits past it anyway.
-        let mut subscriber = broker
-            .subscribe_with(tracked(&topic, &group).config("enable.auto.offset.store", "true"))
+    // Taking librdkafka's offset store back would leave the position to it while every ack
+    // decided nothing: at-least-once would be gone and nothing would say so.
+    for property in ["enable.auto.offset.store", "enable.auto.commit"] {
+        let err = broker
+            .subscribe_with(tracked(&topic, &group).config(property, "true"))
             .await
-            .expect("subscribe");
-        let mut stream = Box::pin(subscriber.stream());
-        let msg = next_message(&mut stream).await;
-        assert_eq!(msg.payload(), b"unsettled");
-        msg.nack(true)
-            .await
-            .expect("the requeue asks for a redelivery");
+            .expect_err("a passthrough over the commit mode's own property must be refused");
+        let message = err.to_string();
+        assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err:?}");
+        assert!(
+            message.contains(property) && message.contains("Commit::Tracked"),
+            "the error must name the property and the mode, got: {message}",
+        );
     }
 
-    await_committed_offset(&url, &group, &topic, 0, 1);
-
-    publish(&broker, &topic, b"next").await;
-    let mut resumed = broker
-        .subscribe_with(tracked(&topic, &group))
+    // Commit::Auto leaves the position to librdkafka anyway, so there the passthrough is the
+    // escape hatch it is documented as, and the subscription opens.
+    let mut subscriber = broker
+        .subscribe_with(
+            KafkaTopic::new(&topic)
+                .group(&group)
+                .start(StartOffset::Earliest)
+                .config("enable.auto.offset.store", "true"),
+        )
         .await
-        .expect("resubscribe");
-    let mut stream = Box::pin(resumed.stream());
+        .expect("Commit::Auto owns neither property");
+
+    publish(&broker, &topic, b"auto").await;
+    let mut stream = Box::pin(subscriber.stream());
     let msg = next_message(&mut stream).await;
-    assert_eq!(
-        msg.payload(),
-        b"next",
-        "the passthrough owns the position, so an unsettled delivery is committed past",
-    );
-    msg.ack().await.expect("ack");
+    assert_eq!(msg.payload(), b"auto");
+    msg.ack().await.expect("advisory ack");
 
     drop(stream);
-    drop(resumed);
+    drop(subscriber);
     broker.shutdown().await.expect("shutdown");
 }
 

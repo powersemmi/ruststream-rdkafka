@@ -87,6 +87,9 @@ impl KafkaPartitions {
 
     /// Raw librdkafka consumer property passthrough, applied last (it wins over the typed
     /// options and the broker-wide config).
+    ///
+    /// A property the subscription's [`Commit`] mode owns is the exception; see
+    /// [`KafkaTopic::config`](crate::KafkaTopic::config).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.settings.config.push((key.into(), value.into()));
@@ -129,6 +132,7 @@ impl KafkaPartitions {
                 self.topic,
             )));
         }
+        super::reject_commit_mode_clash(&self.topic, &self.settings.commit, &self.settings.config)?;
         Ok(SubscriptionPlan {
             name: self.topic.clone(),
             reader: Reader::Assigned {

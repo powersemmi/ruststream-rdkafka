@@ -106,6 +106,13 @@ impl KafkaTopic {
 
     /// Raw librdkafka consumer property passthrough for anything not surfaced as a typed
     /// option, applied last (it wins over the typed options and the broker-wide config).
+    ///
+    /// The exception is a property the subscription's [`Commit`] mode owns
+    /// (`enable.auto.offset.store`, `enable.auto.commit`) under
+    /// [`Commit::Tracked`](Commit::Tracked) or
+    /// [`Commit::Transactional`](Commit::Transactional): taking it back would leave the
+    /// committed position to librdkafka while every ack decided nothing, so the subscription
+    /// refuses to open instead. [`Commit::Auto`](Commit::Auto) owns neither and takes both.
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.settings.config.push((key.into(), value.into()));
@@ -135,6 +142,7 @@ impl KafkaTopic {
     fn into_plan(self) -> Result<SubscriptionPlan, KafkaError> {
         super::reject_empty(&self.topic)?;
         super::reject_pattern(&self.topic, "`KafkaTopic`")?;
+        super::reject_commit_mode_clash(&self.topic, &self.settings.commit, &self.settings.config)?;
         Ok(SubscriptionPlan {
             name: self.topic.clone(),
             reader: Reader::Subscribed(vec![self.topic]),

@@ -172,6 +172,9 @@ impl KafkaTopics {
 
     /// Raw librdkafka consumer property passthrough, applied last (it wins over the typed
     /// options and the broker-wide config).
+    ///
+    /// A property the subscription's [`Commit`] mode owns is the exception; see
+    /// [`KafkaTopic::config`](crate::KafkaTopic::config).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.settings.config.push((key.into(), value.into()));
@@ -206,6 +209,7 @@ impl KafkaTopics {
             entry.validate()?;
         }
         let name = self.name;
+        super::reject_commit_mode_clash(&name, &self.settings.commit, &self.settings.config)?;
         let names = self
             .entries
             .into_iter()

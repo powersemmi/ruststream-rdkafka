@@ -157,6 +157,46 @@ pub(crate) fn reject_pattern(name: &str, form: &str) -> Result<(), KafkaError> {
     Ok(())
 }
 
+/// The librdkafka properties a commit mode decides for itself.
+///
+/// [`Commit::Tracked`] and [`Commit::Transactional`] settle by a position this crate computes,
+/// and both of these say who owns that position. A passthrough setting one does not tune the
+/// mode, it undoes it: the acks keep running and decide nothing, which is a silent loss of the
+/// guarantee the mode was chosen for.
+const MODE_OWNED_PROPERTIES: [&str; 2] = ["enable.auto.offset.store", "enable.auto.commit"];
+
+/// Rejects a passthrough that would take a commit mode's own property away from it.
+///
+/// The passthrough is applied last and wins over every typed option, which is what makes it an
+/// escape hatch - and what would make this particular clash invisible. [`Commit::Auto`] leaves
+/// the position to librdkafka and owns neither property, so there the passthrough keeps winning.
+pub(crate) fn reject_commit_mode_clash(
+    name: &str,
+    commit: &Commit,
+    config: &[(String, String)],
+) -> Result<(), KafkaError> {
+    let mode = match commit {
+        Commit::Auto => return Ok(()),
+        Commit::Tracked => "`Commit::Tracked`",
+        Commit::Transactional(_) => "`Commit::Transactional`",
+    };
+    for (key, value) in config {
+        let Some(owned) = MODE_OWNED_PROPERTIES
+            .iter()
+            .find(|owned| key.eq_ignore_ascii_case(owned))
+        else {
+            continue;
+        };
+        return Err(KafkaError::InvalidOptions(format!(
+            "subscription to {name:?} sets {owned}={value:?} through its config passthrough, \
+             and {mode} owns that property: the passthrough would leave the committed position \
+             to librdkafka while every ack decided nothing. Drop it, or take `Commit::Auto`, \
+             which owns neither"
+        )));
+    }
+    Ok(())
+}
+
 /// Rejects an empty topic name, whichever form named it.
 pub(crate) fn reject_empty(name: &str) -> Result<(), KafkaError> {
     if name.is_empty() {

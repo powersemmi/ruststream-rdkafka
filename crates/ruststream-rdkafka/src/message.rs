@@ -212,10 +212,11 @@ impl IncomingMessage for KafkaMessage {
     ///
     /// Returns [`AckError::Broker`] when librdkafka refuses the stored position, which is a
     /// client-state failure rather than a network one - the partition is no longer this
-    /// consumer's, say. A descriptor passthrough that takes the offset store back
-    /// (`enable.auto.offset.store = "true"` under [`Commit::Tracked`](crate::Commit::Tracked))
-    /// is not one of those cases: librdkafka accepts the store and keeps owning the position,
-    /// so the subscription silently settles the way [`Commit::Auto`](crate::Commit::Auto) does.
+    /// consumer's, say. A descriptor passthrough that would take the offset store back is not
+    /// one of those cases and never reaches here: librdkafka would accept the store and keep
+    /// owning the position, so [`Commit::Tracked`](crate::Commit::Tracked) and
+    /// [`Commit::Transactional`](crate::Commit::Transactional) refuse such a subscription at
+    /// startup instead.
     ///
     /// # Cancel safety
     ///
