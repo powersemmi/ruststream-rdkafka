@@ -2955,3 +2955,222 @@ async fn a_transaction_is_invisible_until_it_commits_and_an_abort_discards_it() 
     drop(reader);
     broker.shutdown().await.expect("shutdown");
 }
+
+/// Polls the cluster until the group's committed offset reaches `expected`, bounded by [`WAIT`].
+///
+/// A consumer flushes its stored position when it closes, and the close runs on librdkafka's own
+/// threads, so the position lands shortly after the subscriber drops.
+fn await_committed_offset(url: &str, group: &str, topic: &str, partition: i32, expected: i64) {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let found = committed_offset(url, group, topic, partition);
+        if found == Some(expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "group {group} committed {found:?} for {topic}[{partition}], expected {expected}",
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_auto_commit_a_requeue_brings_nothing_back() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("auto-requeue");
+    let group = unique("group");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"first").await;
+    {
+        let mut subscriber = broker
+            .subscribe_with(
+                KafkaTopic::new(&topic)
+                    .group(&group)
+                    .start(StartOffset::Earliest),
+            )
+            .await
+            .expect("subscribe");
+        let mut stream = Box::pin(subscriber.stream());
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), b"first");
+        msg.nack(true)
+            .await
+            .expect("an advisory nack always succeeds");
+    }
+
+    // librdkafka owns the position under `Commit::Auto`: it stored the offset as the record was
+    // handed over, and the close flushed it, whatever the handler asked for.
+    await_committed_offset(&url, &group, &topic, 0, 1);
+
+    publish(&broker, &topic, b"second").await;
+    let mut resumed = broker
+        .subscribe_with(KafkaTopic::new(&topic).group(&group))
+        .await
+        .expect("resubscribe");
+    let mut stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"second",
+        "under Commit::Auto a requeue is advisory: the record must not come back",
+    );
+    msg.ack().await.expect("advisory ack");
+
+    drop(stream);
+    drop(resumed);
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_group_that_starts_at_the_latest_offset_skips_the_log() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("latest-start");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"before-the-group").await;
+
+    let mut subscriber = broker
+        .subscribe_with(
+            KafkaTopic::new(&topic)
+                .group(unique("group"))
+                .start(StartOffset::Latest)
+                .commit(Commit::Tracked),
+        )
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+
+    // Records published before the group finished joining are legitimately skipped too, so the
+    // test publishes until one lands past the assignment point. What must never arrive is the
+    // record the log already held.
+    let mut received = None;
+    for attempt in 0..20 {
+        publish(&broker, &topic, format!("after-{attempt}").as_bytes()).await;
+        match tokio::time::timeout(Duration::from_secs(1), stream.next()).await {
+            Ok(Some(Ok(msg))) => {
+                received = Some(msg);
+                break;
+            }
+            Ok(Some(Err(err))) => panic!("delivery failed: {err}"),
+            Ok(None) => panic!("stream ended"),
+            Err(_) => {}
+        }
+    }
+    let msg = received.expect("a delivery once the group is assigned");
+    assert!(
+        msg.payload().starts_with(b"after-"),
+        "a Latest start must skip what the log already held, got {:?}",
+        String::from_utf8_lossy(msg.payload()),
+    );
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// The assignment strategy the cluster reports for a live group: the protocol its members
+/// settled on, not the property this client asked for.
+fn group_protocol(url: &str, group: &str) -> Option<String> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .set("group.id", unique("probe"))
+        .create()
+        .expect("probe consumer");
+    let groups = consumer
+        .fetch_group_list(Some(group), Duration::from_secs(10))
+        .expect("group list");
+    groups
+        .groups()
+        .iter()
+        .find(|found| found.name() == group)
+        .map(|found| found.protocol().to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_group_settles_on_the_assignment_strategy_the_descriptor_named() {
+    let Some(url) = kafka_url() else { return };
+    let broker = connected_broker(&url).await;
+
+    for (assignment, protocol) in [
+        (Assignment::Range, "range"),
+        (Assignment::RoundRobin, "roundrobin"),
+        (Assignment::CooperativeSticky, "cooperative-sticky"),
+    ] {
+        let topic = unique("strategy");
+        let group = unique("strategy-group");
+        create_topic(&url, &topic, 2).await;
+
+        let mut subscriber = broker
+            .subscribe_with(tracked(&topic, &group).assignment(assignment))
+            .await
+            .expect("subscribe");
+        let mut stream = Box::pin(subscriber.stream());
+        // A delivery is what proves the group has formed, which is when the cluster can name
+        // the protocol it settled on.
+        publish(&broker, &topic, b"joined").await;
+        let msg = next_message(&mut stream).await;
+        msg.ack().await.expect("ack");
+
+        assert_eq!(
+            group_protocol(&url, &group).as_deref(),
+            Some(protocol),
+            "the cluster must report the strategy {assignment:?} asked for",
+        );
+
+        drop(stream);
+        drop(subscriber);
+    }
+
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_descriptor_passthrough_wins_over_the_commit_mode_it_clashes_with() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("store-clash");
+    let group = unique("group");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"unsettled").await;
+    {
+        // `Commit::Tracked` switches librdkafka's own offset store off so that an ack decides
+        // the position. The descriptor's raw passthrough is applied after the typed options, so
+        // putting the store back takes the position away again: this delivery is never settled,
+        // and the group commits past it anyway.
+        let mut subscriber = broker
+            .subscribe_with(tracked(&topic, &group).config("enable.auto.offset.store", "true"))
+            .await
+            .expect("subscribe");
+        let mut stream = Box::pin(subscriber.stream());
+        let msg = next_message(&mut stream).await;
+        assert_eq!(msg.payload(), b"unsettled");
+        msg.nack(true)
+            .await
+            .expect("the requeue asks for a redelivery");
+    }
+
+    await_committed_offset(&url, &group, &topic, 0, 1);
+
+    publish(&broker, &topic, b"next").await;
+    let mut resumed = broker
+        .subscribe_with(tracked(&topic, &group))
+        .await
+        .expect("resubscribe");
+    let mut stream = Box::pin(resumed.stream());
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"next",
+        "the passthrough owns the position, so an unsettled delivery is committed past",
+    );
+    msg.ack().await.expect("ack");
+
+    drop(stream);
+    drop(resumed);
+    broker.shutdown().await.expect("shutdown");
+}
