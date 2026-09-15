@@ -35,7 +35,7 @@ use ruststream::{
     Positioned, PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
     nonzero,
 };
-use ruststream_rdkafka::context::keys;
+use ruststream_rdkafka::context::{KafkaContext, keys};
 use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
     KafkaEosPublish, KafkaError, KafkaMessage, KafkaOptions, KafkaPartitions, KafkaPosition,
@@ -2431,4 +2431,273 @@ async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
     );
 
     reader.shutdown().await.expect("shutdown");
+}
+
+/// Records the framework retry count of every delivery, so the cap can be read off the sequence.
+#[derive(Clone)]
+struct CapProbe {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+// Kafka holds no record back and counts no deliveries, so a cap is the framework's: each retry is
+// a fresh copy carrying an incremented count, and the delivery that spends the cap is republished
+// to the dead-letter topic instead of coming back once more.
+#[subscriber(
+    KafkaTopic::new(std::env::var("CAP_IN_TOPIC").expect("topic env"))
+        .group("cap-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn spend_the_cap(
+    _order: &OrderPayload,
+    ctx: &mut Context<'_, (), CapProbe>,
+) -> HandlerOutcome {
+    let count = ctx
+        .headers()
+        .get_str(RUNTIME_RETRY_COUNT_HEADER)
+        .map(str::to_owned);
+    ctx.state()
+        .seen
+        .lock()
+        .expect("seen mutex poisoned")
+        .push(count);
+    HandlerOutcome::retry()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_spent_delivery_lands_on_the_dead_letter_topic() {
+    let Some(url) = kafka_url() else { return };
+    let input = unique("cap-in");
+    let dead_letters = unique("cap-dlq");
+    create_topic(&url, &input, 1).await;
+    create_topic(&url, &dead_letters, 1).await;
+    unsafe { std::env::set_var("CAP_IN_TOPIC", &input) };
+
+    let seeder = connected_broker(&url).await;
+    publish(&seeder, &input, br#"{"partition":0,"seq":7}"#).await;
+    seeder.shutdown().await.expect("seeder shutdown");
+
+    let probe = CapProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("cap", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(spend_the_cap)
+                .max_attempts(nonzero!(3u32))
+                .dead_letter(dead_letters.clone());
+        });
+
+    let reader = connected_broker(&url).await;
+    let mut dead = reader
+        .subscribe_with(tracked(&dead_letters, &unique("reader")))
+        .await
+        .expect("subscribe dead letters");
+    let consume = async move {
+        let mut stream = Box::pin(dead.stream());
+        let msg = next_message(&mut stream).await;
+        assert_eq!(
+            msg.payload(),
+            br#"{"partition":0,"seq":7}"#,
+            "the dead letter must carry the payload as it arrived",
+        );
+        assert_eq!(
+            msg.headers().get_str(RUNTIME_RETRY_COUNT_HEADER),
+            Some("3"),
+            "the dead letter must carry the count that spent the cap",
+        );
+        msg.ack().await.expect("ack dead letter");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .is_err(),
+            "a spent delivery is dead-lettered once, not on every later attempt",
+        );
+    };
+    App::run_until(app, consume).await.expect("run");
+
+    let seen = probe.seen.lock().expect("seen mutex poisoned").clone();
+    assert_eq!(
+        seen,
+        vec![None, Some("1".to_owned()), Some("2".to_owned())],
+        "the cap must allow exactly three deliveries, the first included",
+    );
+}
+
+/// Records the framework retry count of every delivery and wakes the test once the copy arrives.
+#[derive(Clone)]
+struct SourceTopicProbe {
+    seen: Arc<Mutex<Vec<Option<String>>>>,
+    done: Arc<Notify>,
+}
+
+// A `KafkaTopics` subscription reads a set no single publish addresses, so the registration says
+// where a retry copy goes. `ToSourceTopic` answers it per delivery: back to the topic this one
+// arrived on.
+#[subscriber(
+    KafkaTopics::new([
+        std::env::var("SRC_EU_TOPIC").expect("topic env"),
+        std::env::var("SRC_US_TOPIC").expect("topic env"),
+    ])
+    .group("src-topic-svc")
+    .start(StartOffset::Earliest)
+    .commit(Commit::Tracked)
+)]
+async fn regional(
+    _order: &OrderPayload,
+    ctx: &mut Context<'_, KafkaContext, SourceTopicProbe>,
+) -> HandlerOutcome {
+    let count = ctx
+        .headers()
+        .get_str(RUNTIME_RETRY_COUNT_HEADER)
+        .map(str::to_owned);
+    let probe = ctx.state().clone();
+    probe
+        .seen
+        .lock()
+        .expect("seen mutex poisoned")
+        .push(count.clone());
+    if count.is_none() {
+        return HandlerOutcome::retry();
+    }
+    probe.done.notify_one();
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
+    let Some(url) = kafka_url() else { return };
+    let eu = unique("orders-eu");
+    let us = unique("orders-us");
+    create_topic(&url, &eu, 1).await;
+    create_topic(&url, &us, 1).await;
+    unsafe {
+        std::env::set_var("SRC_EU_TOPIC", &eu);
+        std::env::set_var("SRC_US_TOPIC", &us);
+    }
+
+    let seeder = connected_broker(&url).await;
+    publish(&seeder, &eu, br#"{"partition":0,"seq":4}"#).await;
+    seeder.shutdown().await.expect("seeder shutdown");
+
+    let probe = SourceTopicProbe {
+        seen: Arc::new(Mutex::new(Vec::new())),
+        done: Arc::new(Notify::new()),
+    };
+    let app_probe = probe.clone();
+    let app = RustStream::new(AppInfo::new("regional", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(regional)
+                .max_attempts(nonzero!(3u32))
+                .out_retry(KafkaPublish::default())
+                .transform(ToSourceTopic);
+        });
+
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("the copy must come back within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+
+    assert_eq!(
+        probe.seen.lock().expect("seen mutex poisoned").clone(),
+        vec![None, Some("1".to_owned())],
+        "the original carries no count and the copy carries the first one",
+    );
+
+    // What the cluster holds: the copy is on the topic the delivery came from, and the other
+    // topic of the set never saw it.
+    let reader = connected_broker(&url).await;
+    let mut eu_reader = reader
+        .subscribe_with(tracked(&eu, &unique("reader")))
+        .await
+        .expect("subscribe eu");
+    {
+        let mut stream = Box::pin(eu_reader.stream());
+        let original = next_message(&mut stream).await;
+        assert_eq!(
+            original.headers().get_str(RUNTIME_RETRY_COUNT_HEADER),
+            None,
+            "the seeded record carries no count",
+        );
+        original.ack().await.expect("ack original");
+        let copy = next_message(&mut stream).await;
+        assert_eq!(copy.topic(), eu, "the copy belongs on its own topic");
+        assert_eq!(
+            copy.headers().get_str(RUNTIME_RETRY_COUNT_HEADER),
+            Some("1"),
+            "the copy carries the incremented count",
+        );
+        assert_eq!(copy.payload(), br#"{"partition":0,"seq":4}"#);
+        copy.ack().await.expect("ack copy");
+    }
+    drop(eu_reader);
+
+    let mut us_reader = reader
+        .subscribe_with(tracked(&us, &unique("reader")))
+        .await
+        .expect("subscribe us");
+    {
+        let mut stream = Box::pin(us_reader.stream());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), stream.next())
+                .await
+                .is_err(),
+            "a copy must not cross to the other topic of the set",
+        );
+    }
+    drop(us_reader);
+    reader.shutdown().await.expect("shutdown");
+}
+
+// The same registration without a named retry destination: a set of topics addresses no copy, so
+// the app must refuse to start rather than lose the copies at run time.
+#[subscriber(
+    KafkaTopics::new([
+        std::env::var("UNADDRESSED_EU_TOPIC").expect("topic env"),
+        std::env::var("UNADDRESSED_US_TOPIC").expect("topic env"),
+    ])
+    .group("unaddressed-svc")
+    .start(StartOffset::Earliest)
+    .commit(Commit::Tracked)
+)]
+async fn unaddressed(_order: &OrderPayload) -> HandlerOutcome {
+    HandlerOutcome::retry()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capped_topic_set_refuses_to_start_without_a_retry_destination() {
+    let Some(url) = kafka_url() else { return };
+    let eu = unique("unaddressed-eu");
+    let us = unique("unaddressed-us");
+    create_topic(&url, &eu, 1).await;
+    create_topic(&url, &us, 1).await;
+    unsafe {
+        std::env::set_var("UNADDRESSED_EU_TOPIC", &eu);
+        std::env::set_var("UNADDRESSED_US_TOPIC", &us);
+    }
+
+    let app = RustStream::new(AppInfo::new("unaddressed", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            b.include(unaddressed)
+                .max_attempts(nonzero!(3u32))
+                .out_retry(KafkaPublish::default());
+        },
+    );
+
+    // The startup error comes back before the until-future is ever polled, so a ready one keeps
+    // the test bounded: an app that wrongly started would return `Ok` at once.
+    let err = App::run_until(app, std::future::ready(()))
+        .await
+        .expect_err("a registration that cannot address its copies must not start");
+    let message = err.to_string();
+    assert!(
+        message.contains("retry"),
+        "the startup error must name the retry destination, got: {message}",
+    );
 }
