@@ -211,7 +211,8 @@ Kafka keeps the log, so a subscription can be moved through it. [`KafkaPosition:
 [`topic_offset`](KafkaPosition::topic_offset) (one partition of one named topic) and
 [`timestamp`](KafkaPosition::timestamp) (epoch milliseconds, resolved per partition) are the
 positions. `start_at(position)` at the mount site opens the subscription there on every
-startup, whatever the group committed before. A handler repositions the running subscription
+startup, whatever the group committed before: the position lands on the first assignment the
+group hands over, ahead of its first record. A handler repositions the running subscription
 through the [`SeekHandle`](context::keys::SeekHandle) context key, reading where it currently
 sits from [`Position`](context::keys::Position).
 
