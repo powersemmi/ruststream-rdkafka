@@ -3242,3 +3242,96 @@ async fn a_transactional_publisher_errors_after_the_connection_closes() {
         .expect_err("a transaction after shutdown must fail");
     assert!(matches!(begun, KafkaError::Closed { .. }), "got {begun:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("protocol-clash");
+    let group = unique("protocol-clash-group");
+    create_topic(&url, &topic, 2).await;
+    let broker = connected_broker(&url).await;
+
+    // The first member settles the group on the eager family.
+    let mut first = broker
+        .subscribe_with(tracked(&topic, &group).assignment(Assignment::Range))
+        .await
+        .expect("subscribe the first member");
+    let mut first_stream = Box::pin(first.stream());
+    publish(&broker, &topic, b"joined").await;
+    let msg = next_message(&mut first_stream).await;
+    msg.ack().await.expect("ack");
+
+    // A second member asking for the cooperative family has no protocol in common with it.
+    let mut second = broker
+        .subscribe_with(tracked(&topic, &group).assignment(Assignment::CooperativeSticky))
+        .await
+        .expect("subscribe the second member");
+    let mut second_stream = Box::pin(second.stream());
+    let err = loop {
+        let next = tokio::time::timeout(WAIT, second_stream.next())
+            .await
+            .expect("the rejected join must surface on the subscription");
+        match next {
+            Some(Err(err)) => break err,
+            Some(Ok(delivered)) => delivered.ack().await.expect("ack"),
+            None => panic!("the stream ended instead of reporting the clash"),
+        }
+    };
+    let message = err.to_string().to_lowercase();
+    assert!(
+        message.contains("protocol"),
+        "the error must name the protocol clash, got: {err}",
+    );
+
+    drop(first_stream);
+    drop(first);
+    drop(second_stream);
+    drop(second);
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("queue-full");
+    create_topic(&url, &topic, 1).await;
+    // A producer queue that holds one record, and a linger long enough that it keeps holding it:
+    // a second publish has nowhere to go, which is the wait this setting bounds.
+    let broker = KafkaBroker::new([url.clone()])
+        .producer_config("queue.buffering.max.messages", "1")
+        .producer_config("linger.ms", "1500")
+        .connect()
+        .await
+        .expect("connect");
+
+    let bounded =
+        broker.publisher(KafkaPublish::default().queue_timeout(Duration::from_millis(250)));
+    let (first, second) = tokio::join!(
+        bounded.publish(OutgoingMessage::new(&topic, b"held".as_slice()), None),
+        bounded.publish(OutgoingMessage::new(&topic, b"refused".as_slice()), None),
+    );
+    assert_eq!(
+        usize::from(first.is_err()) + usize::from(second.is_err()),
+        1,
+        "exactly one of the two records had a queue slot to take",
+    );
+    let refused = first
+        .err()
+        .or_else(|| second.err())
+        .expect("one of the two was refused");
+    assert!(
+        matches!(refused, KafkaError::Publish(_)),
+        "a publish that ran out of queue space must say so, got {refused:?}",
+    );
+
+    // Without the bound the wait is the natural back-pressure: both records go out.
+    let patient = broker.publisher(KafkaPublish::default());
+    let (first, second) = tokio::join!(
+        patient.publish(OutgoingMessage::new(&topic, b"one".as_slice()), None),
+        patient.publish(OutgoingMessage::new(&topic, b"two".as_slice()), None),
+    );
+    first.expect("an unbounded publish waits for space");
+    second.expect("an unbounded publish waits for space");
+
+    broker.shutdown().await.expect("shutdown");
+}
