@@ -20,10 +20,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
-use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
+use rdkafka::consumer::{BaseConsumer, Consumer as _};
 use rdkafka::error::RDKafkaErrorCode;
+use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use ruststream::runtime::{
     App, AppInfo, ContextKind, Ctx, DefaultSlot, HandlerOutcome, Out, Outgoing as OutgoingRecord,
     PublishTransform, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, Reads, Reply, RustStream,
@@ -2700,4 +2701,180 @@ async fn a_capped_topic_set_refuses_to_start_without_a_retry_destination() {
         message.contains("retry"),
         "the startup error must name the retry destination, got: {message}",
     );
+}
+
+/// The group's committed offset for one partition, read from the cluster rather than inferred
+/// from what a consumer of ours delivered.
+fn committed_offset(url: &str, group: &str, topic: &str, partition: i32) -> Option<i64> {
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .set("group.id", group)
+        .set("enable.auto.commit", "false")
+        .create()
+        .expect("probe consumer");
+    let mut wanted = TopicPartitionList::new();
+    wanted
+        .add_partition_offset(topic, partition, Offset::Invalid)
+        .expect("partition list");
+    let committed = consumer
+        .committed_offsets(wanted, Duration::from_secs(10))
+        .expect("committed offsets");
+    match committed.elements()[0].offset() {
+        Offset::Offset(offset) => Some(offset),
+        _ => None,
+    }
+}
+
+/// Collects the sequence numbers a run handled and wakes the test once it has them all.
+#[derive(Clone)]
+struct ReplayProbe {
+    expected: usize,
+    seen: Arc<Mutex<Vec<u32>>>,
+    done: Arc<Notify>,
+}
+
+impl ReplayProbe {
+    fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            seen: Arc::new(Mutex::new(Vec::new())),
+            done: Arc::new(Notify::new()),
+        }
+    }
+
+    fn record(&self, seq: u32) {
+        let mut seen = self.seen.lock().expect("seen mutex poisoned");
+        seen.push(seq);
+        if seen.len() >= self.expected {
+            self.done.notify_waiters();
+        }
+    }
+
+    fn taken(&self) -> Vec<u32> {
+        self.seen.lock().expect("seen mutex poisoned").clone()
+    }
+}
+
+// The first pass: an ordinary subscription, which leaves its position in the group.
+#[subscriber(
+    KafkaTopic::new(std::env::var("REPLAY_TOPIC").expect("topic env"))
+        .group(std::env::var("REPLAY_GROUP").expect("group env"))
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+)]
+async fn consume_once(
+    order: &OrderPayload,
+    ctx: &mut Context<'_, (), ReplayProbe>,
+) -> HandlerOutcome {
+    ctx.state().record(order.seq);
+    HandlerOutcome::ack()
+}
+
+// The second pass over the same topic in the same group, opened at a named position instead.
+#[subscriber(
+    KafkaTopic::new(std::env::var("REPLAY_TOPIC").expect("topic env"))
+        .group(std::env::var("REPLAY_GROUP").expect("group env"))
+        .commit(Commit::Tracked),
+    start_at(KafkaPosition::earliest())
+)]
+async fn replay_the_log(
+    order: &OrderPayload,
+    ctx: &mut Context<'_, (), ReplayProbe>,
+) -> HandlerOutcome {
+    ctx.state().record(order.seq);
+    HandlerOutcome::ack()
+}
+
+/// Runs `app` until `probe` has its records, or fails the test.
+async fn run_until_seen(app: impl App, probe: &ReplayProbe) {
+    let done = Arc::clone(&probe.done);
+    let wait = async move {
+        tokio::time::timeout(WAIT, done.notified())
+            .await
+            .expect("every record within the timeout");
+    };
+    App::run_until(app, wait).await.expect("run");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
+    const COUNT: u32 = 3;
+
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("replay");
+    let group = unique("replay-group");
+    create_topic(&url, &topic, 1).await;
+    unsafe {
+        std::env::set_var("REPLAY_TOPIC", &topic);
+        std::env::set_var("REPLAY_GROUP", &group);
+    }
+
+    let seeder = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        publish(
+            &seeder,
+            &topic,
+            format!(r#"{{"partition":0,"seq":{seq}}}"#).as_bytes(),
+        )
+        .await;
+    }
+    seeder.shutdown().await.expect("seeder shutdown");
+
+    // First pass: the group reads the log and leaves its position on the cluster.
+    let first = ReplayProbe::new(COUNT as usize);
+    let state = first.clone();
+    run_until_seen(
+        RustStream::new(AppInfo::new("replay", "0.0.0"))
+            .on_startup(async move |()| Ok::<_, Infallible>(state))
+            .with_broker(KafkaBroker::new([url.clone()]), |b| {
+                b.include(consume_once);
+            }),
+        &first,
+    )
+    .await;
+    assert_eq!(first.taken(), vec![0, 1, 2]);
+    assert_eq!(
+        committed_offset(&url, &group, &topic, 0),
+        Some(i64::from(COUNT)),
+        "the group must hold a position past the whole log",
+    );
+
+    // Second pass: the named starting position wins over that committed offset.
+    let replayed = ReplayProbe::new(COUNT as usize);
+    let state = replayed.clone();
+    run_until_seen(
+        RustStream::new(AppInfo::new("replay", "0.0.0"))
+            .on_startup(async move |()| Ok::<_, Infallible>(state))
+            .with_broker(KafkaBroker::new([url.clone()]), |b| {
+                b.include(replay_the_log);
+            }),
+        &replayed,
+    )
+    .await;
+    assert_eq!(
+        replayed.taken(),
+        vec![0, 1, 2],
+        "start_at must replay the log whatever the group committed",
+    );
+
+    // The control: the same group without the clause resumes after its committed position, so
+    // nothing arrives at all.
+    let resumed = ReplayProbe::new(1);
+    let state = resumed.clone();
+    let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(state))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(consume_once);
+        });
+    let done = Arc::clone(&resumed.done);
+    let wait = async move {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), done.notified())
+                .await
+                .is_err(),
+            "without the clause the group must resume past its committed position",
+        );
+    };
+    App::run_until(app, wait).await.expect("run");
+    assert!(resumed.taken().is_empty());
 }

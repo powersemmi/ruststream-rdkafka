@@ -19,6 +19,8 @@ use rdkafka::{ClientContext, TopicPartitionList};
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 
+use crate::seek::{self, KafkaPosition};
+
 #[derive(Debug, Default)]
 struct PartitionState {
     /// Delivered offsets that have not settled yet.
@@ -235,14 +237,40 @@ impl CommitTracker {
     }
 }
 
-/// Consumer context that resets the tracker when partitions are revoked in a rebalance.
+/// Consumer context that resets the tracker when partitions are revoked in a rebalance, and that
+/// carries a subscription's start position to the assignment it applies to.
 pub(crate) struct TrackingContext {
     tracker: Arc<CommitTracker>,
+    /// The subscription's name, so a rebalance that cannot honour its start position says which
+    /// subscription it was.
+    subscription: String,
+    /// The position a `start_at(..)` named, waiting for partitions to apply it to. A group
+    /// assigns nothing until something polls the consumer, and the runtime polls only after the
+    /// subscription is open, so the position outlives the seek call that carried it.
+    start: Mutex<Option<KafkaPosition>>,
 }
 
 impl TrackingContext {
-    pub(crate) fn new(tracker: Arc<CommitTracker>) -> Self {
-        Self { tracker }
+    pub(crate) fn new(tracker: Arc<CommitTracker>, subscription: impl Into<String>) -> Self {
+        Self {
+            tracker,
+            subscription: subscription.into(),
+            start: Mutex::new(None),
+        }
+    }
+
+    /// Keeps `position` for the next assignment, as a seek on a consumer holding nothing does.
+    pub(crate) fn hold_start(&self, position: KafkaPosition) {
+        *self.start.lock().expect("start position mutex poisoned") = Some(position);
+    }
+
+    /// Takes the held start position, if any. It applies to one assignment: a later rebalance
+    /// discards a reposition like any other, and the group's committed offsets take over.
+    fn take_start(&self) -> Option<KafkaPosition> {
+        self.start
+            .lock()
+            .expect("start position mutex poisoned")
+            .take()
     }
 }
 
@@ -252,6 +280,32 @@ impl ConsumerContext for TrackingContext {
     fn pre_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
         if let Rebalance::Revoke(revoked) = rebalance {
             self.tracker.revoke(revoked);
+        }
+    }
+
+    /// Opens the subscription at its start position, on the partitions the group just handed
+    /// over.
+    ///
+    /// This runs inside the poll that carried the assignment, so it is ahead of the first record
+    /// those partitions deliver. It is the only point at which a `start_at(..)` on a group
+    /// subscription can take effect: the position is named before anything polls the consumer,
+    /// and until something does, the group has assigned nothing to seek.
+    fn post_rebalance(&self, consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
+        let Rebalance::Assign(assigned) = rebalance else {
+            return;
+        };
+        let Some(position) = self.take_start() else {
+            return;
+        };
+        if let Err(err) = seek::apply_position(consumer, &self.tracker, assigned, &position) {
+            tracing::error!(
+                subscription = %self.subscription,
+                position = ?position,
+                assignment = %seek::describe(assigned),
+                error = %err,
+                "the subscription could not be opened at its start position; it reads from the \
+                 group's committed position instead",
+            );
         }
     }
 }

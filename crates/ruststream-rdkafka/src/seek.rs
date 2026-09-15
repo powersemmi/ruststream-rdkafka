@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::{Offset, TopicPartitionList};
 use ruststream::Seeker;
@@ -20,11 +20,6 @@ use crate::tracker::{CommitTracker, TrackingContext};
 
 /// How long a reposition waits for librdkafka (the seek itself, and the timestamp lookup).
 const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a reposition waits for the group to assign partitions before giving up. A seek
-/// issued at startup (the `start_at(..)` clause) runs before the first fetch, so the assignment
-/// may still be in flight.
-const ASSIGNMENT_TIMEOUT: Duration = Duration::from_secs(30);
-const ASSIGNMENT_POLL: Duration = Duration::from_millis(50);
 
 /// Where a subscription should resume reading.
 ///
@@ -210,12 +205,16 @@ impl Seeker for KafkaSeeker {
     /// [`KafkaTestSubscriber`](crate::testing::KafkaTestSubscriber) for which positions it
     /// resolves.
     ///
+    /// A consumer that holds no partitions yet is the startup case, not an error: a group
+    /// subscription is assigned nothing until something polls it, which happens after the
+    /// subscription is handed to the runtime. The position is kept and applied to the first
+    /// assignment the group hands over, ahead of its first record.
+    ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the position names no partition this
-    /// consumer holds (including a subscription whose assignment never arrived) and
-    /// [`KafkaError::Consume`] when librdkafka rejects the reposition or the timestamp lookup
-    /// fails.
+    /// Returns [`KafkaError::InvalidOptions`] when the position names no partition among the
+    /// ones this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the
+    /// reposition or the timestamp lookup fails.
     ///
     /// # Cancel safety
     ///
@@ -241,18 +240,42 @@ impl Seeker for KafkaSeeker {
 
 /// Resolves `to` against the current assignment, resets the bookkeeping of every partition it
 /// names, and moves the consumer.
+///
+/// A consumer with nothing assigned keeps the position instead: `start_at(..)` names it before
+/// the subscription is ever polled, and a group assigns partitions only once something polls, so
+/// there is nothing to seek yet. [`TrackingContext`] applies it to the assignment when it lands.
 fn reposition(
     consumer: &StreamConsumer<TrackingContext>,
     tracker: &CommitTracker,
     to: &KafkaPosition,
 ) -> Result<(), KafkaError> {
-    let assignment = await_assignment(consumer)?;
-    let targets = resolve(consumer, &assignment, to)?;
+    let assignment = consumer.assignment().map_err(KafkaError::consume)?;
+    if assignment.count() == 0 {
+        consumer.context().hold_start(to.clone());
+        return Ok(());
+    }
+    apply_position(consumer, tracker, &assignment, to)
+}
+
+/// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first.
+///
+/// Both entry points end here: a reposition of a running subscription, and the start position a
+/// rebalance carries to the partitions the group has just handed over.
+pub(crate) fn apply_position<C>(
+    consumer: &C,
+    tracker: &CommitTracker,
+    assignment: &TopicPartitionList,
+    to: &KafkaPosition,
+) -> Result<(), KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
+    let targets = resolve(consumer, assignment, to)?;
     if targets.count() == 0 {
         return Err(KafkaError::InvalidOptions(format!(
             "{to:?} names no partition assigned to this consumer; a seek moves the partitions \
              this instance holds, and its assignment is {}",
-            describe(&assignment),
+            describe(assignment),
         )));
     }
 
@@ -281,10 +304,13 @@ fn reposition(
 /// would let a commit carry the group past everything the seek replayed - the acks that built
 /// it describe a read position this subscription no longer has. A logical `Invalid` offset is
 /// how librdkafka itself clears the store when a partition is revoked.
-pub(crate) fn clear_stored_offsets(
-    consumer: &StreamConsumer<TrackingContext>,
+pub(crate) fn clear_stored_offsets<C>(
+    consumer: &C,
     targets: &TopicPartitionList,
-) -> Result<(), KafkaError> {
+) -> Result<(), KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
     let mut cleared = TopicPartitionList::new();
     for element in targets.elements() {
         cleared
@@ -301,29 +327,15 @@ pub(crate) fn clear_stored_offsets(
     }
 }
 
-/// The partitions this consumer holds, waiting out the group assignment when a seek runs before
-/// the first fetch (the `start_at(..)` clause does).
-fn await_assignment(
-    consumer: &StreamConsumer<TrackingContext>,
-) -> Result<TopicPartitionList, KafkaError> {
-    let deadline = std::time::Instant::now() + ASSIGNMENT_TIMEOUT;
-    loop {
-        let assignment = consumer.assignment().map_err(KafkaError::consume)?;
-        if assignment.count() > 0 || std::time::Instant::now() >= deadline {
-            return Ok(assignment);
-        }
-        // The group assigns partitions asynchronously after subscribe; librdkafka's background
-        // poll drives it, so waiting here does not deadlock against the message stream.
-        std::thread::sleep(ASSIGNMENT_POLL);
-    }
-}
-
 /// Builds the seek list: which assigned partitions move, and to which offsets.
-fn resolve(
-    consumer: &StreamConsumer<TrackingContext>,
+fn resolve<C>(
+    consumer: &C,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
-) -> Result<TopicPartitionList, KafkaError> {
+) -> Result<TopicPartitionList, KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
     let mut targets = TopicPartitionList::new();
     match to {
         // The log ends are resolved here rather than handed to librdkafka as logical offsets:
@@ -398,8 +410,8 @@ fn resolve(
     Ok(targets)
 }
 
-/// A human-readable assignment for the "nothing to seek" error.
-fn describe(assignment: &TopicPartitionList) -> String {
+/// A human-readable assignment for the "nothing to seek" error and for the rebalance log line.
+pub(crate) fn describe(assignment: &TopicPartitionList) -> String {
     if assignment.count() == 0 {
         return "empty".to_owned();
     }

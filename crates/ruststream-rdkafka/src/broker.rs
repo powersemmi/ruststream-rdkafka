@@ -513,7 +513,7 @@ impl ConnectedKafkaBroker {
         }
 
         let tracker = Arc::new(CommitTracker::default());
-        let context = TrackingContext::new(Arc::clone(&tracker));
+        let context = TrackingContext::new(Arc::clone(&tracker), &plan.name);
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
