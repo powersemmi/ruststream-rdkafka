@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::Stream;
 use futures::future::FutureExt as _;
 use rdkafka::Message as _;
-use rdkafka::consumer::StreamConsumer;
+use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
@@ -263,9 +263,25 @@ impl Subscriber for KafkaSubscriber {
     /// delivery is lost by dropping the stream between polls), and the stream can be re-created
     /// by calling `stream` again: deliveries buffer in the consumer, not in the returned stream.
     fn stream(&mut self) -> impl Stream<Item = Result<Self::Message, Self::Error>> + Send + '_ {
-        futures::stream::unfold(self, |sub| async move {
+        // Cloned once per stream and never per delivery: the failure waiter has to live across
+        // the same await as `recv`, while the subscriber is handed back on every yield.
+        let context = Arc::clone(self.consumer.context());
+        futures::stream::unfold((self, context), |(sub, context)| async move {
             loop {
-                match sub.consumer.recv().await {
+                // The waiter is armed before the check, so a failure landing between the two is
+                // not missed, and the select below is what makes it reach a subscription whose
+                // topic may never deliver anything.
+                let recorded = context.start_failure_waiter();
+                if let Some(err) = context.take_start_failure() {
+                    drop(recorded);
+                    return Some((Err(err), (sub, context)));
+                }
+                let received = tokio::select! {
+                    biased;
+                    () = recorded => continue,
+                    received = sub.consumer.recv() => received,
+                };
+                match received {
                     Ok(delivery) => {
                         #[allow(unused_mut)] // mutated by the registry transcode only
                         let mut item = sub.map_delivery(&delivery);
@@ -277,10 +293,10 @@ impl Subscriber for KafkaSubscriber {
                         #[cfg(feature = "schema-registry")]
                         sub.transcode(&mut item).await;
                         sub.note_recovered();
-                        return Some((Ok(item), sub));
+                        return Some((Ok(item), (sub, context)));
                     }
                     Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), sub)),
+                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
                 }
             }
         })
@@ -317,13 +333,25 @@ impl BatchSubscriber for KafkaSubscriber {
         size: NonZeroUsize,
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
-        futures::stream::unfold(self, move |sub| async move {
-            // Wait for the batch's first delivery.
+        let context = Arc::clone(self.consumer.context());
+        futures::stream::unfold((self, context), move |(sub, context)| async move {
+            // Wait for the batch's first delivery, or for a start position the rebalance could
+            // not apply - see `stream` for why the wait is a select and not a check.
             let first = loop {
-                match sub.consumer.recv().await {
+                let recorded = context.start_failure_waiter();
+                if let Some(err) = context.take_start_failure() {
+                    drop(recorded);
+                    return Some((Err(err), (sub, context)));
+                }
+                let received = tokio::select! {
+                    biased;
+                    () = recorded => continue,
+                    received = sub.consumer.recv() => received,
+                };
+                match received {
                     Ok(delivery) => break sub.map_delivery(&delivery),
                     Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), sub)),
+                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
                 }
             };
             sub.note_recovered();
@@ -351,7 +379,7 @@ impl BatchSubscriber for KafkaSubscriber {
             for item in &mut batch {
                 sub.transcode(item).await;
             }
-            Some((Ok(batch), sub))
+            Some((Ok(batch), (sub, context)))
         })
     }
 }

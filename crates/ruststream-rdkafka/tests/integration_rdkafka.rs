@@ -33,8 +33,8 @@ use ruststream::runtime::{
 use ruststream::subscriber;
 use ruststream::{
     Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing, OutgoingMessage,
-    Positioned, PublishPolicy, Publisher, Seekable, Seeker, Subscriber, TransactionalPublisher,
-    nonzero,
+    Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
+    TransactionalPublisher, nonzero,
 };
 use ruststream_rdkafka::context::{KafkaContext, keys};
 use ruststream_rdkafka::{
@@ -3332,5 +3332,50 @@ async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
     first.expect("an unbounded publish waits for space");
     second.expect("an unbounded publish waits for space");
 
+    broker.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_position_the_assignment_cannot_carry_surfaces_on_the_stream() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("bad-start");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    publish(&broker, &topic, b"unreachable").await;
+
+    // Partition 7 of a one-partition topic: the subscription opens, because a group has nothing
+    // assigned yet and the position is held for the assignment, and the rebalance then finds
+    // nothing to move. A callback can return no error, so the stream is where it must appear.
+    let mut subscriber = broker
+        .subscribe_with(StartAt::new(
+            tracked(&topic, &unique("group")),
+            KafkaPosition::offset(7, 0),
+        ))
+        .await
+        .expect("the position is held until the group assigns something");
+    let mut stream = Box::pin(subscriber.stream());
+
+    let next = tokio::time::timeout(WAIT, stream.next())
+        .await
+        .expect("the failed start position must reach the stream");
+    let err = match next {
+        Some(Err(err)) => err,
+        Some(Ok(msg)) => panic!(
+            "a subscription that could not be opened at its position must not pass for a working \
+             one, got {:?}",
+            String::from_utf8_lossy(msg.payload()),
+        ),
+        None => panic!("the stream ended instead of reporting the position"),
+    };
+    let message = err.to_string();
+    assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err:?}");
+    assert!(
+        message.contains("start position") && message.contains('7'),
+        "the error must name the position that could not be applied, got: {message}",
+    );
+
+    drop(stream);
+    drop(subscriber);
     broker.shutdown().await.expect("shutdown");
 }
