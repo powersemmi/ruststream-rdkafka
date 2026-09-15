@@ -25,9 +25,9 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::runtime::{
-    App, AppInfo, Ctx, DefaultSlot, HandlerOutcome, Out,
-    RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, Reply, RustStream, State,
-    SubscriberSettings as _,
+    App, AppInfo, ContextKind, Ctx, DefaultSlot, HandlerOutcome, Out, Outgoing as OutgoingRecord,
+    PublishTransform, RETRY_COUNT_HEADER as RUNTIME_RETRY_COUNT_HEADER, Reads, Reply, RustStream,
+    State, SubscriberSettings as _,
 };
 use ruststream::subscriber;
 use ruststream::{
@@ -40,7 +40,7 @@ use ruststream_rdkafka::{
     Assignment, Commit, ConnectedKafkaBroker, EosPipeline, EosReplies, KafkaBroker,
     KafkaEosPublish, KafkaError, KafkaMessage, KafkaOptions, KafkaPartitions, KafkaPosition,
     KafkaPublish, KafkaTopic, KafkaTopics, LaneKey, PARTITION_KEY_HEADER, PartitionLanes,
-    SourceOffset, StartOffset,
+    RoundRobin, SourceOffset, StartOffset, ToSourceTopic,
 };
 use serde::Deserialize;
 use tokio::sync::Notify;
@@ -94,14 +94,17 @@ async fn recreate_topic(url: &str, topic: &str, partitions: i32) {
 /// Polls cluster metadata until `topic` is gone, bounded by [`WAIT`].
 ///
 /// Each fetch is a round trip to the broker with its own timeout, so the loop advances only when
-/// the cluster has answered.
+/// the cluster has answered. The fetch asks for the whole cluster rather than for this one topic:
+/// the stand has topic auto-creation on, and a metadata request naming a single topic is itself
+/// what creates it - with the broker default of one partition, which then swallows the partition
+/// count the caller asked for.
 fn await_topic_absent(admin: &AdminClient<DefaultClientContext>, topic: &str) {
     let probe = Duration::from_millis(500);
     let deadline = std::time::Instant::now() + WAIT;
     while std::time::Instant::now() < deadline {
         let metadata = admin
             .inner()
-            .fetch_metadata(Some(topic), probe)
+            .fetch_metadata(None, probe)
             .expect("fetch_metadata call");
         let present = metadata
             .topics()
@@ -112,6 +115,31 @@ fn await_topic_absent(admin: &AdminClient<DefaultClientContext>, topic: &str) {
         }
     }
     panic!("topic {topic} was still present {WAIT:?} after the delete request");
+}
+
+/// Asserts the cluster really holds `topic` with `partitions` partitions.
+///
+/// A test that asks for a partitioned topic and silently gets a one-partition one proves nothing
+/// about placement, so the count is checked rather than assumed.
+fn assert_partition_count(url: &str, topic: &str, partitions: i32) {
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", url)
+        .create()
+        .expect("admin client");
+    let metadata = admin
+        .inner()
+        .fetch_metadata(None, Duration::from_secs(5))
+        .expect("fetch_metadata call");
+    let found = metadata
+        .topics()
+        .iter()
+        .find(|known| known.name() == topic)
+        .unwrap_or_else(|| panic!("topic {topic} must exist"));
+    assert_eq!(
+        i32::try_from(found.partitions().len()).expect("small partition count"),
+        partitions,
+        "topic {topic} must hold the partitions the test asked for",
+    );
 }
 
 /// Creates `topic` up front so the first subscribe does not race topic auto-creation.
@@ -2217,5 +2245,190 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     drop(resumed_stream);
     drop(resumed);
     drop(out_subscriber);
+    reader.shutdown().await.expect("shutdown");
+}
+
+/// Stamps a reply with a record key, standing in for a handler that chose its own placement. It
+/// writes no per-record setting, so it stays generic over them.
+struct KeyStamp;
+
+impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
+    type Destination = Reads;
+
+    fn apply(
+        &self,
+        out: &mut OutgoingRecord<'_>,
+        _options: &mut Option<Options>,
+        _cx: &K::View<'_>,
+    ) {
+        out.headers_mut().insert(PARTITION_KEY_HEADER, "tenant-1");
+    }
+}
+
+// The round-robin cycle is a producer-side placement, and only a topic with real partitions can
+// show where a record went: the in-process transport gives every topic one partition and records
+// the setting instead of honouring it.
+#[subscriber(
+    KafkaTopic::new(std::env::var("SPREAD_IN_TOPIC").expect("topic env"))
+        .group("spread-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked),
+    publish("round-robin-replies-placeholder")
+)]
+async fn spread(order: &OrderPayload) -> OrderPayload {
+    order.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn round_robin_walks_the_partitions_of_the_reply_topic() {
+    const COUNT: u32 = 4;
+    const PARTITIONS: i32 = 2;
+
+    let Some(url) = kafka_url() else { return };
+    let input = unique("spread-in");
+    create_topic(&url, &input, 1).await;
+    // The reply topic is a macro literal, so it is fixed across runs; recreating it gives this
+    // run an empty log with the partition count the cycle is asserted against.
+    recreate_topic(&url, "round-robin-replies-placeholder", PARTITIONS).await;
+    assert_partition_count(&url, "round-robin-replies-placeholder", PARTITIONS);
+    unsafe { std::env::set_var("SPREAD_IN_TOPIC", &input) };
+
+    let seeder = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        publish(
+            &seeder,
+            &input,
+            format!(r#"{{"partition":0,"seq":{seq}}}"#).as_bytes(),
+        )
+        .await;
+    }
+    seeder.shutdown().await.expect("seeder shutdown");
+
+    let app = RustStream::new(AppInfo::new("spread", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            b.include(spread)
+                .out_reply(KafkaPublish::default())
+                .transform(RoundRobin::partitions(PARTITIONS));
+        },
+    );
+
+    let reader = connected_broker(&url).await;
+    let mut out_subscriber = reader
+        .subscribe_with(tracked(
+            "round-robin-replies-placeholder",
+            &unique("reader"),
+        ))
+        .await
+        .expect("subscribe replies");
+    let placed: Arc<Mutex<HashMap<u32, i32>>> = Arc::new(Mutex::new(HashMap::new()));
+    let sink = Arc::clone(&placed);
+    let consume = async move {
+        let mut stream = Box::pin(out_subscriber.stream());
+        for _ in 0..COUNT {
+            let msg = next_message(&mut stream).await;
+            let reply: OrderPayload = serde_json::from_slice(msg.payload()).expect("reply json");
+            sink.lock()
+                .expect("placed mutex poisoned")
+                .insert(reply.seq, msg.partition());
+            msg.ack().await.expect("ack reply");
+        }
+    };
+    App::run_until(app, consume).await.expect("run");
+
+    let placed = placed.lock().expect("placed mutex poisoned").clone();
+    for seq in 0..COUNT {
+        let partition = placed.get(&seq).copied().expect("every reply arrives");
+        let expected = i32::try_from(seq % 2).expect("a cycle of two");
+        assert_eq!(
+            partition, expected,
+            "the cycle must place reply {seq} on partition {expected}, not {partition}",
+        );
+    }
+
+    reader.shutdown().await.expect("shutdown");
+}
+
+// The same cycle over replies that already carry a record key: keys exist for ordering, so the
+// cycle must leave the placement Kafka derives from the key alone.
+#[subscriber(
+    KafkaTopic::new(std::env::var("KEYED_SPREAD_IN_TOPIC").expect("topic env"))
+        .group("keyed-spread-svc")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked),
+    publish("round-robin-keyed-replies-placeholder")
+)]
+async fn spread_keyed(order: &OrderPayload) -> OrderPayload {
+    order.clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
+    const COUNT: u32 = 4;
+    const PARTITIONS: i32 = 2;
+
+    let Some(url) = kafka_url() else { return };
+    let input = unique("keyed-spread-in");
+    create_topic(&url, &input, 1).await;
+    recreate_topic(&url, "round-robin-keyed-replies-placeholder", PARTITIONS).await;
+    assert_partition_count(&url, "round-robin-keyed-replies-placeholder", PARTITIONS);
+    unsafe { std::env::set_var("KEYED_SPREAD_IN_TOPIC", &input) };
+
+    let seeder = connected_broker(&url).await;
+    for seq in 0..COUNT {
+        publish(
+            &seeder,
+            &input,
+            format!(r#"{{"partition":0,"seq":{seq}}}"#).as_bytes(),
+        )
+        .await;
+    }
+    seeder.shutdown().await.expect("seeder shutdown");
+
+    let app = RustStream::new(AppInfo::new("keyed-spread", "0.0.0")).with_broker(
+        KafkaBroker::new([url.clone()]),
+        |b| {
+            // KeyStamp runs first, so every reply carries a key by the time the cycle sees it.
+            b.include(spread_keyed)
+                .out_reply(KafkaPublish::default())
+                .transform(KeyStamp)
+                .transform(RoundRobin::partitions(PARTITIONS));
+        },
+    );
+
+    let reader = connected_broker(&url).await;
+    let mut out_subscriber = reader
+        .subscribe_with(tracked(
+            "round-robin-keyed-replies-placeholder",
+            &unique("reader"),
+        ))
+        .await
+        .expect("subscribe replies");
+    let placed: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&placed);
+    let consume = async move {
+        let mut stream = Box::pin(out_subscriber.stream());
+        for _ in 0..COUNT {
+            let msg = next_message(&mut stream).await;
+            assert_eq!(
+                msg.key(),
+                Some(b"tenant-1".as_slice()),
+                "the key the transform stamped must reach the record",
+            );
+            sink.lock()
+                .expect("placed mutex poisoned")
+                .push(msg.partition());
+            msg.ack().await.expect("ack reply");
+        }
+    };
+    App::run_until(app, consume).await.expect("run");
+
+    let placed = placed.lock().expect("placed mutex poisoned").clone();
+    let first = placed[0];
+    assert!(
+        placed.iter().all(|partition| *partition == first),
+        "one key means one partition: the cycle must not spread these, got {placed:?}",
+    );
+
     reader.shutdown().await.expect("shutdown");
 }
