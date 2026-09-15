@@ -3174,3 +3174,71 @@ async fn a_descriptor_passthrough_wins_over_the_commit_mode_it_clashes_with() {
     drop(resumed);
     broker.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreachable_cluster_fails_the_connect_inside_its_timeout() {
+    let Some(_url) = kafka_url() else { return };
+    // A port nothing listens on, so the probe cannot succeed; the timeout is what bounds it.
+    let started = std::time::Instant::now();
+    let err = KafkaBroker::new(["127.0.0.1:1"])
+        .connect_timeout(Duration::from_secs(3))
+        .connect()
+        .await
+        .expect_err("an unreachable cluster must fail startup");
+    assert!(
+        matches!(err, KafkaError::Connect(_)),
+        "an unreachable cluster must report a connect failure, got {err:?}",
+    );
+    assert!(
+        started.elapsed() < WAIT,
+        "the probe must fail inside its own timeout, took {:?}",
+        started.elapsed(),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clean_shutdown_reports_nothing_left_in_the_producer_queue() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("flush");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    for seq in 0..5 {
+        publish(&broker, &topic, format!("f{seq}").as_bytes()).await;
+    }
+
+    let closed = broker.shutdown().await.expect("shutdown");
+    assert_eq!(
+        closed.unflushed_records(),
+        0,
+        "a shutdown that flushed within its timeout must report an empty queue",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transactional_publisher_errors_after_the_connection_closes() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("tx-closed");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id(unique("tx-closed")))
+        .await
+        .expect("transactional publisher");
+    broker.shutdown().await.expect("shutdown");
+
+    // The handle outlived the connection it aliases, which is the one part of the ladder the
+    // compiler cannot hold: every surface of it must say so rather than succeed against a dead
+    // connection.
+    let sent = publisher
+        .publish(OutgoingMessage::new(&topic, b"after".as_slice()), None)
+        .await
+        .expect_err("a publish after shutdown must fail");
+    assert!(matches!(sent, KafkaError::Closed { .. }), "got {sent:?}");
+    let begun = publisher
+        .begin_transaction()
+        .await
+        .expect_err("a transaction after shutdown must fail");
+    assert!(matches!(begun, KafkaError::Closed { .. }), "got {begun:?}");
+}
