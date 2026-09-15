@@ -2878,3 +2878,80 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     App::run_until(app, wait).await.expect("run");
     assert!(resumed.taken().is_empty());
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transaction_is_invisible_until_it_commits_and_an_abort_discards_it() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("tx-visibility");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+
+    // The reader runs on librdkafka's own default isolation, `read_committed`, which is the
+    // isolation the atomic-visibility promise is stated for.
+    let mut reader = broker
+        .subscribe_with(tracked(&topic, &unique("reader")))
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(reader.stream());
+
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id(unique("tx-vis")))
+        .await
+        .expect("transactional publisher");
+
+    // With nothing open the handle publishes like a plain one.
+    publisher
+        .publish(OutgoingMessage::new(&topic, b"plain".as_slice()), None)
+        .await
+        .expect("plain publish");
+    let msg = next_message(&mut stream).await;
+    assert_eq!(msg.payload(), b"plain");
+    msg.ack().await.expect("ack plain");
+
+    // Open: the record is on the partition, and the reader must still not see it.
+    publisher.begin_transaction().await.expect("begin");
+    publisher
+        .publish(OutgoingMessage::new(&topic, b"committed".as_slice()), None)
+        .await
+        .expect("publish inside the transaction");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), stream.next())
+            .await
+            .is_err(),
+        "an open transaction must stay invisible to a read_committed reader",
+    );
+    publisher.commit().await.expect("commit");
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"committed",
+        "the commit is what releases the window",
+    );
+    msg.ack().await.expect("ack committed");
+
+    // Aborted: the record is discarded broker-side. The plain publish behind it proves the
+    // reader stayed live and simply never got the aborted one.
+    publisher
+        .begin_transaction()
+        .await
+        .expect("begin the aborted window");
+    publisher
+        .publish(OutgoingMessage::new(&topic, b"aborted".as_slice()), None)
+        .await
+        .expect("publish into the aborted window");
+    publisher.abort().await.expect("abort");
+    publisher
+        .publish(OutgoingMessage::new(&topic, b"after".as_slice()), None)
+        .await
+        .expect("publish after the abort");
+    let msg = next_message(&mut stream).await;
+    assert_eq!(
+        msg.payload(),
+        b"after",
+        "an aborted record must never be delivered",
+    );
+    msg.ack().await.expect("ack after");
+
+    drop(stream);
+    drop(reader);
+    broker.shutdown().await.expect("shutdown");
+}
