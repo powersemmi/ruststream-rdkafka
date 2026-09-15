@@ -3,11 +3,10 @@
 //! The first parameter is the decoded payload; the macro turns each function into a mountable
 //! definition (a value named after the function) that `routes` collects into a `Router`. The
 //! `KafkaTopic` descriptor form names the subscription's options; `Commit::Tracked` makes each
-//! `Ack` a precise per-message acknowledgement backed by the group's committed position, and
-//! the retry options give `retry()` an immediate meaning (republish to the retry topic, then
-//! dead-letter once the attempts cap out). The bare-string form rides on the broker's
-//! `default_group` with librdkafka defaults. For transactional publishing and exactly-once
-//! pipelines, see the publishing guide.
+//! `Ack` a precise per-message acknowledgement backed by the group's committed position. The
+//! bare-string form rides on the broker's `default_group` with librdkafka defaults. How many
+//! deliveries a message gets, and where it goes when they run out, is declared in `routes`. For
+//! transactional publishing and exactly-once pipelines, see the publishing guide.
 
 use ruststream_rdkafka::prelude::*;
 use schemars::JsonSchema;
@@ -24,7 +23,11 @@ pub struct Order {
 }
 
 /// The reply published to the `confirmations` topic for each order.
-#[derive(Debug, Serialize, JsonSchema)]
+///
+/// `#[outgoing(name = "confirmations")]` is the topic every confirmation lands on, wherever it
+/// is published from.
+#[derive(Debug, Serialize, Outgoing, JsonSchema)]
+#[outgoing(name = "confirmations")]
 pub struct Confirmation {
     pub id: u64,
     pub accepted: bool,
@@ -32,24 +35,15 @@ pub struct Confirmation {
 
 /// Confirms an incoming order and publishes a `Confirmation` to the `confirmations` topic.
 ///
-/// The `publish("confirmations")` clause makes the runtime encode the `Ok` value and publish
-/// it through the publisher wired in `routes` (the outgoing message name is the destination
-/// topic); an `Err` settles the delivery by its `HandlerOutcome` instead.
+/// The `publish` clause makes the runtime encode the `Ok` value and publish it through the
+/// publisher wired in `routes`, at the topic the reply type declares; an `Err` settles the
+/// delivery by its `HandlerOutcome` instead.
 ///
-/// The descriptor wires the retry pipeline: `and_topic` puts the retry topic on the same
-/// subscription, so a `retry()` republishes there (with an attempt count riding in a header)
-/// and the copy comes back to this handler; once the next retry would exceed
-/// `max_deliveries`, the message dead-letters to `orders.dlq` instead. `drop()` takes the
-/// dead-letter path immediately.
-#[subscriber(
-    KafkaTopic::new("orders")
-        .and_topic("orders.retry")
-        .commit(Commit::Tracked)
-        .retry(Retry::Topic("orders.retry".into()))
-        .max_deliveries(5)
-        .dead_letter("orders.dlq"),
-    publish("confirmations")
-)]
+/// A `retry()` comes back to this handler: Kafka holds no record back, so the runtime
+/// republishes the delivery to the `orders` topic with the retry count incremented, and the cap
+/// declared in `routes` is what ends a message that never settles. `drop()` takes the
+/// dead-letter path at once.
+#[subscriber(KafkaTopic::new("orders").commit(Commit::Tracked), publish)]
 pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerOutcome> {
     if order.quantity == 0 {
         // Malformed input is not worth retrying: drop() dead-letters it right away.

@@ -10,18 +10,115 @@ use rdkafka::TopicPartitionList;
 use rdkafka::consumer::ConsumerGroupMetadata;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer as _};
 use rdkafka::util::Timeout;
-use ruststream::runtime::{OutPipeline, Slot};
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
+use ruststream::runtime::{OutPipeline, PublishBuilder, PublishSink, Slot};
 use ruststream::{
     DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
 use tokio::sync::OnceCell;
 use tokio::task;
 
-use crate::broker::{ConnState, ConnectedKafkaBroker, EarlyConn};
+use crate::broker::{ConnState, ConnectedKafkaBroker};
 use crate::convert;
 use crate::error::KafkaError;
 
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What one Kafka record carries beyond its topic, payload and headers.
+///
+/// A publish builder writes these through the steps of [`KafkaPublishSteps`]; nothing else needs
+/// to name the type, except an assertion reading back what a publish carried
+/// (`tb.out::<Marker>().with_options(&KafkaOptions::default().partition(3))`).
+///
+/// The record key is deliberately absent: it is the core's [`Partitioned`](ruststream::Partitioned)
+/// contract, carried by the [`PARTITION_KEY_HEADER`](crate::PARTITION_KEY_HEADER) header so that
+/// broker-agnostic code can set it, and Kafka maps it onto the native key.
+///
+/// # Examples
+///
+/// ```
+/// use ruststream_rdkafka::KafkaOptions;
+///
+/// let options = KafkaOptions::default().partition(3);
+/// assert_eq!(options.partition_setting(), Some(3));
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use]
+pub struct KafkaOptions {
+    partition: Option<i32>,
+}
+
+impl KafkaOptions {
+    /// Produces the record to exactly this partition, ahead of the partitioner and the record
+    /// key.
+    pub const fn partition(mut self, partition: i32) -> Self {
+        self.partition = Some(partition);
+        self
+    }
+
+    /// The partition this record is pinned to, or `None` when the partitioner places it.
+    #[must_use]
+    pub const fn partition_setting(self) -> Option<i32> {
+        self.partition
+    }
+}
+
+/// The per-message steps this crate adds to the publish builder.
+///
+/// A handler body that names one imports this crate's prelude and bounds its slot on the options
+/// type: `Out<impl Publisher<Options = KafkaOptions>, Marker>`. The bound on the sink is what
+/// keeps these steps off a builder over another broker's publisher.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[derive(serde::Serialize, Outgoing)]
+/// # struct Audit { id: u64 }
+/// # #[derive(OutSlot)]
+/// # #[publishes(Audit)]
+/// # struct Journal;
+///
+/// #[ruststream::subscriber("orders")]
+/// async fn record(
+///     order: &Order,
+///     Out(journal): Out<impl Publisher<Options = KafkaOptions>, Journal>,
+/// ) -> HandlerOutcome {
+///     let sent = journal
+///         .message(&Audit { id: order.id })
+///         .to("audit")
+///         .partition(0)
+///         .publish()
+///         .await;
+///     if sent.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
+/// # }
+/// ```
+pub trait KafkaPublishSteps {
+    /// Produces this one record to `partition`, ahead of the partitioner and the record key.
+    #[must_use]
+    fn partition(self, partition: i32) -> Self;
+}
+
+impl<Sink, Body, Enc, Hdrs, Dest> KafkaPublishSteps for PublishBuilder<Sink, Body, Enc, Hdrs, Dest>
+where
+    Sink: PublishSink<Options = KafkaOptions>,
+{
+    fn partition(mut self, partition: i32) -> Self {
+        self.options_mut()
+            .get_or_insert_with(KafkaOptions::default)
+            .partition = Some(partition);
+        self
+    }
+}
 
 /// The publish policy of [`KafkaPublisher`]: pure declaration, no connection, no publish
 /// surface.
@@ -83,6 +180,35 @@ impl KafkaPublish {
         }
     }
 
+    /// Frames every message this policy publishes in the Confluent wire format, resolving each
+    /// destination topic's subject through `registry`.
+    ///
+    /// This is what lets a Protobuf handler stay a plain function that returns its reply: the
+    /// value writes bare Protobuf through `#[wire(encode = ::prost::Message::encode)]`, and the
+    /// publisher this pairs into puts the schema id and the message-index path in front of it. A
+    /// value cannot do that itself - `Serialized::wire_bytes` is synchronous and has only
+    /// `&self` - while the publish path knows the destination topic, which is what names the
+    /// subject.
+    ///
+    /// Short for [`KafkaFramedPublish::over`](crate::KafkaFramedPublish::over) over the default
+    /// producer settings; take that one to keep the settings a configured [`KafkaPublish`]
+    /// holds. See [`KafkaFramedPublish`](crate::KafkaFramedPublish) for what it refuses, and for
+    /// when it resolves a subject.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::{KafkaPublish, SchemaRegistry};
+    ///
+    /// let registry = SchemaRegistry::new("http://localhost:8081");
+    /// let policy = KafkaPublish::framed(&registry);
+    /// # let _ = policy;
+    /// ```
+    #[cfg(feature = "protobuf")]
+    pub fn framed(registry: &crate::SchemaRegistry) -> crate::protobuf::KafkaFramedPublish {
+        crate::protobuf::KafkaFramedPublish::over(Self::default(), registry)
+    }
+
     pub(crate) const fn queue_timeout_setting(self) -> Option<Duration> {
         self.queue_timeout
     }
@@ -96,6 +222,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaPublish {
         connected: &ConnectedKafkaBroker,
     ) -> impl Future<Output = Result<Self::Live, PairError>> {
         ready(Ok(connected.publisher(self)))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 
@@ -145,13 +277,14 @@ async fn send_via(
     producer: &FutureProducer,
     queue_timeout: Option<Duration>,
     msg: OutgoingMessage<'_>,
+    options: Option<&KafkaOptions>,
 ) -> Result<(), KafkaError> {
-    let parts = convert::headers_for_publish(msg.headers())?;
+    let parts = convert::headers_for_publish(msg.headers());
     let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
     if let Some(key) = &parts.key {
         record = record.key(key.as_ref());
     }
-    if let Some(partition) = parts.partition {
+    if let Some(partition) = options.and_then(|options| options.partition_setting()) {
         // An explicit partition wins over the partitioner and the record key.
         record = record.partition(partition);
     }
@@ -168,6 +301,7 @@ async fn send_via(
 
 impl Publisher for KafkaPublisher {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Publishes `msg` to the topic named by [`OutgoingMessage::name`] and awaits the delivery
     /// report.
@@ -181,78 +315,13 @@ impl Publisher for KafkaPublisher {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+    async fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> Result<(), Self::Error> {
         self.state.ensure_open(msg.name())?;
-        send_via(self.state.producer(), self.queue_timeout, msg).await
-    }
-}
-
-/// A publisher minted from an unconnected [`KafkaBroker`](crate::KafkaBroker), for the one
-/// wiring that cannot take a policy.
-///
-/// [`BrokerScope::retry_via`](ruststream::runtime::BrokerScope::retry_via) - the deferred
-/// republish behind `retry_after`, which Kafka relies on because it has no native delayed
-/// redelivery - is configured while the app builder runs and takes a live [`Publisher`], since
-/// a publisher that cannot send would be a lie. This type is the sanctioned exception that
-/// makes the pair work on a lazy-connect broker: it holds the cell
-/// [`Broker::connect`](ruststream::Broker::connect) fills, not a connection. The policy path
-/// ([`KafkaPublish`] and its transitions) is untouched and stays connection-free by
-/// construction.
-///
-/// Its two runtime checks are the aliasing rule the broker contract deliberately keeps
-/// dynamic: a handle that predates the connection, or outlives it, must surface an error rather
-/// than silently succeed. Publishing before `connect` reports [`KafkaError::NotConnected`];
-/// publishing after the connected broker shut down reports [`KafkaError::Closed`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use ruststream_rdkafka::KafkaBroker;
-///
-/// let broker = KafkaBroker::new(["localhost:9092"]);
-/// let retries = broker.retry_publisher();
-/// // ... `b.retry_via(retries)` while the app builder runs.
-/// # let _ = retries;
-/// ```
-#[derive(Clone)]
-pub struct KafkaRetryPublisher {
-    conn: EarlyConn,
-}
-
-impl fmt::Debug for KafkaRetryPublisher {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KafkaRetryPublisher")
-            .field("connected", &self.conn.get().is_some())
-            .finish_non_exhaustive()
-    }
-}
-
-impl KafkaRetryPublisher {
-    pub(crate) const fn new(conn: EarlyConn) -> Self {
-        Self { conn }
-    }
-}
-
-impl Publisher for KafkaRetryPublisher {
-    type Error = KafkaError;
-
-    /// Publishes `msg` through the broker's shared producer and awaits the delivery report.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::NotConnected`] before the broker connects,
-    /// [`KafkaError::Closed`] once it has shut down, and [`KafkaError::Publish`] when the
-    /// cluster rejects the record or the delivery times out.
-    ///
-    /// # Cancel safety
-    ///
-    /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
-        let state = self.conn.get().ok_or_else(|| KafkaError::NotConnected {
-            topic: msg.name().to_owned(),
-        })?;
-        state.ensure_open(msg.name())?;
-        send_via(state.producer(), None, msg).await
+        send_via(self.state.producer(), self.queue_timeout, msg, options).await
     }
 }
 
@@ -323,7 +392,15 @@ impl KafkaTransactionalPublish {
         &self.id
     }
 
-    fn with_id(&self, id: String) -> Self {
+    /// Consumes the policy for its transactional id, so a live publisher can take ownership of
+    /// the string instead of cloning it. Only the in-process publisher needs it; the real one
+    /// keeps the whole policy while it creates its producer.
+    #[cfg(feature = "testing")]
+    pub(crate) fn into_id(self) -> String {
+        self.id
+    }
+
+    pub(crate) fn with_id(&self, id: String) -> Self {
         Self {
             queue_timeout: self.queue_timeout,
             id,
@@ -340,6 +417,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaTransactionalPublish {
             .transactional_publisher(self)
             .await
             .map_err(PairError::new)
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 
@@ -505,6 +588,7 @@ impl KafkaTransactionalPublisher {
 
 impl Publisher for KafkaTransactionalPublisher {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Publishes `msg` to the topic named by [`OutgoingMessage::name`]. Inside an open
     /// transaction the record joins it; otherwise it goes out through the broker's shared plain
@@ -519,12 +603,22 @@ impl Publisher for KafkaTransactionalPublisher {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
-    async fn publish(&self, msg: OutgoingMessage<'_>) -> Result<(), Self::Error> {
+    async fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        options: Option<&Self::Options>,
+    ) -> Result<(), Self::Error> {
         self.inner.state.ensure_open(msg.name())?;
         if self.is_open() {
-            return send_via(&self.inner.producer, self.inner.queue_timeout, msg).await;
+            return send_via(&self.inner.producer, self.inner.queue_timeout, msg, options).await;
         }
-        send_via(self.inner.state.producer(), self.inner.queue_timeout, msg).await
+        send_via(
+            self.inner.state.producer(),
+            self.inner.queue_timeout,
+            msg,
+            options,
+        )
+        .await
     }
 }
 
@@ -635,6 +729,15 @@ pub struct KafkaPartitionedPublish {
     template: KafkaTransactionalPublish,
 }
 
+impl KafkaPartitionedPublish {
+    /// The policy every lane's publisher is derived from, by substituting the per-partition id.
+    /// The live pairing reads the field directly; only the in-process one is out of module.
+    #[cfg(feature = "testing")]
+    pub(crate) const fn template(&self) -> &KafkaTransactionalPublish {
+        &self.template
+    }
+}
+
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
     type Live = TransactionalPartitions;
 
@@ -649,6 +752,12 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
                 publishers: Mutex::new(HashMap::new()),
             }),
         }))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
     }
 }
 
@@ -762,6 +871,16 @@ impl TransactionalPartitions {
             `KafkaPublish::default().transactional_id(..).per_partition()` policy"
 )]
 pub trait PartitionLanes: Send + Sync {
+    /// The transactional publisher a lane is handed.
+    ///
+    /// An associated type rather than the concrete [`KafkaTransactionalPublisher`], because the
+    /// same capability is offered by more than one transport: the cluster-backed
+    /// [`TransactionalPartitions`] hands out a live producer, and the in-process
+    /// `KafkaTestPartitions` of the `testing` module hands out its own stand-in. A handler
+    /// bounded `Out<impl PartitionLanes>` therefore mounts against either broker unchanged,
+    /// which is the whole point of naming the capability instead of a publisher type.
+    type Publisher: TransactionalPublisher<Error = KafkaError>;
+
     /// The publisher owning `partition`'s transactional id.
     ///
     /// # Errors
@@ -770,10 +889,12 @@ pub trait PartitionLanes: Send + Sync {
     fn for_partition(
         &self,
         partition: i32,
-    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send;
+    ) -> impl Future<Output = Result<Self::Publisher, KafkaError>> + Send;
 }
 
 impl PartitionLanes for TransactionalPartitions {
+    type Publisher = KafkaTransactionalPublisher;
+
     fn for_partition(
         &self,
         partition: i32,
@@ -792,38 +913,25 @@ impl<M, L, EncodeCodec, Pipe, Body> PartitionLanes for Slot<M, L, EncodeCodec, P
 where
     L: PartitionLanes,
     EncodeCodec: Send + Sync,
-    // The entry's publish path. A lane's traffic never travels it (it leaves through the
-    // unwrapped value), but naming the bound the mount site's entry already carries keeps this
-    // impl on exactly the slots the runtime builds.
-    Pipe: OutPipeline,
+    // The entry's publish path, over the wired value whose per-record settings its transforms
+    // write. A lane's traffic never travels it (it leaves through the unwrapped value), but
+    // naming the bound the mount site's entry already carries keeps this impl on exactly the
+    // slots the runtime builds.
+    Pipe: OutPipeline<L>,
 {
+    type Publisher = L::Publisher;
+
     fn for_partition(
         &self,
         partition: i32,
-    ) -> impl Future<Output = Result<KafkaTransactionalPublisher, KafkaError>> + Send {
+    ) -> impl Future<Output = Result<Self::Publisher, KafkaError>> + Send {
         (**self).for_partition(partition)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::broker::KafkaBroker;
-
     use super::*;
-
-    #[tokio::test]
-    async fn the_early_publisher_errors_before_connect() {
-        // No I/O anywhere: the cell is simply still empty.
-        let publisher = KafkaBroker::new(["localhost:9092"]).retry_publisher();
-        let err = publisher
-            .publish(OutgoingMessage::new("orders", b"deferred".as_slice()))
-            .await
-            .expect_err("publishing before connect must error");
-        assert!(
-            matches!(&err, KafkaError::NotConnected { topic } if topic == "orders"),
-            "the error must name the topic it could not reach, got: {err}",
-        );
-    }
 
     #[test]
     fn transactional_id_is_a_type_transition() {

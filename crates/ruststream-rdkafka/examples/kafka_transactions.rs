@@ -17,7 +17,9 @@ use ruststream_rdkafka::KafkaError;
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// An order is read on one topic and relayed onto another, so it declares no topic of its own:
+// the enrichment's mount site names where the relayed copy lands.
+#[derive(Debug, Clone, Serialize, Deserialize, Outgoing)]
 struct Order {
     id: u64,
     items: Vec<String>,
@@ -42,7 +44,7 @@ async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Re
         };
         let payload = JsonCodec.encode(&command).expect("serializable");
         let outgoing = OutgoingMessage::new("shipments", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing).await {
+        if let Err(err) = publisher.publish(outgoing, None).await {
             publisher.abort().await.ok();
             return Err(err);
         }
@@ -86,7 +88,7 @@ async fn issue<L: PartitionLanes>(
         };
         let payload = JsonCodec.encode(&line).expect("serializable");
         let outgoing = OutgoingMessage::new("invoice-lines", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing).await {
+        if let Err(err) = publisher.publish(outgoing, None).await {
             publisher.abort().await.ok();
             return Err(err);
         }
@@ -167,7 +169,7 @@ fn app() -> impl App {
         // what relays the delivery's source coordinates onto the reply, which is how the
         // pipeline pairs the two.
         b.include(enrich)
-            .out(Reply, EosPublish::new("enrich-svc-1"))
+            .out_reply(EosPublish::new("enrich-svc-1"))
             .transform(EosReplies);
         // --8<-- [end:eos_wiring]
     })

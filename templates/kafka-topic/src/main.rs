@@ -9,8 +9,8 @@
 //! `KafkaBroker::new` only records configuration, so it slots into the synchronous builder; the
 //! runtime climbs the lifecycle ladder around it (`connect` once at startup, subscriptions and
 //! publishers off the connected form, `shutdown` at the end). Start a broker first, for example
-//! a single-node KRaft container, with topic auto-creation or the `orders`, `orders.retry`,
-//! `orders.dlq`, `cancellations`, and `confirmations` topics created up front.
+//! a single-node KRaft container, with topic auto-creation or the `orders`, `orders.dlq`,
+//! `cancellations`, and `confirmations` topics created up front.
 
 mod orders;
 mod routes;

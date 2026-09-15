@@ -1,0 +1,14 @@
+{
+  "rules": [
+    "Import `ruststream_rdkafka::prelude::*` at a mount site; a handler body imports `ruststream::prelude::*` and bounds an injected slot with a capability, the one exception being a body that writes a per-record setting.",
+    "Pick the descriptor by what the subscription reads: `KafkaTopic` for one topic, `KafkaTopics` for several or a `^`-anchored pattern, `KafkaPartitions` for an exact partition list with no group membership, and the bare `#[subscriber(\"orders\")]` form for the topic in the broker's `default_group`.",
+    "Name `Commit::Tracked` on the descriptor whenever a handler settles deliveries itself; under the default `Commit::Auto` librdkafka stores the position on delivery, so `ack` and `nack` are advisory no-ops.",
+    "Cap redeliveries with `.max_attempts(n).dead_letter(topic)` right after `include`, since Kafka counts no deliveries of its own; a `KafkaTopics` or `KafkaPartitions` registration must also name where a copy goes, with `.out_retry(policy).to(topic)` or `.out_retry(policy).transform(ToSourceTopic)`.",
+    "Write the destination partition as the per-message setting `partition(n)` on the publish builder, bounding the slot `Out<impl Publisher<Options = KafkaOptions>, Marker>`; the record key travels as the framework's partition-key header and becomes Kafka's native key.",
+    "Give every concurrent transactional flow its own `transactional_id`, since a second producer on one id fences the first: use `per_partition()` with `Out<impl PartitionLanes>` for a worker pool, and `EosPublish` with `Commit::Transactional(id)` plus the `EosReplies` transform for consume-transform-produce.",
+    "Reach for a registry-backed codec first (`AvroCodec`, or `SchemaFramed` over `JsonCodec`) with `KafkaBroker::schema_prefetch`; `KafkaBroker::schema_registry` plus `SchemaFrame` is the JSON transcode compatibility path, and the two never sit on one broker.",
+    "Carry a Protobuf message on the core's byte lanes with `#[wire(..)]` and frame it at publish time with `KafkaPublish::framed(&registry)` or the app-wide `ProtobufFrame` layer; a `prost` message can never be a codec's value.",
+    "Test a service against `ruststream_rdkafka::testing::KafkaTestBroker` with `ruststream::testing::TestApp` and write no mocks; it gives every topic one partition and does not reproduce exactly-once, real partitions or broker-side transaction guarantees.",
+    "Reach any librdkafka property this crate does not surface through `KafkaBroker::config`, `KafkaBroker::producer_config` or the descriptor's `config`, which is applied last and wins over the typed options."
+  ]
+}

@@ -3,9 +3,8 @@
 English is the source of truth, and that has to be written on the page rather than assumed:
 a reader who lands on a translated page has no way to tell whether it is current. Every page
 whose source file lives under a locale directory therefore opens with a banner naming English
-as normative and linking to the original; the Chinese pages add that the translation was
-produced by a model, which is a statement about where the text came from, not a disclaimer
-about its quality.
+as normative, saying the translation was produced by a model, and linking to the original.
+That is a statement about where the text came from, not a disclaimer about its quality.
 
 Injecting the banner from a hook rather than writing it into each file keeps it off the list
 of things a translator can forget, and keeps the wording in one place. It also keeps the
@@ -25,7 +24,7 @@ DEFAULT_LOCALE = "en"
 BANNERS = {
     "ru": (
         "Нормативная версия документации - английская",
-        'Эта страница переведена с английского. При любом расхождении верен '
+        'Эта страница переведена с английского языковой моделью. При любом расхождении верен '
         '<a href="{original}">английский оригинал</a>.',
     ),
     "zh": (

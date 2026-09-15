@@ -12,7 +12,7 @@ use std::time::Duration;
 use ruststream::nonzero;
 use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, SubscriberSettings as _};
 use ruststream::subscriber;
-use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic};
+use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPublish as Publish, KafkaTopic};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -51,7 +51,7 @@ async fn handle_batch(orders: &[Order]) -> HandlerOutcome {
 // Per-element settlement: entry `i` settles batch element `i`. This works, but read the docs on
 // how it maps onto Kafka's one-position-per-partition commits: under `Commit::Tracked` the
 // committed position only advances up to the first non-acked element, and `retry_after` runs
-// through the runtime's deferred-republish fallback (`retry_via` below), not a native delay.
+// through the runtime's deferred-republish fallback (`out_retry` below), not a native delay.
 #[subscriber(
     KafkaTopic::new("payments")
         .group("payments-svc")
@@ -80,17 +80,15 @@ async fn reconcile_batch(payments: &[Payment]) -> Vec<HandlerOutcome> {
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        // Kafka has no native delayed redelivery: retry_after re-publishes a delayed copy
-        // through this publisher (and settles the original, so the committed position moves).
-        // `retry_via` takes a live publisher, not a policy, so the broker mints its early
-        // publisher for it - the one handle that resolves the connection at startup.
-        let retries = b.broker().retry_publisher();
-        b.retry_via(retries);
         // --8<-- [start:size]
         // `batch(n)` is the batch size, and a batch handler does not mount without it: it travels
         // to the consumer's poll, which never hands the body more than `n` records at once.
         b.include(handle_batch.batch(nonzero!(64)));
-        b.include(reconcile_batch.batch(nonzero!(16)));
+        // Kafka has no native delayed redelivery: `retry_after` re-publishes a delayed copy
+        // through the publisher this registration names (and settles the original, so the
+        // committed position moves). Leave the position off and the delay is dropped.
+        b.include(reconcile_batch.batch(nonzero!(16)))
+            .out_retry(Publish::default());
         // --8<-- [end:size]
     })
 }
