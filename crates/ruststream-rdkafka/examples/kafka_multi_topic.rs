@@ -16,10 +16,11 @@ struct OrderEvent {
 }
 
 // --8<-- [start:multi]
-// `and_topic` adds topics to the same subscription: one consumer joins the group for both.
-#[subscriber(KafkaTopic::new("orders").and_topic("cancellations").group("orders-svc"))]
-async fn on_order_event(event: &OrderEvent) -> HandlerOutcome {
-    println!("order event {}", event.id);
+// `KafkaTopics` names the set the subscription reads: one consumer joins the group for both.
+// Each delivery still says which topic it came from, through the `Topic` context key.
+#[subscriber(KafkaTopics::new(["orders", "cancellations"]).group("orders-svc"))]
+async fn on_order_event(event: &OrderEvent, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
+    println!("order event {} from {topic}", event.id);
     HandlerOutcome::ack()
 }
 // --8<-- [end:multi]
@@ -27,18 +28,27 @@ async fn on_order_event(event: &OrderEvent) -> HandlerOutcome {
 // --8<-- [start:pattern]
 // A `^`-anchored librdkafka regex subscribes to every matching topic; topics created later are
 // picked up on the next metadata refresh.
-#[subscriber(KafkaTopic::pattern("^audit\\..*").group("audit-svc").start(StartOffset::Earliest))]
-async fn on_audit(event: &OrderEvent) -> HandlerOutcome {
-    println!("audit event {}", event.id);
+#[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-svc").start(StartOffset::Earliest))]
+async fn on_audit(event: &OrderEvent, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
+    println!("audit event {} from {topic}", event.id);
     HandlerOutcome::ack()
 }
 // --8<-- [end:pattern]
 
+// --8<-- [start:naming_transform]
+// A subscription over a set of topics addresses no retry copy, so every registration over one
+// names where a copy goes. `ToSourceTopic` names the topic the delivery itself arrived on, so a
+// retried order event comes back on its own topic rather than on a shared one.
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(on_order_event);
-        b.include(on_audit);
+        b.include(on_order_event)
+            .out_retry(Publish::default())
+            .transform(ToSourceTopic);
+        b.include(on_audit)
+            .out_retry(Publish::default())
+            .transform(ToSourceTopic);
     })
 }
+// --8<-- [end:naming_transform]

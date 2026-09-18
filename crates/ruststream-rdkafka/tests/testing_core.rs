@@ -7,9 +7,13 @@
 //! `KafkaTestSubscriber` directly are the ones whose subject IS that transport (its routing
 //! contract, its settlement, what its seeker refuses).
 //!
+//! Transactions sit on the line: the client-visible half - held-back publishes, a commit that
+//! releases them, an abort that does not, and the misuse errors - is exercised here, because the
+//! stand-in really implements it. What the guarantee rests on is not, and cannot be.
+//!
 //! Real Kafka semantics - consumer groups, partitions, committed positions across restarts,
-//! transactions and the exactly-once pipeline - live in `tests/integration_rdkafka.rs` against a
-//! live cluster.
+//! atomic visibility, zombie fencing and the exactly-once pipeline - live in
+//! `tests/integration_rdkafka.rs` against a live cluster.
 
 #![cfg(feature = "testing")]
 
@@ -22,19 +26,26 @@ use futures::{Stream, StreamExt};
 use ruststream::codec::{Codec as _, DefaultCodec};
 use ruststream::nonzero;
 use ruststream::runtime::{
-    AppInfo, Ctx, HandlerOutcome, Out, Reply, RustStream, SubscriberSettings as _,
+    AppInfo, ContextKind, Ctx, DefaultSlot, ForReply, HandlerOutcome, Out,
+    Outgoing as OutgoingRecord, PublishContext, PublishTransform, RETRY_COUNT_HEADER, Reads, Reply,
+    RustStream, SubscriberSettings as _,
 };
 use ruststream::subscriber;
-use ruststream::testing::{TestApp, expect_published};
+use ruststream::testing::{Outcome, TestApp, TestableBroker as _, expect_published};
 use ruststream::{
     Broker, ConnectedBroker, DescribeServer, HeaderMap, IncomingMessage, OutSlot, Outgoing,
-    OutgoingMessage, Partitioned, Publisher, Seeker as _, Subscriber,
+    OutgoingMessage, Partitioned, PublishPolicy as _, Publisher, Seeker as _, Subscriber,
+    TransactionalPublisher,
 };
-use ruststream_rdkafka::context::keys::{Position, SeekHandle};
+use ruststream_rdkafka::context::keys::{Partition, Position, SeekHandle};
 use ruststream_rdkafka::context::{KafkaBatchContext, KafkaContext};
-use ruststream_rdkafka::testing::{ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage};
+use ruststream_rdkafka::testing::{
+    ConnectedKafkaTestBroker, KafkaTestBroker, KafkaTestMessage, KafkaTestSubscriber,
+};
 use ruststream_rdkafka::{
-    KafkaError, KafkaPosition, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
+    Commit, KafkaError, KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish,
+    KafkaPublishSteps as _, KafkaTopic, KafkaTopics, PARTITION_KEY_HEADER, PartitionLanes,
+    ToSourceTopic,
 };
 use serde::{Deserialize, Serialize};
 
@@ -67,7 +78,7 @@ async fn pub_sub_round_trip_through_broker_traits() {
     let mut subscriber = broker.subscribe_with("orders").await.expect("subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
 
@@ -87,7 +98,7 @@ async fn empty_topic_name_is_rejected() {
 
     let publish_err = broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("", b"x"))
+        .publish(OutgoingMessage::new("", b"x"), None)
         .await
         .expect_err("empty publish");
     assert!(matches!(publish_err, KafkaError::InvalidOptions(_)));
@@ -101,7 +112,7 @@ async fn topics_are_isolated() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
 
@@ -119,7 +130,7 @@ async fn nack_requeue_redelivers_and_drop_drops() {
     let mut subscriber = broker.subscribe_with("retry").await.expect("subscribe");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("retry", b"again"))
+        .publish(OutgoingMessage::new("retry", b"again"), None)
         .await
         .expect("publish");
 
@@ -143,19 +154,322 @@ async fn nack_requeue_redelivers_and_drop_drops() {
     assert!(silence.is_err(), "nack(false) must not redeliver");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn headers_and_partition_key_propagate() {
-    let broker = connected().await;
-    let mut subscriber = broker.subscribe_with("keyed").await.expect("subscribe");
+// ------------------------------------------------------------- settlement as a read position
 
+/// Drains `count` deliveries, settling each with `settle`, and reports what arrived.
+async fn take_settling<S, F>(stream: &mut S, count: usize, mut settle: F) -> Vec<Vec<u8>>
+where
+    S: Stream<Item = Result<KafkaTestMessage, KafkaError>> + Unpin,
+    F: FnMut(usize, &KafkaTestMessage) -> Settle,
+{
+    let mut seen = Vec::new();
+    for index in 0..count {
+        let msg = tokio::time::timeout(WAIT, stream.next())
+            .await
+            .expect("delivery within timeout")
+            .expect("stream has next")
+            .expect("delivery ok");
+        seen.push(msg.payload().to_vec());
+        match settle(index, &msg) {
+            Settle::Ack => msg.ack().await.expect("ack"),
+            Settle::Retry => msg.nack(true).await.expect("retry"),
+            Settle::Drop => msg.nack(false).await.expect("drop"),
+        }
+    }
+    seen
+}
+
+/// How `take_settling` should settle one delivery.
+enum Settle {
+    Ack,
+    Retry,
+    Drop,
+}
+
+// A rewind is a read position, not a queue: it drags back everything after the record that asked
+// for it, which is where at-least-once duplication comes from on a cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tracked_retry_rewinds_the_whole_tail_not_one_message() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("rewind")
+        .commit(Commit::Tracked)
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("rewind", payload), None)
+            .await
+            .expect("publish");
+    }
+
+    let mut stream = Box::pin(subscriber.stream());
+    // Ack "a", retry "b": the committed position sits at "b", so "b" and "c" both come back.
+    let seen = take_settling(&mut stream, 2, |index, _| {
+        if index == 0 {
+            Settle::Ack
+        } else {
+            Settle::Retry
+        }
+    })
+    .await;
+    assert_eq!(seen, vec![b"a".to_vec(), b"b".to_vec()]);
+
+    let replayed = take_settling(&mut stream, 2, |_, _| Settle::Ack).await;
+    assert_eq!(
+        replayed,
+        vec![b"b".to_vec(), b"c".to_vec()],
+        "a tracked retry resumes from the committed position, so the tail behind it replays too",
+    );
+
+    let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(silence.is_err(), "the whole log has now settled");
+}
+
+// The other half of the rule: `nack(false)` settles the offset, so a later rewind does not drag
+// the dropped record back with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dropped_record_stays_dropped_across_a_later_rewind() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("dropped")
+        .commit(Commit::Tracked)
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    for payload in [b"a".as_slice(), b"b", b"c"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("dropped", payload), None)
+            .await
+            .expect("publish");
+    }
+
+    let mut stream = Box::pin(subscriber.stream());
+    let seen = take_settling(&mut stream, 3, |index, _| match index {
+        0 => Settle::Drop,
+        1 => Settle::Ack,
+        _ => Settle::Retry,
+    })
+    .await;
+    assert_eq!(seen, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+
+    let replayed = take_settling(&mut stream, 1, |_, _| Settle::Ack).await;
+    assert_eq!(
+        replayed,
+        vec![b"c".to_vec()],
+        "the dropped and acked records settled the position past themselves, so only the \
+         retried record comes back",
+    );
+
+    let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(silence.is_err(), "the whole log has now settled");
+}
+
+// Under auto-commit the position is stored as the record is handed over, so a retry cannot bring
+// it back. The stand-in has to say that rather than obligingly redeliver.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_auto_commit_retry_is_advisory_and_redelivers_nothing() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("advisory")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("advisory", b"once"), None)
+        .await
+        .expect("publish");
+
+    let mut stream = Box::pin(subscriber.stream());
+    let seen = take_settling(&mut stream, 1, |_, _| Settle::Retry).await;
+    assert_eq!(seen, vec![b"once".to_vec()]);
+
+    let silence = tokio::time::timeout(Duration::from_millis(150), stream.next()).await;
+    assert!(
+        silence.is_err(),
+        "auto-commit stores the position when the record is handed over, so `nack(true)` is \
+         advisory and must not redeliver",
+    );
+}
+
+// ------------------------------------------------------------------------- consumer groups
+
+/// Reads whatever `subscriber` has ready within a short window, settling each delivery.
+async fn drain_ready(subscriber: &mut KafkaTestSubscriber) -> Vec<Vec<u8>> {
+    let mut stream = Box::pin(subscriber.stream());
+    let mut seen = Vec::new();
+    while let Ok(Some(Ok(msg))) =
+        tokio::time::timeout(Duration::from_millis(80), stream.next()).await
+    {
+        seen.push(msg.payload().to_vec());
+        msg.ack().await.expect("ack");
+    }
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn members_of_one_group_share_a_topic_instead_of_each_getting_a_copy() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let worker = || KafkaTopic::new("shared").group("workers");
+    let mut first = worker().subscribe(&broker).await.expect("subscribe first");
+    let mut second = worker().subscribe(&broker).await.expect("subscribe second");
+    // A different group is a different reader of the same log, so it gets its own copy.
+    let mut auditor = KafkaTopic::new("shared")
+        .group("audit")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe auditor");
+
+    for payload in [b"1".as_slice(), b"2", b"3"] {
+        broker
+            .publisher(KafkaPublish::default())
+            .publish(OutgoingMessage::new("shared", payload), None)
+            .await
+            .expect("publish");
+    }
+
+    let one = drain_ready(&mut first).await;
+    let two = drain_ready(&mut second).await;
+    let audit = drain_ready(&mut auditor).await;
+
+    let expected = vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()];
+    // The transport gives every topic one partition, and Kafka assigns a partition to exactly one
+    // member of a group - so the group's records land on one member, not spread over both. What
+    // must never happen is both members handling everything.
+    assert_eq!(
+        one.len() + two.len(),
+        3,
+        "each record must reach exactly one member of the group, got {one:?} and {two:?}",
+    );
+    assert!(
+        one == expected && two.is_empty(),
+        "the group's single partition is owned by one member, got {one:?} and {two:?}",
+    );
+    assert_eq!(audit, expected, "a second group reads its own copy");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscriptions_without_a_group_are_each_alone_in_one() {
+    let broker = connected().await;
+    let mut first = broker
+        .subscribe_with("solo")
+        .await
+        .expect("subscribe first");
+    let mut second = broker
+        .subscribe_with("solo")
+        .await
+        .expect("subscribe second");
+
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("solo", b"both"), None)
+        .await
+        .expect("publish");
+
+    assert_eq!(drain_ready(&mut first).await, vec![b"both".to_vec()]);
+    assert_eq!(
+        drain_ready(&mut second).await,
+        vec![b"both".to_vec()],
+        "an anonymous subscription is alone in its own group, so nothing takes the topic from it",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_brokers_default_group_makes_bare_subscriptions_compete() {
+    let broker = KafkaTestBroker::new()
+        .default_group("orders-svc")
+        .connect()
+        .await
+        .expect("connect");
+    let mut first = broker
+        .subscribe_with("bare")
+        .await
+        .expect("subscribe first");
+    let mut second = broker
+        .subscribe_with("bare")
+        .await
+        .expect("subscribe second");
+
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("bare", b"one"), None)
+        .await
+        .expect("publish");
+
+    let one = drain_ready(&mut first).await;
+    let two = drain_ready(&mut second).await;
+    assert_eq!(
+        one.len() + two.len(),
+        1,
+        "the broker's default group is what makes two bare subscriptions compete, got {one:?} \
+         and {two:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_departing_owner_hands_its_topic_to_the_next_group_member() {
+    use ruststream::SubscriptionSource as _;
+
+    let broker = connected().await;
+    let worker = || KafkaTopic::new("handover").group("workers");
+    let first = worker().subscribe(&broker).await.expect("subscribe first");
+    let mut second = worker().subscribe(&broker).await.expect("subscribe second");
+
+    // While the owner is live the second member gets nothing.
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("handover", b"before"), None)
+        .await
+        .expect("publish");
+    assert!(drain_ready(&mut second).await.is_empty());
+
+    // Dropping the owner is this transport's rebalance: the remaining member takes the topic.
+    drop(first);
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new("handover", b"after"), None)
+        .await
+        .expect("publish");
+    assert_eq!(drain_ready(&mut second).await, vec![b"after".to_vec()]);
+}
+
+/// Publishes one keyed and one keyless record to `topic`.
+async fn publish_keyed_pair(broker: &ConnectedKafkaTestBroker, topic: &str) {
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json");
     headers.insert(PARTITION_KEY_HEADER, "k-1");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("keyed", b"{}").with_headers(headers))
+        .publish(
+            OutgoingMessage::new(topic, b"{}").with_headers(headers),
+            None,
+        )
         .await
         .expect("publish");
+    broker
+        .publisher(KafkaPublish::default())
+        .publish(OutgoingMessage::new(topic, b"plain"), None)
+        .await
+        .expect("publish");
+}
+
+// `partition_key` is the keyed-lane key on both brokers, not the record key: the real
+// subscriber resolves it from the descriptor's `LaneKey`, and so must this one, or a
+// `workers(n, by_key)` handler lanes differently in process than it does on a cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headers_propagate_and_lanes_follow_the_descriptor_lane_key() {
+    let broker = connected().await;
+    let mut subscriber = broker.subscribe_with("keyed").await.expect("subscribe");
+    publish_keyed_pair(&broker, "keyed").await;
 
     let mut stream = Box::pin(subscriber.stream());
     let msg = tokio::time::timeout(WAIT, stream.next())
@@ -167,19 +481,50 @@ async fn headers_and_partition_key_propagate() {
         msg.headers().get_str("content-type"),
         Some("application/json")
     );
-    assert_eq!(Partitioned::partition_key(&msg), Some(b"k-1".as_slice()));
-    assert_eq!(
-        IncomingMessage::partition_key(&msg),
-        Some(b"k-1".as_slice())
-    );
+    // The record key itself is still reachable, under its own name.
+    assert_eq!(msg.key(), Some(b"k-1".as_slice()));
+    // Under the default `LaneKey::Partition` the lane is the source partition, which this
+    // transport numbers zero for every topic - so a partition's records share one lane, as they
+    // do on a single-partition topic upstream.
+    assert_eq!(Partitioned::partition_key(&msg), Some(b"0".as_slice()));
+    assert_eq!(IncomingMessage::partition_key(&msg), Some(b"0".as_slice()));
     msg.ack().await.expect("ack");
 
-    // And a keyless message reports no partition key.
-    broker
-        .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("keyed", b"plain"))
+    // A keyless record shares that lane too, which is exactly why partition lanes keep a
+    // partition's order for keyless traffic.
+    let keyless = tokio::time::timeout(WAIT, stream.next())
         .await
-        .expect("publish");
+        .expect("delivery")
+        .expect("next")
+        .expect("ok");
+    assert_eq!(Partitioned::partition_key(&keyless), Some(b"0".as_slice()));
+    keyless.ack().await.expect("ack");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_record_key_lane_descriptor_lanes_by_the_record_key() {
+    use ruststream::SubscriptionSource as _;
+    use ruststream_rdkafka::LaneKey;
+
+    let broker = connected().await;
+    let mut subscriber = KafkaTopic::new("keyed-lanes")
+        .lane_key(LaneKey::RecordKey)
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    publish_keyed_pair(&broker, "keyed-lanes").await;
+
+    let mut stream = Box::pin(subscriber.stream());
+    let msg = tokio::time::timeout(WAIT, stream.next())
+        .await
+        .expect("delivery")
+        .expect("next")
+        .expect("ok");
+    assert_eq!(Partitioned::partition_key(&msg), Some(b"k-1".as_slice()));
+    msg.ack().await.expect("ack");
+
+    // Keyless deliveries carry no lane key under this mode, so they rotate across lanes - the
+    // ordering trade-off `LaneKey::RecordKey` documents.
     let keyless = tokio::time::timeout(WAIT, stream.next())
         .await
         .expect("delivery")
@@ -202,12 +547,12 @@ async fn published_log_observes_every_publish() {
     let broker = connected().await;
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("audit", b"first"))
+        .publish(OutgoingMessage::new("audit", b"first"), None)
         .await
         .expect("publish");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("audit", b"second"))
+        .publish(OutgoingMessage::new("audit", b"second"), None)
         .await
         .expect("publish");
 
@@ -224,7 +569,7 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("reenter", b"one"))
+        .publish(OutgoingMessage::new("reenter", b"one"), None)
         .await
         .expect("publish");
     {
@@ -234,7 +579,7 @@ async fn stream_can_be_reentered_without_losing_deliveries() {
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("reenter", b"two"))
+        .publish(OutgoingMessage::new("reenter", b"two"), None)
         .await
         .expect("publish");
     let mut stream = Box::pin(subscriber.stream());
@@ -246,17 +591,17 @@ async fn multi_topic_descriptor_mounts_on_the_test_broker() {
     use ruststream::SubscriptionSource as _;
 
     let broker = connected().await;
-    let def = KafkaTopic::new("orders").and_topic("cancellations");
+    let def = KafkaTopics::new(["orders", "cancellations"]);
     let mut subscriber = def.subscribe(&broker).await.expect("subscribe");
 
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("orders", b"o1"))
+        .publish(OutgoingMessage::new("orders", b"o1"), None)
         .await
         .expect("publish");
     broker
         .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("cancellations", b"c1"))
+        .publish(OutgoingMessage::new("cancellations", b"c1"), None)
         .await
         .expect("publish");
 
@@ -269,7 +614,7 @@ async fn multi_topic_descriptor_mounts_on_the_test_broker() {
     assert_eq!(payloads, vec![b"c1".to_vec(), b"o1".to_vec()]);
 
     // Patterns are real-cluster behavior: the exact-name router refuses them loudly.
-    let err = KafkaTopic::pattern("^orders\\..*")
+    let err = KafkaTopics::pattern("^orders\\..*")
         .subscribe(&broker)
         .await
         .expect_err("patterns must be rejected in-process");
@@ -299,7 +644,10 @@ async fn ack_payment(order: &Order) -> HandlerOutcome {
 #[derive(Clone, Default)]
 struct Attempts(Arc<AtomicUsize>);
 
-#[subscriber(KafkaTopic::new("retry"))]
+// `Commit::Tracked` is what gives `nack(true)` a meaning: under the descriptor default,
+// auto-commit has stored the position by the time the handler runs, so a retry cannot bring the
+// record back here any more than it can on a cluster.
+#[subscriber(KafkaTopic::new("retry").commit(Commit::Tracked))]
 async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> HandlerOutcome {
     let _ = order;
     // Requeue once, then acknowledge: exercises the `nack(requeue = true)` -> `enqueued`
@@ -370,12 +718,212 @@ async fn test_app_requeue_stays_balanced() {
     tb.shutdown().await.expect("shutdown");
 }
 
+/// How long a not-ready-yet delivery waits before it comes back.
+const DEFER: Duration = Duration::from_secs(5);
+
+/// Stamps every copy with the subscription the delivery came from. A transform on the retry
+/// position reads the delivery being retried, the way a reply's does, and this one writes no
+/// per-record setting, so it is generic over them.
+struct DeferredStamp;
+
+impl<C, Options> PublishTransform<ForReply<C>, Options> for DeferredStamp {
+    type Destination = Reads;
+
+    fn apply(
+        &self,
+        out: &mut OutgoingRecord<'_>,
+        _options: &mut Option<Options>,
+        cx: &PublishContext<'_, C>,
+    ) {
+        out.headers_mut()
+            .insert("x-retried-from", cx.name().to_owned());
+    }
+}
+
+/// Defers the first delivery of a record and answers the copy that comes back.
+#[subscriber(KafkaTopic::new("deferred").commit(Commit::Tracked))]
+async fn defer_then_ack(order: &Order, ctx: &mut Context) -> HandlerOutcome {
+    let _ = order;
+    if ctx.headers().get(RETRY_COUNT_HEADER).is_none() {
+        HandlerOutcome::retry_after(DEFER)
+    } else {
+        HandlerOutcome::ack()
+    }
+}
+
+/// Kafka has no delayed redelivery of its own, so the runtime republishes a delayed copy through
+/// the publisher the registration named. The copy travels the position's whole pipeline: the
+/// transform below stamps it, and the handler sees the stamp when it comes back.
+#[tokio::test(start_paused = true)]
+async fn a_deferred_copy_travels_the_retry_position() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(defer_then_ack)
+                .out_retry(KafkaPublish::default())
+                .transform(DeferredStamp);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("deferred", &Order { id: 3 })
+        .await
+        .expect("publish");
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("deferred")
+        .assert_called_once()
+        .settled(HandlerOutcome::retry_after(DEFER));
+
+    tb.advance(DEFER).await.expect("the delay elapses");
+
+    assert_eq!(
+        tb.broker::<KafkaTestBroker>()
+            .subscriber("deferred")
+            .outcomes(),
+        [Outcome::Nack, Outcome::Ack],
+        "the deferred copy must reach the handler and settle",
+    );
+    tb.broker::<KafkaTestBroker>()
+        .published::<Order>("deferred")
+        .with_header("x-retried-from", "deferred");
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+struct Charge {
+    id: u64,
+}
+
+/// Never settles: every delivery asks for a later one, so only the cap can end this message.
+#[subscriber(KafkaTopic::new("charges").commit(Commit::Tracked))]
+async fn defer_forever(charge: &Charge) -> HandlerOutcome {
+    let _ = charge;
+    HandlerOutcome::retry_after(DEFER)
+}
+
+/// Kafka counts no deliveries of its own, so the cap counts the framework's header, and the
+/// spent delivery leaves through the dead-letter topic the mount site declared.
+#[tokio::test(start_paused = true)]
+async fn a_capped_registration_dead_letters_a_spent_delivery() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(defer_forever)
+                .max_attempts(nonzero!(3u32))
+                .dead_letter("charges.dlq");
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("charges", &Charge { id: 7 })
+        .await
+        .expect("publish");
+    tb.advance(DEFER).await.expect("the first delay elapses");
+    tb.advance(DEFER).await.expect("the second delay elapses");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("charges")
+        .assert_called(3);
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("charges.dlq")
+        .assert_called_once()
+        .with(&Charge { id: 7 })
+        .with_header(RETRY_COUNT_HEADER, "3");
+}
+
+/// Always asks for an immediate retry: under a cap the runtime republishes at once, so the
+/// count travels with the copy.
+#[subscriber(KafkaTopics::new(["refunds", "refunds.retry"]).commit(Commit::Tracked))]
+async fn retry_forever(charge: &Charge) -> HandlerOutcome {
+    let _ = charge;
+    HandlerOutcome::retry()
+}
+
+/// A `KafkaTopics` subscription reads many topics and addresses none, so the mount site names
+/// the topic its copies go to. Here that topic is one the same subscription reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_named_retry_destination_carries_the_copies() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(retry_forever)
+                .max_attempts(nonzero!(2u32))
+                .dead_letter("refunds.dlq")
+                .out_retry(KafkaPublish::default())
+                .to("refunds.retry");
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("refunds", &Charge { id: 9 })
+        .await
+        .expect("publish");
+    tb.settle().await.expect("the reaction settles");
+
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("refunds.retry")
+        .assert_called_once()
+        .with_header(RETRY_COUNT_HEADER, "1");
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("refunds.dlq")
+        .assert_called_once()
+        .with(&Charge { id: 9 });
+}
+
+/// Retries the first delivery of a record and acks the copy that comes back.
+#[subscriber(
+    KafkaTopics::new(["orders-eu", "orders-us"])
+        .group("orders-svc")
+        .commit(Commit::Tracked)
+)]
+async fn regional_order(charge: &Charge, ctx: &mut Context<'_, KafkaContext>) -> HandlerOutcome {
+    let _ = charge;
+    if ctx.headers().get(RETRY_COUNT_HEADER).is_none() {
+        HandlerOutcome::retry()
+    } else {
+        HandlerOutcome::ack()
+    }
+}
+
+/// A copy belongs on the topic its delivery arrived on, not on whichever topic of the set a
+/// fixed `.to(..)` would have named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_copy_returns_to_the_topic_it_arrived_on() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(regional_order)
+                .max_attempts(nonzero!(3u32))
+                .out_retry(KafkaPublish::default())
+                .transform(ToSourceTopic);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("orders-eu", &Charge { id: 4 })
+        .await
+        .expect("publish");
+    tb.settle().await.expect("the reaction settles");
+
+    // Two records on the topic: the one the test seeded, and the copy the retry published back.
+    // The assertions below read the latest, which is the copy.
+    tb.broker::<KafkaTestBroker>()
+        .published::<Charge>("orders-eu")
+        .assert_called(2)
+        .with(&Charge { id: 4 })
+        .with_header(RETRY_COUNT_HEADER, "1");
+    assert!(
+        tb.broker::<KafkaTestBroker>()
+            .published::<Charge>("orders-us")
+            .messages()
+            .is_empty(),
+        "a copy must not cross to the other topic of the set",
+    );
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PlanOrder {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// Two mount sites send this item to two different topics, so the type declares none and each
+// include names its own.
+#[derive(Debug, Serialize, Outgoing)]
 struct PlanItem {
     order_id: u64,
 }
@@ -391,67 +939,62 @@ async fn plan_keyed(order: &PlanOrder) -> PlanItem {
 }
 
 /// Stamps the reply with a record key, standing in for a handler that picked its placement.
+/// It writes no per-record setting, so it is generic over them and mounts anywhere.
 struct KeyStamp;
 
-impl<C> ruststream::runtime::PublishTransform<C> for KeyStamp {
+impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
+    type Destination = Reads;
+
     fn apply(
         &self,
-        out: &mut ruststream::runtime::Outgoing<'_>,
-        _cx: &ruststream::runtime::PublishContext<'_, C>,
+        out: &mut OutgoingRecord<'_>,
+        _options: &mut Option<Options>,
+        _cx: &K::View<'_>,
     ) {
         out.headers_mut().insert(PARTITION_KEY_HEADER, "tenant-1");
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn round_robin_stamps_cycling_partitions() {
-    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+async fn round_robin_places_replies_around_the_cycle() {
+    use ruststream_rdkafka::RoundRobin;
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             b.include(plan)
-                .out(Reply, KafkaPublish::default())
+                .out_reply(KafkaPublish::default())
                 .transform(RoundRobin::partitions(2));
         });
     let tb = TestApp::start(app).await.expect("start");
 
-    for id in 0..4 {
+    // One delivery at a time: the harness reads back the settings of the most recent reply, so
+    // the cycle is proved step by step rather than in bulk.
+    for (id, partition) in [0, 1, 2, 3].into_iter().zip([0, 1, 0, 1]) {
         tb.broker::<KafkaTestBroker>()
             .publish("plan-orders", &PlanOrder { id })
             .await
             .expect("publish");
+        tb.settle().await.expect("the delivery settles");
+        tb.broker::<KafkaTestBroker>()
+            .published::<PlanItem>("work-items")
+            .with_options(&KafkaOptions::default().partition(partition));
     }
 
-    let published = tb
-        .broker::<KafkaTestBroker>()
-        .published::<PlanItem>("work-items");
-    let stamped: Vec<String> = published
-        .messages()
-        .iter()
-        .map(|msg| {
-            msg.headers()
-                .get_str(PARTITION_HEADER)
-                .expect("stamped partition")
-                .to_owned()
-        })
-        .collect();
-    assert_eq!(
-        stamped,
-        ["0", "1", "0", "1"],
-        "the cycle targets one partition per message",
-    );
+    tb.broker::<KafkaTestBroker>()
+        .published::<PlanItem>("work-items")
+        .assert_called(4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn round_robin_leaves_keyed_replies_alone() {
-    use ruststream_rdkafka::{PARTITION_HEADER, RoundRobin};
+    use ruststream_rdkafka::RoundRobin;
 
     let app =
         RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
             b.include(plan_keyed)
-                .out(Reply, KafkaPublish::default())
+                .out_reply(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
         });
@@ -471,10 +1014,98 @@ async fn round_robin_leaves_keyed_replies_alone() {
         messages[0].headers().get_str(PARTITION_KEY_HEADER),
         Some("tenant-1")
     );
-    assert!(
-        messages[0].headers().get(PARTITION_HEADER).is_none(),
-        "a keyed reply keeps its key-implied placement",
-    );
+    // A keyed reply keeps its key-implied placement: the cycle set no partition on it.
+    published.assert_called_once().assert_options_default();
+}
+
+// -------------------------------------------------------------- where a reply lands on Kafka
+
+/// The request both proofs below answer. It names no topic of its own, so each test injects it
+/// at the topic its handler reads.
+#[derive(Debug, Serialize, Deserialize, Outgoing)]
+struct ReceiptRequest {
+    id: u64,
+}
+
+/// A receipt always lands on `receipts`, so the topic belongs to the type.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+#[outgoing(name = "receipts")]
+struct Receipt {
+    id: u64,
+}
+
+/// An acknowledgement leaves its topic to whoever mounts the handler.
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+struct Acknowledgement {
+    id: u64,
+}
+
+#[subscriber("receipt-requests", publish)]
+async fn issue_receipt(req: &ReceiptRequest) -> Receipt {
+    Receipt { id: req.id }
+}
+
+#[subscriber("ack-requests", publish("acknowledgements"))]
+async fn acknowledge(req: &ReceiptRequest) -> Acknowledgement {
+    Acknowledgement { id: req.id }
+}
+
+/// A reply type that names its own topic lands there, and the record still carries the key the
+/// chain stamped on it: on Kafka the destination and the placement stay independent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_declared_reply_lands_at_the_topic_its_type_names() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(issue_receipt)
+                .out(Reply, KafkaPublish::default())
+                .transform(KeyStamp);
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .message(&ReceiptRequest { id: 7 })
+        .to("receipt-requests")
+        .publish()
+        .await
+        .expect("publish");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("receipt-requests")
+        .assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<Receipt>("receipts")
+        .assert_called_once()
+        .with(&Receipt { id: 7 })
+        .with_header(PARTITION_KEY_HEADER, "tenant-1");
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// A reply type that names no topic lands where the include site's clause says.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_undeclared_reply_lands_at_the_topic_the_mount_site_names() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(acknowledge).out(Reply, KafkaPublish::default());
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .message(&ReceiptRequest { id: 3 })
+        .to("ack-requests")
+        .publish()
+        .await
+        .expect("publish");
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("ack-requests")
+        .assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .published::<Acknowledgement>("acknowledgements")
+        .assert_called_once()
+        .with(&Acknowledgement { id: 3 });
+
+    tb.shutdown().await.expect("shutdown");
 }
 
 #[derive(Debug, Serialize, Outgoing)]
@@ -527,6 +1158,99 @@ async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
     tb.broker::<KafkaTestBroker>()
         .published::<SlotItem>("slot-work-items")
         .assert_called_once();
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+// ------------------------------------------------------------------ per-record settings
+
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "placed-items")]
+struct PlacedItem {
+    order_id: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(PlacedItem)]
+struct Placement;
+
+// A body that adjusts a per-record setting names this crate's step, so it imports this crate's
+// prelude and bounds the slot on the options type. Both publishes leave the same slot: one
+// takes whatever the producer decides, the other names its partition.
+#[subscriber("placement-orders")]
+async fn place(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher<Options = KafkaOptions>, Placement>,
+) -> HandlerOutcome {
+    let item = PlacedItem { order_id: order.id };
+    if out.message(&item).publish().await.is_err()
+        || out.message(&item).partition(0).publish().await.is_err()
+    {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The slot view is where a per-record setting is read back: the publisher folds it into the
+/// record, so what the call site asked for is only visible there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_partition_step_is_recorded_against_the_slot_it_left() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(place)
+                .out(Placement, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("placement-orders", &PlanOrder { id: 4 })
+        .await
+        .expect("publish");
+
+    tb.out::<Placement>()
+        .assert_called(2)
+        .with_options(&KafkaOptions::default().partition(0));
+    tb.broker::<KafkaTestBroker>()
+        .published::<PlacedItem>("placed-items")
+        .assert_called(2);
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+// A body that names no step at all: every publish takes the producer's own placement.
+#[subscriber("unplaced-orders")]
+async fn leave_placement(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher<Options = KafkaOptions>, Placement>,
+) -> HandlerOutcome {
+    let item = PlacedItem { order_id: order.id };
+    if out.message(&item).publish().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+/// The mirror assertion: nothing was named per record, so the publish carries no settings and
+/// the partitioner places it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_publish_that_names_no_setting_carries_none() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(leave_placement)
+                .out(Placement, KafkaPublish::default())
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("unplaced-orders", &PlanOrder { id: 9 })
+        .await
+        .expect("publish");
+
+    tb.out::<Placement>()
+        .assert_called_once()
+        .assert_options_default();
 
     tb.shutdown().await.expect("shutdown");
 }
@@ -639,13 +1363,16 @@ async fn a_batch_body_repositions_through_its_subscription_context() {
     for (id, resume_at) in [(0, Some(0)), (1, None)] {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "seek-batches",
-                DefaultCodec::default()
-                    .encode(&Cursor { id, resume_at })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "seek-batches",
+                    DefaultCodec::default()
+                        .encode(&Cursor { id, resume_at })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
@@ -702,19 +1429,23 @@ async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
     for id in 0..5u64 {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "batch-sizes",
-                DefaultCodec::default()
-                    .encode(&Job { id })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "batch-sizes",
+                    DefaultCodec::default()
+                        .encode(&Job { id })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
 
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
-        .with_broker(broker, |b| b.include(count_batches.batch(nonzero!(2))));
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker, |b| {
+        b.include(count_batches.batch(nonzero!(2)));
+    });
     let tb = TestApp::start(app).await.expect("start");
     tb.settle().await.expect("the replayed batches settle");
 
@@ -742,13 +1473,16 @@ async fn start_at_opens_a_subscription_on_the_retained_log() {
     for id in 0..2 {
         seeded
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(
-                "audit",
-                DefaultCodec::default()
-                    .encode(&Job { id })
-                    .expect("serializable")
-                    .as_ref(),
-            ))
+            .publish(
+                OutgoingMessage::new(
+                    "audit",
+                    DefaultCodec::default()
+                        .encode(&Job { id })
+                        .expect("serializable")
+                        .as_ref(),
+                ),
+                None,
+            )
             .await
             .expect("seed");
     }
@@ -822,12 +1556,394 @@ async fn manual_assignment_is_rejected_in_process() {
 
     let broker = connected().await;
 
-    let err = KafkaTopic::new("orders")
-        .partitions([0])
+    let err = KafkaPartitions::new("orders", [0])
         .subscribe(&broker)
         .await
         .expect_err("partitions need a real cluster");
     assert!(matches!(err, KafkaError::InvalidOptions(_)));
+}
+
+// ----------------------------------------------------------- transactions in process
+//
+// The stand-in reproduces the client-visible half of a Kafka transaction and nothing more: a
+// commit releases what was held, an abort discards it, and misuse errors. Atomic
+// `read_committed` visibility, zombie fencing and the exactly-once offset coupling are cluster
+// behavior and live in `tests/integration_rdkafka.rs`.
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Fanout {
+    id: u64,
+    items: u64,
+    /// Whether the handler commits its fan-out or aborts it, so one mount covers both paths.
+    commit: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+#[outgoing(name = "shipments")]
+struct Shipment {
+    order_id: u64,
+    item: u64,
+}
+
+#[derive(OutSlot)]
+#[publishes(Shipment)]
+struct Shipments;
+
+// The routes file writes the production policy, and the handler names only the capability: this
+// is the wiring a service ships, mounted unchanged on the stand-in.
+#[subscriber("fanout-orders")]
+async fn fan_out(
+    order: &Fanout,
+    Out(shipments): Out<impl TransactionalPublisher, Shipments>,
+) -> HandlerOutcome {
+    if shipments.begin_transaction().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    for item in 0..order.items {
+        let line = Shipment {
+            order_id: order.id,
+            item,
+        };
+        if shipments.message(&line).publish().await.is_err() {
+            shipments.abort().await.ok();
+            return HandlerOutcome::retry();
+        }
+    }
+    let settled = if order.commit {
+        shipments.commit().await
+    } else {
+        shipments.abort().await
+    };
+    if settled.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transactional_slot_mounts_and_publishes_only_what_it_commits() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(fan_out)
+                .out(
+                    Shipments,
+                    KafkaPublish::default().transactional_id("shipments-svc-1"),
+                )
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish(
+            "fanout-orders",
+            &Fanout {
+                id: 1,
+                items: 2,
+                commit: false,
+            },
+        )
+        .await
+        .expect("publish");
+    tb.broker::<KafkaTestBroker>()
+        .published::<Shipment>("shipments")
+        .assert_not_called();
+    // The slot still recorded both sends: a slot records what the handler put through it, and the
+    // broker's log is what actually became visible. The transaction is the difference.
+    tb.out::<Shipments>().assert_called(2);
+
+    tb.broker::<KafkaTestBroker>()
+        .publish(
+            "fanout-orders",
+            &Fanout {
+                id: 2,
+                items: 2,
+                commit: true,
+            },
+        )
+        .await
+        .expect("publish");
+    tb.broker::<KafkaTestBroker>()
+        .published::<Shipment>("shipments")
+        .assert_called(2)
+        .with(&Shipment {
+            order_id: 2,
+            item: 1,
+        });
+
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("fanout-orders")
+        .assert_called(2)
+        .settled(HandlerOutcome::ack());
+
+    tb.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_transaction_holds_its_publishes_until_commit() {
+    let broker = connected().await;
+    let mut subscriber = broker
+        .subscribe_with("txn-shipments")
+        .await
+        .expect("subscribe");
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id("txn-1"))
+        .await
+        .expect("transactional publisher");
+
+    // With nothing open the publisher routes straight away, as the real one does through the
+    // broker's plain producer.
+    publisher
+        .publish(OutgoingMessage::new("txn-shipments", b"plain"), None)
+        .await
+        .expect("publish");
+    let mut stream = Box::pin(subscriber.stream());
+    assert_eq!(next_payload(&mut stream).await, b"plain");
+
+    publisher.begin_transaction().await.expect("begin");
+    publisher
+        .publish(OutgoingMessage::new("txn-shipments", b"held"), None)
+        .await
+        .expect("publish");
+    let silence = tokio::time::timeout(Duration::from_millis(100), stream.next()).await;
+    assert!(
+        silence.is_err(),
+        "an open transaction must hold its publishes back",
+    );
+
+    publisher.commit().await.expect("commit");
+    assert_eq!(next_payload(&mut stream).await, b"held");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_transaction_routes_nothing_and_frees_the_handle() {
+    let broker = connected().await;
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id("txn-abort"))
+        .await
+        .expect("transactional publisher");
+
+    publisher.begin_transaction().await.expect("begin");
+    publisher
+        .publish(OutgoingMessage::new("txn-dropped", b"gone"), None)
+        .await
+        .expect("publish");
+    publisher.abort().await.expect("abort");
+    assert!(
+        broker.published("txn-dropped").is_empty(),
+        "an aborted transaction must reach the transport with nothing",
+    );
+
+    // The abort released the claim, so the handle takes another transaction.
+    publisher.begin_transaction().await.expect("begin again");
+    publisher
+        .publish(OutgoingMessage::new("txn-dropped", b"kept"), None)
+        .await
+        .expect("publish");
+    publisher.commit().await.expect("commit");
+    let landed: Vec<Vec<u8>> = broker
+        .published("txn-dropped")
+        .iter()
+        .map(|msg| msg.payload().to_vec())
+        .collect();
+    assert_eq!(landed, vec![b"kept".to_vec()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transaction_misuse_errors_instead_of_silently_succeeding() {
+    let broker = connected().await;
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id("txn-misuse"))
+        .await
+        .expect("transactional publisher");
+
+    let no_commit = publisher
+        .commit()
+        .await
+        .expect_err("committing with nothing open must error");
+    assert!(
+        matches!(&no_commit, KafkaError::NoTransaction { id } if id == "txn-misuse"),
+        "{no_commit}",
+    );
+    let no_abort = publisher
+        .abort()
+        .await
+        .expect_err("aborting with nothing open must error");
+    assert!(
+        matches!(&no_abort, KafkaError::NoTransaction { id } if id == "txn-misuse"),
+        "{no_abort}",
+    );
+
+    publisher.begin_transaction().await.expect("begin");
+    // Clones share the handle's one transaction, as clones of the real publisher share one
+    // producer: the second begin is refused rather than silently merging two flows.
+    let busy = publisher
+        .clone()
+        .begin_transaction()
+        .await
+        .expect_err("a second begin must error");
+    assert!(
+        matches!(&busy, KafkaError::TransactionBusy { id } if id == "txn-misuse"),
+        "{busy}",
+    );
+
+    // And the refused begin left the open transaction untouched.
+    publisher
+        .publish(OutgoingMessage::new("txn-misuse-out", b"kept"), None)
+        .await
+        .expect("publish");
+    publisher.commit().await.expect("commit");
+    assert_eq!(broker.published("txn-misuse-out").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transactional_publisher_errors_after_shutdown() {
+    let broker = connected().await;
+    let publisher = broker
+        .transactional_publisher(KafkaPublish::default().transactional_id("txn-closed"))
+        .await
+        .expect("transactional publisher");
+    publisher.begin_transaction().await.expect("begin");
+    publisher
+        .publish(OutgoingMessage::new("txn-late", b"never"), None)
+        .await
+        .expect("buffered");
+
+    broker.shutdown().await.expect("shutdown");
+
+    let err = publisher
+        .commit()
+        .await
+        .expect_err("committing into a closed transport must error");
+    assert!(
+        matches!(&err, KafkaError::Closed { topic } if topic == "txn-closed"),
+        "a transaction control call must name its transactional id, got: {err}",
+    );
+    let begun = publisher
+        .begin_transaction()
+        .await
+        .expect_err("beginning on a closed transport must error");
+    assert!(matches!(&begun, KafkaError::Closed { .. }), "{begun}");
+    // Abort refuses too rather than reporting a local success, as the real publisher's does.
+    let aborted = publisher
+        .abort()
+        .await
+        .expect_err("aborting on a closed transport must error");
+    assert!(matches!(&aborted, KafkaError::Closed { .. }), "{aborted}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn partition_lanes_hand_out_independent_transactions() {
+    let broker = connected().await;
+    let lanes = KafkaPublish::default()
+        .transactional_id("lanes-svc")
+        .per_partition()
+        .pair(&broker)
+        .await
+        .expect("pair");
+
+    let p0 = lanes.for_partition(0).await.expect("lane 0");
+    let p1 = lanes.for_partition(1).await.expect("lane 1");
+    assert_eq!(p0.id(), "lanes-svc-p0");
+    assert_eq!(p1.id(), "lanes-svc-p1");
+
+    p0.begin_transaction().await.expect("begin p0");
+    // The cache hands the same handle back rather than minting a second one, so its transaction
+    // is already claimed - which is what keeps a lane's transaction the lane's own.
+    let again = lanes.for_partition(0).await.expect("lane 0 again");
+    let busy = again
+        .begin_transaction()
+        .await
+        .expect_err("a cached lane is the same handle");
+    assert!(
+        matches!(&busy, KafkaError::TransactionBusy { id } if id == "lanes-svc-p0"),
+        "{busy}",
+    );
+
+    // Two lanes hold open transactions at once, which one shared publisher could not.
+    p1.begin_transaction().await.expect("begin p1");
+    p0.publish(OutgoingMessage::new("lane-out", b"p0"), None)
+        .await
+        .expect("publish p0");
+    p1.publish(OutgoingMessage::new("lane-out", b"p1"), None)
+        .await
+        .expect("publish p1");
+    p0.commit().await.expect("commit p0");
+    p1.abort().await.expect("abort p1");
+
+    let landed: Vec<Vec<u8>> = broker
+        .published("lane-out")
+        .iter()
+        .map(|msg| msg.payload().to_vec())
+        .collect();
+    assert_eq!(
+        landed,
+        vec![b"p0".to_vec()],
+        "the aborted lane must leave nothing behind",
+    );
+}
+
+/// Reads the delivery's source partition and publishes inside that lane's own transaction, the
+/// production shape of a `workers(n)` transactional handler.
+#[subscriber("lane-orders")]
+async fn bill_lane(
+    order: &PlanOrder,
+    Ctx(partition): Ctx<Partition>,
+    Out(lanes): Out<impl PartitionLanes>,
+) -> HandlerOutcome {
+    let Ok(publisher) = lanes.for_partition(partition).await else {
+        return HandlerOutcome::retry();
+    };
+    if publisher.begin_transaction().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    let payload = DefaultCodec::default()
+        .encode(&PlanItem { order_id: order.id })
+        .expect("serializable");
+    if publisher
+        .publish(OutgoingMessage::new("lane-items", payload.as_ref()), None)
+        .await
+        .is_err()
+    {
+        publisher.abort().await.ok();
+        return HandlerOutcome::retry();
+    }
+    if publisher.commit().await.is_err() {
+        return HandlerOutcome::retry();
+    }
+    HandlerOutcome::ack()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lanes_slot_mounts_and_publishes_through_its_partition_transaction() {
+    let app =
+        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+            b.include(bill_lane)
+                .out(
+                    DefaultSlot,
+                    KafkaPublish::default()
+                        .transactional_id("lane-svc")
+                        .per_partition(),
+                )
+                .build();
+        });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaTestBroker>()
+        .publish("lane-orders", &PlanOrder { id: 9 })
+        .await
+        .expect("publish");
+
+    // A lane publishes through a publisher of its own, so its traffic lands in the broker's log
+    // rather than in the slot's record - the capture boundary `PartitionLanes` documents.
+    tb.broker::<KafkaTestBroker>()
+        .published::<PlanItem>("lane-items")
+        .assert_called_once();
+    tb.broker::<KafkaTestBroker>()
+        .subscriber("lane-orders")
+        .assert_called_once()
+        .settled(HandlerOutcome::ack());
+
+    tb.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -835,14 +1951,14 @@ async fn publisher_errors_after_shutdown() {
     let broker = connected().await;
     let publisher = broker.publisher(KafkaPublish::default());
     publisher
-        .publish(OutgoingMessage::new("orders", b"before"))
+        .publish(OutgoingMessage::new("orders", b"before"), None)
         .await
         .expect("publish before shutdown");
 
     broker.shutdown().await.expect("shutdown");
 
     let err = publisher
-        .publish(OutgoingMessage::new("orders", b"after"))
+        .publish(OutgoingMessage::new("orders", b"after"), None)
         .await
         .expect_err("publishing through a handle aliasing a closed transport must error");
     assert!(

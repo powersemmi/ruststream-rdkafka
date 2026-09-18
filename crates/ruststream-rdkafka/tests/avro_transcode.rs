@@ -9,19 +9,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ruststream::runtime::{App, AppInfo, HandlerOutcome, Reply, RustStream, State};
-use ruststream::{Broker, ConnectedBroker, FromRef, OutgoingMessage, Publisher, subscriber};
+use ruststream::{
+    Broker, ConnectedBroker, FromRef, Outgoing, OutgoingMessage, Publisher, subscriber,
+};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaPublish, KafkaTopic, SchemaFrame, SchemaRegistry, SchemaType, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
+mod live;
+
 /// The fixed reply topic (the macro's `publish(..)` takes a string literal). Runs share it:
 /// each pins its own uniquely-named subject on the `SchemaFrame`, so its messages carry a
 /// schema id no other run has, and the probe filters deliveries by a marker id range.
 const FRAMED_TOPIC: &str = "avro-mw-frames-placeholder";
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// The relay republishes the order it read, so the type declares no topic of its own: the run's
+// reply topic stays the mount site's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Outgoing)]
 struct Order {
     id: i64,
     item: String,
@@ -80,10 +86,10 @@ async fn live_avro_middleware_end_to_end() {
     const COUNT: usize = 3;
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    let Some(registry) = std::env::var("SCHEMA_REGISTRY_TEST_URL").ok() else {
+    let Some(registry) = live::url("SCHEMA_REGISTRY_TEST_URL") else {
         return;
     };
-    let Some(kafka) = std::env::var("KAFKA_TEST_URL").ok() else {
+    let Some(kafka) = live::url("KAFKA_TEST_URL") else {
         return;
     };
     let run = format!(
@@ -123,7 +129,7 @@ async fn live_avro_middleware_end_to_end() {
         let json = format!(r#"{{"id":{},"item":"item-{n}"}}"#, base + n);
         seed_broker
             .publisher(KafkaPublish::default())
-            .publish(OutgoingMessage::new(&trigger, json.as_bytes()))
+            .publish(OutgoingMessage::new(&trigger, json.as_bytes()), None)
             .await
             .expect("seed trigger");
     }

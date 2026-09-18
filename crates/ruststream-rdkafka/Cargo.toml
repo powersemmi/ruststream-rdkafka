@@ -27,9 +27,14 @@ schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
 # Avro transcoding for the registry middleware: apache-avro's serde path plus the AvroSchema
 # derive for registering subjects from types.
 avro = ["schema-registry", "dep:apache-avro"]
-# Protobuf transcoding for the registry middleware: dynamic messages (prost-reflect) with
-# descriptors compiled from the registry's .proto sources (protox).
-protobuf = ["schema-registry", "dep:prost-reflect", "dep:protox"]
+# Protobuf: the byte-lane surface over prost-generated messages, plus the transcoding path for
+# the registry middleware - dynamic messages (prost-reflect) with descriptors compiled from the
+# registry's .proto sources (protox).
+protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
+# The protocol bindings this crate contributes to the generated AsyncAPI document: the Kafka
+# topic behind a channel, the consumer group of an operation, the schema-registry coordinate of
+# a server. Forwarded from the core, where the document is built.
+asyncapi = ["ruststream/asyncapi", "dep:serde"]
 # Ships the in-process test broker (`testing` module). The conformance harness is broker-author
 # tooling and stays in this repo's dev-dependencies, out of the user-facing feature.
 testing = ["ruststream/testing"]
@@ -55,19 +60,30 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 apache-avro = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
 prost-reflect = { workspace = true, optional = true }
 protox = { workspace = true, optional = true }
 
 [dev-dependencies]
-ruststream = { workspace = true, features = ["conformance", "testing", "macros", "json"] }
+ruststream = { workspace = true, features = [
+    "asyncapi",
+    "conformance",
+    "testing",
+    "macros",
+    "json",
+] }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 wiremock = "0.6"
+schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }
 
-# The vendored librdkafka build makes docs.rs shy away from the TLS/SASL backends; the API
-# surface is identical either way, so document with just the `testing` module enabled.
+# The crate overview links into the feature-gated modules (`schema_registry`, `avro`,
+# `protobuf`, `testing`, the document), so a page built on the default features would have
+# nowhere to send a reader. The list stops short of the TLS/SASL backends: the vendored
+# librdkafka build is what docs.rs shies away from, and the API surface is identical either way.
 [package.metadata.docs.rs]
-features = ["testing"]
+features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 
 # The kafka_* examples are the docs-site snippet sources; keep them runnable and snippet-checked.
 [[example]]
@@ -109,8 +125,24 @@ name = "kafka_avro"
 required-features = ["avro"]
 
 [[example]]
+name = "kafka_third_party_registry"
+required-features = ["avro"]
+
+[[example]]
+name = "kafka_avro_codec"
+required-features = ["avro"]
+
+[[example]]
 name = "kafka_protobuf"
 required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_protobuf_plain"
+required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_protobuf_testing"
+required-features = ["protobuf", "testing"]
 
 [[example]]
 name = "kafka_testing"

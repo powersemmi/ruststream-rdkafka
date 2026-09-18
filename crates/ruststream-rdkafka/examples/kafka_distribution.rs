@@ -1,7 +1,7 @@
 //! Round-robin reply distribution: librdkafka has no round-robin partitioner, and keyless
 //! distribution may batch-stick to one partition - with long, near-constant per-message
-//! processing that means one hot consumer and idle peers. The `RoundRobin` transform stamps
-//! every reply with the next partition in the cycle, the evenest possible spread.
+//! processing that means one hot consumer and idle peers. The `RoundRobin` transform pins
+//! every reply to the next partition in the cycle, the evenest possible spread.
 //!
 //! ```text
 //! just brokers-up
@@ -16,13 +16,15 @@ struct Order {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// The work item declares the topic it lands on, so the subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "work-items")]
 struct WorkItem {
     order_id: u64,
 }
 
 // A keyless reply: nothing pins it to a partition, so distribution is the publisher's call.
-#[subscriber("orders", publish("work-items"))]
+#[subscriber("orders", publish)]
 async fn plan(order: &Order) -> WorkItem {
     WorkItem { order_id: order.id }
 }
@@ -33,13 +35,13 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("planner", "0.1.0")).with_broker(broker, |b| {
         // --8<-- [start:round_robin]
         // Every reply targets the next partition of the cycle (0, 1, ..., 7, 0, ...), one
-        // message each. Replies that already carry an explicit partition or a record key are
-        // left alone - keys exist for ordering, and the transform must not break placement
-        // the handler chose. The count is explicit and must match the destination topic.
+        // message each. Replies that already name a partition or carry a record key are left
+        // alone - keys exist for ordering, and the transform must not break placement the
+        // handler chose. The count is explicit and must match the destination topic.
         // The transform is a step of the mount site's chain, right after the policy; the
         // runtime pairs the whole chain into the live publisher once the broker is connected.
         b.include(plan)
-            .out(Reply, Publish::default())
+            .out_reply(Publish::default())
             .transform(RoundRobin::partitions(8));
         // --8<-- [end:round_robin]
     })

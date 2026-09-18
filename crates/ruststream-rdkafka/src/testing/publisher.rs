@@ -4,11 +4,13 @@ use std::future::{Future, ready};
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "asyncapi")]
+use ruststream::asyncapi::Bindings;
 use ruststream::{DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher};
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
 use crate::error::KafkaError;
-use crate::publisher::KafkaPublish;
+use crate::publisher::{KafkaOptions, KafkaPublish};
 
 /// Publisher into the in-process router.
 ///
@@ -36,22 +38,68 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for KafkaPublish {
     ) -> impl Future<Output = Result<Self::Live, PairError>> {
         ready(Ok(connected.publisher(self)))
     }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
 }
 
 impl DefaultPublish for ConnectedKafkaTestBroker {
     type Policy = KafkaPublish;
 }
 
+/// And it pairs the framing policy too, so a mount site naming
+/// [`KafkaPublish::framed`](crate::KafkaPublish::framed) is testable in process: the envelope a
+/// reply carries on the in-process topic is the one a real broker would have put there.
+#[cfg(feature = "protobuf")]
+impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPublish {
+    type Live = crate::protobuf::KafkaFramedPublisher<KafkaTestPublisher>;
+
+    fn pair(
+        self,
+        connected: &ConnectedKafkaTestBroker,
+    ) -> impl Future<Output = Result<Self::Live, PairError>> {
+        let (publish, framing) = self.into_parts();
+        ready(Ok(crate::protobuf::KafkaFramedPublisher::new(
+            connected.publisher(publish),
+            framing,
+        )))
+    }
+
+    /// The destination topic of this publish, which is what the channel stands for.
+    #[cfg(feature = "asyncapi")]
+    fn channel_bindings(&self, channel: &str) -> Bindings {
+        crate::bindings::channel(channel)
+    }
+
+    /// The framing says where the schema id lives, which the destination does not change.
+    #[cfg(feature = "asyncapi")]
+    fn message_bindings(&self, _channel: &str) -> Bindings {
+        Self::message_bindings(self)
+    }
+}
+
 impl Publisher for KafkaTestPublisher {
     type Error = KafkaError;
+    type Options = KafkaOptions;
 
     /// Routes `msg` to subscribers of the topic named by `msg.name()`.
+    ///
+    /// A partition named per record changes nothing here: the transport gives every topic one
+    /// partition. The harness records the setting itself, so `with_options` reads back what the
+    /// call site or a publish transform chose.
     ///
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] when the topic name is empty, and
     /// [`KafkaError::Closed`] once the transport this handle aliases has been shut down.
-    fn publish(&self, msg: OutgoingMessage<'_>) -> impl Future<Output = Result<(), Self::Error>> {
+    fn publish(
+        &self,
+        msg: OutgoingMessage<'_>,
+        _options: Option<&Self::Options>,
+    ) -> impl Future<Output = Result<(), Self::Error>> {
         if msg.name().is_empty() {
             return ready(Err(KafkaError::InvalidOptions(
                 "topic name must not be empty; the outgoing message name is the destination \

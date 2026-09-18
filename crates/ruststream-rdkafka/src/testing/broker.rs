@@ -8,13 +8,17 @@ use std::sync::{Arc, OnceLock};
 use bytes::Bytes;
 use ruststream::testing::{Coordinator, TestableBroker};
 use ruststream::{
-    Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage, ServerSpec, Subscribe,
+    AddressedCopies, Broker, ConnectedBroker, DescribeServer, OutgoingMessage, RawMessage,
+    ServerSpec, Subscribe,
 };
 
 use super::publisher::KafkaTestPublisher;
 use super::router::KeyRouter;
 use super::subscriber::KafkaTestSubscriber;
+use super::transaction::KafkaTestTransactionalPublisher;
 use crate::error::KafkaError;
+use crate::publisher::KafkaTransactionalPublish;
+use crate::subscription::{Commit, LaneKey, Reader, SubscriptionPlan};
 
 pub(crate) struct TestBrokerState {
     pub(crate) router: KeyRouter,
@@ -81,7 +85,7 @@ impl fmt::Debug for TestBrokerState {
 /// let mut subscriber = broker.subscribe_with("orders").await?;
 /// broker
 ///     .publisher(KafkaPublish::default())
-///     .publish(OutgoingMessage::new("orders", b"{}"))
+///     .publish(OutgoingMessage::new("orders", b"{}"), None)
 ///     .await?;
 /// # Ok(())
 /// # }
@@ -89,6 +93,7 @@ impl fmt::Debug for TestBrokerState {
 #[derive(Debug, Clone, Default)]
 pub struct KafkaTestBroker {
     state: Arc<TestBrokerState>,
+    default_group: Option<String>,
 }
 
 impl KafkaTestBroker {
@@ -96,6 +101,28 @@ impl KafkaTestBroker {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The consumer group subscriptions that do not name one join, mirroring
+    /// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group).
+    ///
+    /// It matters here for the same reason it matters on a cluster: members of one group share a
+    /// topic's records instead of each getting a copy. Set it when the service under test sets
+    /// one, or two handlers on the same topic will each be alone in a group of their own and both
+    /// see every record - which is not what the same wiring does against Kafka.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::testing::KafkaTestBroker;
+    ///
+    /// let broker = KafkaTestBroker::new().default_group("orders-svc");
+    /// # let _ = broker;
+    /// ```
+    #[must_use]
+    pub fn default_group(mut self, group: impl Into<String>) -> Self {
+        self.default_group = Some(group.into());
+        self
     }
 }
 
@@ -105,14 +132,31 @@ impl Broker for KafkaTestBroker {
 
     /// Connecting an in-process transport is free; the ladder shape is what matters.
     fn connect(self) -> impl Future<Output = Result<Self::Connected, Self::Error>> {
-        ready(Ok(ConnectedKafkaTestBroker { state: self.state }))
+        ready(Ok(ConnectedKafkaTestBroker {
+            state: self.state,
+            default_group: self.default_group,
+        }))
     }
 }
 
 impl DescribeServer for KafkaTestBroker {
+    /// The same shape the real broker reports, minus a host: the in-process transport has no
+    /// address, and it speaks to no schema registry, so it contributes no server binding either.
     fn describe_server(&self) -> ServerSpec {
         ServerSpec::in_process("kafka")
     }
+}
+
+/// The settlement mode of a subscription opened by name rather than by descriptor.
+///
+/// [`Commit::Tracked`], not the descriptor default [`Commit::Auto`], and it is the one place this
+/// transport knowingly departs from the real broker. The core routing contract the conformance
+/// suite enforces requires `nack(true)` to redeliver, while Kafka's auto-commit stores the
+/// position as a record is handed over and so cannot bring it back. A name carries no commit
+/// mode to resolve that with, so the bare path keeps the contract; a subscription that names
+/// [`Commit::Auto`] on a descriptor gets Kafka's advisory `nack` instead.
+const fn bare_commit() -> Commit {
+    Commit::Tracked
 }
 
 /// The connected form of [`KafkaTestBroker`].
@@ -122,10 +166,14 @@ impl DescribeServer for KafkaTestBroker {
 #[derive(Debug, Clone, Default)]
 pub struct ConnectedKafkaTestBroker {
     state: Arc<TestBrokerState>,
+    default_group: Option<String>,
 }
 
 impl ConnectedKafkaTestBroker {
-    /// Subscribes to `topic` (exact-name routing; no groups or partitions in-process).
+    /// Subscribes to `topic` with descriptor defaults, mirroring
+    /// [`ConnectedKafkaBroker`](crate::ConnectedKafkaBroker)'s `Subscribe` entry point: the
+    /// broker's [`default_group`](KafkaTestBroker::default_group) applies, and without one the
+    /// subscription is alone in a group of its own.
     ///
     /// # Errors
     ///
@@ -137,11 +185,11 @@ impl ConnectedKafkaTestBroker {
         topic: impl Into<String>,
     ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
         let topics = [topic.into()];
-        ready(self.open_subscription(&topics))
+        ready(self.open_subscription(&topics, None, LaneKey::default(), bare_commit()))
     }
 
     /// Subscribes to several topics as one subscription, mirroring
-    /// [`KafkaTopic::and_topic`](crate::KafkaTopic::and_topic): every name routes exactly.
+    /// [`KafkaTopics`](crate::KafkaTopics): every name routes exactly.
     ///
     /// # Errors
     ///
@@ -152,12 +200,43 @@ impl ConnectedKafkaTestBroker {
         &self,
         topics: &[String],
     ) -> impl Future<Output = Result<KafkaTestSubscriber, KafkaError>> {
-        ready(self.open_subscription(topics))
+        ready(self.open_subscription(topics, None, LaneKey::default(), bare_commit()))
     }
 
-    /// The synchronous body behind both subscribe entry points, kept apart so the validation
+    /// Opens the subscription a resolved descriptor asks for, the way the real broker does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::InvalidOptions`] for a manual partition assignment: the in-process
+    /// broker holds no partitions to assign, so that descriptor needs a real cluster.
+    pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaTestSubscriber, KafkaError> {
+        match plan.reader {
+            Reader::Subscribed(topics) => self.open_subscription(
+                &topics,
+                plan.settings.group.as_deref(),
+                plan.settings.lane_key,
+                plan.settings.commit,
+            ),
+            Reader::Assigned { .. } => Err(KafkaError::InvalidOptions(
+                "the in-process test broker does not simulate partitions; a `KafkaPartitions` \
+                 reader needs a real cluster"
+                    .to_owned(),
+            )),
+        }
+    }
+
+    /// The synchronous body behind the subscribe entry points, kept apart so the validation
     /// errors stay `?` rather than a chain of early `ready(Err(..))` returns.
-    fn open_subscription(&self, topics: &[String]) -> Result<KafkaTestSubscriber, KafkaError> {
+    ///
+    /// `group`, `lane_key` and `commit` are what a descriptor carries into the subscription; the
+    /// bare-name entry points pass the by-name equivalents.
+    pub(crate) fn open_subscription(
+        &self,
+        topics: &[String],
+        group: Option<&str>,
+        lane_key: LaneKey,
+        commit: Commit,
+    ) -> Result<KafkaTestSubscriber, KafkaError> {
         for topic in topics {
             if topic.is_empty() {
                 return Err(KafkaError::InvalidOptions(
@@ -174,7 +253,13 @@ impl ConnectedKafkaTestBroker {
             }
             self.state.ensure_open(topic)?;
         }
-        Ok(KafkaTestSubscriber::open_many(&self.state, topics))
+        Ok(KafkaTestSubscriber::open_many(
+            &self.state,
+            topics,
+            group.or(self.default_group.as_deref()),
+            lane_key,
+            commit,
+        ))
     }
 
     /// A publisher into this broker's router.
@@ -186,6 +271,47 @@ impl ConnectedKafkaTestBroker {
     #[must_use]
     pub fn publisher(&self, _policy: crate::KafkaPublish) -> KafkaTestPublisher {
         KafkaTestPublisher::new(Arc::clone(&self.state))
+    }
+
+    /// A live transactional publisher over this broker's router, mirroring
+    /// [`ConnectedKafkaBroker::transactional_publisher`](crate::ConnectedKafkaBroker::transactional_publisher).
+    ///
+    /// See [`KafkaTestTransactionalPublisher`] for what the in-process transaction reproduces
+    /// and what it cannot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Closed`] once the transport has been shut down.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::KafkaPublish;
+    /// use ruststream_rdkafka::testing::KafkaTestBroker;
+    ///
+    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
+    /// let broker = KafkaTestBroker::new().connect().await?;
+    /// let publisher = broker
+    ///     .transactional_publisher(KafkaPublish::default().transactional_id("orders-svc-1"))
+    ///     .await?;
+    /// # let _ = publisher;
+    /// # Ok(())
+    /// # }
+    /// ```
+    // Returns a future without awaiting on purpose: the real broker's counterpart is async
+    // because it creates and initializes a producer, and call-site parity keeps a service's
+    // wiring identical on both.
+    pub fn transactional_publisher(
+        &self,
+        policy: KafkaTransactionalPublish,
+    ) -> impl Future<Output = Result<KafkaTestTransactionalPublisher, KafkaError>> {
+        let opened = self.state.ensure_open(policy.id());
+        ready(opened.map(|()| KafkaTestTransactionalPublisher::new(&self.state, policy)))
+    }
+
+    pub(crate) const fn state(&self) -> &Arc<TestBrokerState> {
+        &self.state
     }
 }
 
@@ -204,6 +330,10 @@ impl ConnectedBroker for ConnectedKafkaTestBroker {
 
 impl Subscribe for ConnectedKafkaTestBroker {
     type Subscriber = KafkaTestSubscriber;
+
+    /// The topic itself, as on a cluster: the in-process router delivers a publish to every
+    /// group reading that name.
+    type Copies = AddressedCopies;
 
     async fn subscribe(&self, name: &str) -> Result<Self::Subscriber, Self::Error> {
         self.subscribe_with(name).await

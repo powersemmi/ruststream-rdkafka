@@ -14,7 +14,10 @@ struct Order {
     id: u64,
 }
 
-#[derive(Debug, Serialize)]
+// The reply topic is a property of the confirmation itself, so the type declares it and the
+// subscriber's clause names none.
+#[derive(Debug, Serialize, Outgoing)]
+#[outgoing(name = "confirmations")]
 struct Confirmation {
     id: u64,
     accepted: bool,
@@ -32,7 +35,7 @@ struct Confirmation {
         .commit(Commit::Tracked)
         .assignment(Assignment::CooperativeSticky)
         .config("fetch.min.bytes", "1024"),
-    publish("confirmations")
+    publish
 )]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
@@ -46,11 +49,7 @@ async fn confirm(order: &Order) -> Confirmation {
 // Manual assignment: consume exactly these partitions - no group membership, no rebalancing.
 // This reader names no group, so it cannot commit and the start offset must be explicit; add
 // `.group("...")` to commit positions into a group without joining it.
-#[subscriber(
-    KafkaTopic::new("orders")
-        .partitions([0])
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest))]
 async fn audit_partition_zero(order: &Order) -> HandlerOutcome {
     println!("partition 0 saw order {}", order.id);
     HandlerOutcome::ack()
@@ -65,7 +64,7 @@ fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         // `confirm` replies through the broker's default publish policy, so the include site
-        // names no publisher; the explicit spelling is `.out(Reply, Publish::default())`.
+        // names no publisher; the explicit spelling is `.out_reply(Publish::default())`.
         b.include(confirm);
         b.include(audit_partition_zero);
     })

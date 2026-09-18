@@ -87,7 +87,6 @@ plugins:
           build: true
           nav_translations:
             Home: Главная
-            Guide: Руководство
             RustStream docs: Документация RustStream
             API reference: Справочник API
         - locale: zh
@@ -95,9 +94,26 @@ plugins:
           build: true
           nav_translations:
             Home: 首页
-            Guide: 指南
             RustStream docs: RustStream 文档
             API reference: API 参考
+
+  # The guides moved into the crate's rustdoc; every old URL lands on the section that took
+  # its topic over. `latest` on docs.rs is the newest stable release, so these resolve once
+  # the 0.7 line ships.
+  - redirects:
+      redirect_maps:
+        topics.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing
+        ru/topics.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing
+        zh/topics.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing
+        publishing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing
+        ru/publishing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing
+        zh/publishing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing
+        schema-registry.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html
+        ru/schema-registry.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html
+        zh/schema-registry.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html
+        testing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html
+        ru/testing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html
+        zh/testing.md: https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html
 
 extra:
   version:
@@ -108,10 +124,5 @@ extra:
 
 nav:
   - Home: index.md
-  - Guide:
-      - topics.md
-      - publishing.md
-      - schema-registry.md
-      - testing.md
   - RustStream docs: https://powersemmi.github.io/ruststream/
   - API reference: https://docs.rs/ruststream-rdkafka

@@ -10,6 +10,9 @@ check:
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo check --workspace --all-targets --all-features
     cargo check --workspace --no-default-features
+    # CI's stable leg denies rustdoc warnings, and broken intra-doc links are invisible to
+    # every step above; running it here is what keeps a local pass from turning CI red.
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 test:
     cargo test --workspace --all-features
@@ -24,8 +27,11 @@ test-brokers: brokers-up
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'just brokers-down' EXIT
+    # This recipe starts the stand, so a gated test that skips itself here is a fault, not a
+    # developer without a cluster.
     KAFKA_TEST_URL=127.0.0.1:9092 \
     SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+    RUSTSTREAM_REQUIRE_LIVE=1 \
         cargo test --workspace --all-features -- --test-threads=1
 
 fmt:
