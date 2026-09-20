@@ -205,6 +205,12 @@ impl KafkaMessage {
         &self.topic
     }
 
+    /// The same name, as the subscription minted it: taking it costs a reference count, so
+    /// anything built per delivery carries the name instead of copying it.
+    pub(crate) fn shared_topic(&self) -> Str {
+        self.topic.clone()
+    }
+
     /// The partition this record was consumed from.
     #[must_use]
     pub fn partition(&self) -> i32 {

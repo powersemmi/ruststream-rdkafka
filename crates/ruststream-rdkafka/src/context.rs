@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ruststream::{BuildBatchContext, BuildContext, Field};
+use ruststream::{BuildBatchContext, BuildContext, Field, Str};
 
 use crate::message::KafkaMessage;
 use crate::seek::{KafkaPosition, KafkaSeeker};
@@ -25,7 +25,7 @@ use crate::seek::{KafkaPosition, KafkaSeeker};
 /// delivery.
 #[derive(Debug, Clone)]
 pub struct KafkaContext {
-    topic: String,
+    topic: Str,
     partition: i32,
     offset: i64,
     timestamp_millis: Option<i64>,
@@ -68,7 +68,7 @@ impl KafkaContext {
     /// ordered suffix behind it on the partition.
     #[must_use]
     pub fn position(&self) -> KafkaPosition {
-        KafkaPosition::topic_offset(&self.topic, self.partition, self.offset)
+        KafkaPosition::topic_offset(self.topic(), self.partition, self.offset)
     }
 
     /// The handle repositioning the subscription this delivery came from.
@@ -81,7 +81,7 @@ impl KafkaContext {
 impl BuildContext<KafkaMessage> for KafkaContext {
     fn build(msg: &KafkaMessage) -> Self {
         Self {
-            topic: msg.topic().to_owned(),
+            topic: msg.shared_topic(),
             partition: msg.partition(),
             offset: msg.offset(),
             timestamp_millis: msg.timestamp_millis(),
@@ -102,7 +102,9 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
     fn build(msg: &crate::testing::KafkaTestMessage) -> Self {
         Self {
-            topic: msg.topic().to_owned(),
+            // The in-process transport mints a topic name per delivery rather than sharing the
+            // subscription's, so this is the one context build that copies the name.
+            topic: Str::from(msg.topic()),
             partition: 0,
             offset: msg.offset(),
             timestamp_millis: None,

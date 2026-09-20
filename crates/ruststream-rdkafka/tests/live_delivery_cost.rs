@@ -17,6 +17,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::hint::black_box;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -30,7 +31,8 @@ use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
-use ruststream::{Broker, IncomingMessage, Subscriber};
+use ruststream::{Broker, BuildContext as _, IncomingMessage, Subscriber};
+use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaMessage, KafkaTopic, StartOffset};
 
 mod live;
@@ -251,5 +253,54 @@ async fn a_delivery_allocates_only_its_payload_over_the_raw_loop() {
         "over {STEP} settled deliveries this crate allocates {tracked} where the raw loop \
          allocates {raw}: {} per delivery against a budget of {TRACKED_BUDGET}",
         (tracked - raw) / STEP,
+    );
+}
+
+/// A delivery's context is built out of what the delivery already holds.
+///
+/// A handler that types a `Context<'_, KafkaContext>` parameter has one built per delivery, so
+/// the build sits on the delivery path exactly as the decode does. Its coordinates are numbers
+/// and its topic is the name the subscription minted once, shared with every delivery of it, so
+/// there is nothing left to allocate for a keyless record. A keyed record still copies its key:
+/// the context outlives the delivery it was built from, and a key read where librdkafka left it
+/// cannot.
+#[tokio::test]
+async fn a_delivery_context_is_built_without_allocating() {
+    let Some(url) = live::url("KAFKA_TEST_URL") else {
+        return;
+    };
+    let topic = unique("context-cost");
+    create_topic(&url, &topic).await;
+    fill(&url, &topic, WARM).await;
+
+    let broker = KafkaBroker::new([url.clone()])
+        .connect()
+        .await
+        .expect("connect");
+    let mut subscriber = broker
+        .subscribe_with(
+            KafkaTopic::new(&topic)
+                .group(unique("context-cost"))
+                .start(StartOffset::Earliest),
+        )
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(subscriber.stream());
+    let delivery = stream
+        .next()
+        .await
+        .expect("the stream does not end")
+        .expect("the delivery arrives");
+
+    // One delivery, many contexts: what the window counts is the build and nothing around it.
+    let before = allocations();
+    for _ in 0..STEP {
+        black_box(KafkaContext::build(&delivery));
+    }
+    let built = allocations() - before;
+    assert_eq!(
+        built, 0,
+        "building {STEP} contexts off one keyless delivery took {built} allocations: the \
+         context is copying what the delivery already holds",
     );
 }
