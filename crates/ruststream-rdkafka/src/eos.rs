@@ -20,7 +20,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
-    OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
+    Lend, OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -830,6 +830,8 @@ impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
 }
 
 impl Publisher for EosPipeline {
+    // The record goes out through the transactional publisher underneath, which reads the bytes.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 

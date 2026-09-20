@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
-use ruststream::{DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher};
+use ruststream::{DefaultPublish, Lend, OutgoingMessage, PairError, PublishPolicy, Publisher};
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
 use crate::error::KafkaError;
@@ -82,6 +82,9 @@ impl PublishPolicy<ConnectedKafkaTestBroker> for crate::protobuf::KafkaFramedPub
 }
 
 impl Publisher for KafkaTestPublisher {
+    // The stand-in answers the way the transport it stands in for answers: the router copies the
+    // record into its log, as librdkafka copies it into the producer queue.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 

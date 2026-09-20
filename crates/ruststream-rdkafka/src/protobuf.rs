@@ -38,7 +38,7 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
-use ruststream::{OutgoingMessage, PairError, PublishPolicy, Publisher};
+use ruststream::{OutgoingFor, OutgoingMessage, PairError, PublishPolicy, Publisher};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
@@ -583,6 +583,9 @@ impl<P> KafkaFramedPublisher<P> {
 }
 
 impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPublisher<P> {
+    // Framing writes a payload of its own and hands it to the publisher underneath, so the form
+    // is whatever that one declared.
+    type Payload = P::Payload;
     type Error = KafkaError;
     // Framing is a payload transform: the record's own settings are whatever the publisher
     // underneath speaks, passed through untouched.
@@ -602,7 +605,7 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
     /// Not cancel safe, for the same reason [`KafkaPublisher::publish`] is not.
     async fn publish(
         &self,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingFor<'_, Self::Payload>,
         options: Option<&Self::Options>,
     ) -> Result<(), Self::Error> {
         let framed = match self.framing.frame(msg.name(), msg.payload()).await? {
@@ -977,7 +980,8 @@ message Order {
         };
         // The encode half is bare prost: no envelope, no index path, no id.
         let mut buf = ruststream::BytesMut::new();
-        let bare = order.wire_bytes(&mut buf).expect("encode").to_vec();
+        let written = order.wire_bytes(&mut buf).expect("encode");
+        let bare = written.of(&buf).to_vec();
         assert_eq!(bare, order.encode_to_vec());
 
         // The framing a publish layer would add: id 9, the compact `[0]` path.

@@ -14,7 +14,8 @@ use rdkafka::util::Timeout;
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{OutPipeline, PublishBuilder, PublishSink, Slot};
 use ruststream::{
-    DefaultPublish, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
+    DefaultPublish, Lend, OutgoingMessage, PairError, PublishPolicy, Publisher,
+    TransactionalPublisher,
 };
 use tokio::sync::OnceCell;
 use tokio::task;
@@ -300,6 +301,9 @@ async fn send_via(
 }
 
 impl Publisher for KafkaPublisher {
+    // librdkafka's record takes the payload as `&[u8]` and copies it into the producer queue,
+    // so this transport reads the bytes and keeps nothing.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 
@@ -587,6 +591,8 @@ impl KafkaTransactionalPublisher {
 }
 
 impl Publisher for KafkaTransactionalPublisher {
+    // The same record as the plain publisher's, inside a transaction.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 
