@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -291,19 +292,41 @@ impl Subscriber for KafkaSubscriber {
             (self, context, consumer),
             |(sub, context, consumer)| async move {
                 loop {
-                    // The waiter is armed before the check, so a failure landing between the two
-                    // is not missed, and the select below is what makes it reach a subscription
-                    // whose topic may never deliver anything.
-                    let recorded = context.start_failure_waiter();
+                    // A start position the rebalance could not apply preempts whatever was
+                    // fetched: a subscription that was not opened where it was asked must not
+                    // pass for a working one.
                     if let Some(err) = context.take_start_failure() {
-                        drop(recorded);
                         return Some((Err(err), (sub, context, consumer)));
                     }
-                    let received = tokio::select! {
-                        biased;
-                        () = recorded => continue,
-                        received = consumer.recv() => received,
+                    let mut failed = None;
+                    // A record already fetched needs no waiter: the failure flag above is
+                    // sticky, so it is read on the turn that finds nothing to deliver.
+                    let fetched = consumer.recv().now_or_never();
+                    let received = if fetched.is_some() {
+                        fetched
+                    } else {
+                        // Nothing fetched, so the wait begins. The waiter is registered before
+                        // the flag is read again, so a failure landing between the two wakes
+                        // this wait instead of being missed - which is what makes it reach a
+                        // subscription whose topic may never deliver anything.
+                        let mut recorded = pin!(context.start_failure_waiter());
+                        recorded.as_mut().enable();
+                        failed = context.take_start_failure();
+                        if failed.is_some() {
+                            None
+                        } else {
+                            tokio::select! {
+                                biased;
+                                () = recorded => None,
+                                received = consumer.recv() => Some(received),
+                            }
+                        }
                     };
+                    if let Some(err) = failed {
+                        return Some((Err(err), (sub, context, consumer)));
+                    }
+                    // The waiter fired: the flag is read at the top of the next turn.
+                    let Some(received) = received else { continue };
                     match received {
                         Ok(delivery) => {
                             #[allow(unused_mut)] // mutated by the registry transcode only
