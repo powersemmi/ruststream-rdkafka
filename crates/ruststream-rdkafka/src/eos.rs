@@ -866,9 +866,11 @@ impl Publisher for EosPipeline {
                     .to_owned(),
             ));
         };
-        let mut headers = msg.headers().clone();
+        // The reply is rebuilt without the coordinates, so the map the publish filled moves into
+        // the record rather than being copied into it.
+        let (topic, payload, mut headers) = msg.into_parts();
         headers.remove(EOS_SOURCE_HEADER);
-        let stripped = OutgoingMessage::new(msg.name(), msg.payload()).with_headers(headers);
+        let stripped = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
         self.publish(&source, stripped, options).await
     }
 }
