@@ -5,10 +5,9 @@ use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "schema-registry")]
 use bytes::Bytes;
 use futures::Stream;
-use futures::future::FutureExt as _;
-use rdkafka::Message as _;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
@@ -20,6 +19,7 @@ use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 use crate::message::{KafkaMessage, Lane, Settlement};
+use crate::record::HeldRecord;
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -190,45 +190,39 @@ impl KafkaSubscriber {
         minted
     }
 
-    fn map_delivery(&mut self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
-        let mut headers = convert::headers_from_message(delivery);
+    /// Turns a fetched record into a delivery. The record travels into the delivery whole: what
+    /// is read here is what a delivery cannot answer from the record later, or what a later read
+    /// could no longer see.
+    fn map_delivery(&mut self, record: HeldRecord) -> KafkaMessage {
+        let topic_name = record.topic();
+        let partition = record.partition();
+        let offset = record.offset();
+        let timestamp_millis = record.timestamp_millis();
+        // The headers stay unread unless the delivery is asked for them - except under
+        // transactional commits, where the source coordinates ride them so the reply path can
+        // pair a publishing handler's reply with its consumed offset (see EosPipeline::replies);
+        // stripped from every outgoing publish, so they never hit the wire.
+        let headers = OnceLock::new();
         if matches!(self.commit, Commit::Transactional(_)) {
-            // The source coordinates ride the delivery's headers so the reply path can pair a
-            // publishing handler's reply with its consumed offset (see EosPipeline::replies);
-            // stripped from every outgoing publish, so they never hit the wire.
-            headers.insert(
+            let mut map = convert::headers_from_message(&record);
+            map.insert(
                 Str::from_static(EOS_SOURCE_HEADER),
-                crate::eos::encode_source(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+                crate::eos::encode_source(topic_name, partition, offset),
             );
+            headers.set(map).expect("the cell was just created");
         }
-        let payload = delivery
-            .payload()
-            .map_or_else(Bytes::new, Bytes::copy_from_slice);
         // The generation is captured here, where the delivery is pulled, never where it settles:
         // that is what lets a reposition landing in between tell a delivery of the replaced read
         // position apart from one the new position produced.
         let settlement = match &self.commit {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => Settlement::Tracked {
-                consumer: Arc::clone(&self.consumer),
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+                generation: self.tracker.delivered(topic_name, partition, offset),
             },
             Commit::Transactional(_) => Settlement::Transactional {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+                generation: self.tracker.delivered(topic_name, partition, offset),
             },
         };
         // The key itself is not built here: a subscription with no keyed lanes is never asked
@@ -237,14 +231,14 @@ impl KafkaSubscriber {
             LaneKey::RecordKey => Lane::RecordKey,
             LaneKey::Partition => Lane::Partition(OnceLock::new()),
         };
-        let topic = self.shared_topic(delivery.topic());
+        let topic = self.shared_topic(topic_name);
         KafkaMessage::new(
-            payload,
+            record,
             headers,
             topic,
-            delivery.partition(),
-            delivery.offset(),
-            delivery.timestamp().to_millis(),
+            partition,
+            offset,
+            timestamp_millis,
             settlement,
             lane,
             Arc::clone(&self.seeker),
@@ -301,7 +295,7 @@ impl Subscriber for KafkaSubscriber {
                     let mut failed = None;
                     // A record already fetched needs no waiter: the failure flag above is
                     // sticky, so it is read on the turn that finds nothing to deliver.
-                    let fetched = consumer.recv().now_or_never();
+                    let fetched = HeldRecord::ready(&consumer);
                     let received = if fetched.is_some() {
                         fetched
                     } else {
@@ -318,7 +312,7 @@ impl Subscriber for KafkaSubscriber {
                             tokio::select! {
                                 biased;
                                 () = recorded => None,
-                                received = consumer.recv() => Some(received),
+                                received = HeldRecord::next(&consumer) => Some(received),
                             }
                         }
                     };
@@ -328,10 +322,9 @@ impl Subscriber for KafkaSubscriber {
                     // The waiter fired: the flag is read at the top of the next turn.
                     let Some(received) = received else { continue };
                     match received {
-                        Ok(delivery) => {
+                        Ok(record) => {
                             #[allow(unused_mut)] // mutated by the registry transcode only
-                            let mut item = sub.map_delivery(&delivery);
-                            drop(delivery);
+                            let mut item = sub.map_delivery(record);
                             // The prefetch first: it reads the envelope, which the transcode
                             // would have replaced with a JSON document. The two are alternatives
                             // anyway.
@@ -400,10 +393,10 @@ impl BatchSubscriber for KafkaSubscriber {
                     let received = tokio::select! {
                         biased;
                         () = recorded => continue,
-                        received = consumer.recv() => received,
+                        received = HeldRecord::next(&consumer) => received,
                     };
                     match received {
-                        Ok(delivery) => break sub.map_delivery(&delivery),
+                        Ok(record) => break sub.map_delivery(record),
                         Err(err) if is_transient(&err) => sub.note_transient(&err),
                         Err(err) => {
                             return Some((Err(KafkaError::consume(err)), (sub, context, consumer)));
@@ -417,12 +410,12 @@ impl BatchSubscriber for KafkaSubscriber {
                 // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
                 // so dropping the probe future loses nothing.
                 while batch.len() < size {
-                    let Some(result) = consumer.recv().now_or_never() else {
+                    let Some(result) = HeldRecord::ready(&consumer) else {
                         break;
                     };
                     match result {
-                        Ok(delivery) => {
-                            let item = sub.map_delivery(&delivery);
+                        Ok(record) => {
+                            let item = sub.map_delivery(record);
                             batch.push(item);
                         }
                         Err(err) if is_transient(&err) => sub.note_transient(&err),

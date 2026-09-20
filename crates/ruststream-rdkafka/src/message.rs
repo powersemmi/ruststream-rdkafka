@@ -6,12 +6,15 @@ use std::future::{Future, ready};
 use std::io::Write as _;
 use std::sync::{Arc, OnceLock};
 
+#[cfg(feature = "schema-registry")]
 use bytes::Bytes;
-use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use rdkafka::consumer::Consumer as _;
 use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
 
+use crate::convert;
+use crate::record::HeldRecord;
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::CommitTracker;
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
 ///
@@ -31,9 +34,9 @@ pub const PARTITION_KEY_HEADER: &str = "kafka-partition-key";
 pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.
     Advisory,
-    /// `Commit::Tracked`: an ack advances the shared watermark and stores the new position.
+    /// `Commit::Tracked`: an ack advances the shared watermark and stores the new position,
+    /// through the consumer the delivery's own record keeps alive.
     Tracked {
-        consumer: Arc<StreamConsumer<TrackingContext>>,
         tracker: Arc<CommitTracker>,
         generation: u64,
     },
@@ -61,7 +64,7 @@ impl Lane {
     /// This delivery's lane key.
     fn of<'a>(&'a self, msg: &'a KafkaMessage) -> Option<&'a [u8]> {
         match self {
-            Self::RecordKey => msg.headers.get(PARTITION_KEY_HEADER),
+            Self::RecordKey => msg.record.key(),
             Self::Partition(text) => Some(
                 text.get_or_init(|| PartitionText::of(msg.partition))
                     .as_bytes(),
@@ -125,8 +128,17 @@ impl PartitionText {
 /// (presence preserved).
 #[derive(Debug)]
 pub struct KafkaMessage {
-    payload: Bytes,
-    headers: HeaderMap,
+    /// The record librdkafka fetched, kept where it put it: the body, the key and the wire
+    /// headers are read out of the fetch buffer, and the consumer that owns that buffer stays
+    /// open for as long as this delivery does.
+    record: HeldRecord,
+    /// The payload the registry middleware transcoded, when there is one. Without it the body
+    /// is the record's own.
+    #[cfg(feature = "schema-registry")]
+    transcoded: Option<Bytes>,
+    /// The `RustStream` view of the record's headers, built on the first read: a delivery
+    /// nothing asks headers of never pays for them.
+    headers: OnceLock<HeaderMap>,
     /// The topic, shared with the subscription that read it: a Kafka consumer reads a handful of
     /// topics and delivers millions of records, so the name is minted once per topic and every
     /// delivery of it takes a reference count.
@@ -157,8 +169,8 @@ impl KafkaMessage {
     // intermediate structs would only add indirection for the one caller.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        payload: Bytes,
-        headers: HeaderMap,
+        record: HeldRecord,
+        headers: OnceLock<HeaderMap>,
         topic: Str,
         partition: i32,
         offset: i64,
@@ -168,7 +180,9 @@ impl KafkaMessage {
         seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
-            payload,
+            record,
+            #[cfg(feature = "schema-registry")]
+            transcoded: None,
             headers,
             topic,
             partition,
@@ -212,21 +226,20 @@ impl KafkaMessage {
     /// The record key, surfaced from Kafka's native key (see [`PARTITION_KEY_HEADER`]).
     #[must_use]
     pub fn key(&self) -> Option<&[u8]> {
-        self.headers.get(PARTITION_KEY_HEADER)
+        self.record.key()
     }
 
     /// Replaces the payload with its registry-transcoded form (the subscriber's async
     /// middleware), before the delivery is handed on.
     #[cfg(feature = "schema-registry")]
     pub(crate) fn replace_payload(&mut self, payload: Bytes) {
-        self.payload = payload;
+        self.transcoded = Some(payload);
     }
 
     fn settle(self) -> Result<(), AckError> {
-        match self.settlement {
+        match &self.settlement {
             Settlement::Advisory => Ok(()),
             Settlement::Tracked {
-                consumer,
                 tracker,
                 generation,
             } => tracker
@@ -234,8 +247,26 @@ impl KafkaMessage {
                     &self.topic,
                     self.partition,
                     self.offset,
-                    generation,
-                    |position| consumer.store_offset(&self.topic, self.partition, position),
+                    *generation,
+                    |position| {
+                        // The watermark is this delivery's own offset whenever nothing below it
+                        // is still outstanding, which is every settle of an in-order handler.
+                        // There the record answers for its own topic and librdkafka takes the
+                        // position off the record's topic handle, instead of looking one up by
+                        // name (a `CString`, a topic create and a topic destroy under its own
+                        // lock, per message).
+                        if let Some(record) = self.record.fetched()
+                            && position == self.offset
+                        {
+                            self.record.consumer().store_offset_from_message(record)
+                        } else {
+                            self.record.consumer().store_offset(
+                                &self.topic,
+                                self.partition,
+                                position,
+                            )
+                        }
+                    },
                 )
                 .map_err(|err| AckError::Broker(Box::new(err))),
             Settlement::Transactional {
@@ -246,7 +277,7 @@ impl KafkaMessage {
                     &self.topic,
                     self.partition,
                     self.offset,
-                    generation,
+                    *generation,
                     |_position| Ok(()),
                 );
                 infallible.expect("no-op store cannot fail");
@@ -258,11 +289,16 @@ impl KafkaMessage {
 
 impl IncomingMessage for KafkaMessage {
     fn payload(&self) -> &[u8] {
-        &self.payload
+        #[cfg(feature = "schema-registry")]
+        if let Some(transcoded) = &self.transcoded {
+            return transcoded;
+        }
+        self.record.payload()
     }
 
     fn headers(&self) -> &HeaderMap {
-        &self.headers
+        self.headers
+            .get_or_init(|| convert::headers_from_message(&self.record))
     }
 
     /// Marks the offset processed (see the type-level settlement mapping).

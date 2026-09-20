@@ -27,6 +27,8 @@ ruststream = { version = ">=0.7.0-rc.9, <0.8.0", default-features = false }
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
 bytes = "1"
+# The cart a delivery carries its record on (see `record`).
+yoke = { version = "0.8", features = ["derive"] }
 futures = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }

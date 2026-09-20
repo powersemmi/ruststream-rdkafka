@@ -1,0 +1,238 @@
+//! The native record a delivery owns.
+//!
+//! librdkafka hands a fetched record out as a [`BorrowedMessage`], whose lifetime ties it to the
+//! consumer that polled it. The data behind it is not the consumer's: it belongs to the fetch
+//! event the message carries a reference count of, and the lifetime exists for one reason only -
+//! to order the record's destruction before `rd_kafka_destroy`. A delivery that holds the
+//! consumer alive itself satisfies that order, which is what this type does: the record stays
+//! where librdkafka put it for as long as a handler holds the delivery, and the body, the key
+//! and the headers are read out of the fetch buffer instead of copied out of it.
+//!
+//! The pair is a [`Yoke`]: the consumer is the cart, held inline as the `Arc` it already is, and
+//! the record is fetched against the reference the cart hands out, so the borrow is the
+//! compiler's own and this crate writes no `unsafe` of its own.
+//!
+//! A yoke is built by a synchronous closure, which is what the consume loop wants: a record
+//! already fetched is taken without a future. The wait has no such builder, and a record taken
+//! by a future borrows the caller's consumer rather than the cart, so the one delivery the wait
+//! itself resolves is copied out instead of yoked (see [`HeldRecord::next`]).
+
+use std::fmt;
+use std::future::{Future as _, poll_fn};
+use std::pin::pin;
+use std::sync::Arc;
+use std::task::Poll;
+
+use futures::FutureExt as _;
+use rdkafka::consumer::StreamConsumer;
+use rdkafka::error::KafkaError;
+use rdkafka::message::{
+    BorrowedHeaders, BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders,
+    OwnedMessage,
+};
+use yoke::{Yoke, Yokeable};
+
+use crate::tracker::TrackingContext;
+
+/// The consumer a subscription reads through, shared with every delivery it produced.
+pub(crate) type SharedConsumer = Arc<StreamConsumer<TrackingContext>>;
+
+/// The record, as the yoke carries it: a wrapper of this crate's own, because the yokeable is
+/// the type the cart's borrow is proved covariant in and `rdkafka` does not implement the trait.
+#[derive(Yokeable)]
+pub(crate) struct Record<'a>(BorrowedMessage<'a>);
+
+/// What a synchronous take of an already-fetched record can end in.
+enum NotTaken {
+    /// Nothing is fetched: the caller waits.
+    Empty,
+    /// The consumer reported an error instead of a record.
+    Failed(KafkaError),
+}
+
+/// One fetched record, kept where librdkafka put it - or, for the record a wait resolved, the
+/// copy that is the only owned form such a record can take.
+pub(crate) enum HeldRecord {
+    /// The record in librdkafka's own buffer, yoked to the consumer that owns it.
+    Fetched(Yoke<Record<'static>, SharedConsumer>),
+    /// A record the wait took out of the queue itself. Its borrow is the waiter's, not the
+    /// cart's, so it cannot enter a yoke; it is copied instead, which is what every delivery
+    /// cost before this type existed.
+    Copied {
+        consumer: SharedConsumer,
+        message: OwnedMessage,
+    },
+}
+
+impl HeldRecord {
+    /// A record librdkafka has already fetched, or `None` when the queue is empty.
+    ///
+    /// # Cancel safety
+    ///
+    /// Nothing is awaited: either a record is taken or nothing happens.
+    pub(crate) fn ready(consumer: &SharedConsumer) -> Option<Result<Self, KafkaError>> {
+        let taken = Yoke::try_attach_to_cart(Arc::clone(consumer), |consumer| {
+            consumer
+                .recv()
+                .now_or_never()
+                .ok_or(NotTaken::Empty)?
+                .map(Record)
+                .map_err(NotTaken::Failed)
+        });
+        match taken {
+            Ok(yoke) => Some(Ok(Self::Fetched(yoke))),
+            Err(NotTaken::Empty) => None,
+            Err(NotTaken::Failed(err)) => Some(Err(err)),
+        }
+    }
+
+    /// The next record, waiting for it.
+    ///
+    /// The wait is the cold path of the consume loop - a subscription keeping up with its topic
+    /// finds the record already fetched - and it is the one place this shape costs something the
+    /// hand-written one does not. `recv` is what registers a wakeup with the consumer's queue,
+    /// and it registers it for the life of the `MessageStream` it opens: dropping the future
+    /// takes the registration with it, so the waiter is kept across polls rather than armed and
+    /// dropped. Every wake tries the yoke first, and the waiter is only consulted when the queue
+    /// is empty again; a record the waiter itself resolves - the queue filled between the two
+    /// steps - is borrowed from this call's consumer reference rather than from the cart, and is
+    /// copied out, because nothing else can carry it past the end of this call.
+    ///
+    /// # Cancel safety
+    ///
+    /// Cancel safe: dropping this future before it resolves takes no record.
+    pub(crate) async fn next(consumer: &SharedConsumer) -> Result<Self, KafkaError> {
+        let mut waiter = pin!(consumer.recv());
+        poll_fn(move |cx| {
+            if let Some(taken) = Self::ready(consumer) {
+                return Poll::Ready(taken);
+            }
+            match waiter.as_mut().poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(message)) => Poll::Ready(Ok(Self::Copied {
+                    consumer: Arc::clone(consumer),
+                    message: message.detach(),
+                })),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            }
+        })
+        .await
+    }
+
+    /// The record as librdkafka's own, for the reads that go back to it - `None` for a record
+    /// the wait copied out.
+    pub(crate) fn fetched(&self) -> Option<&BorrowedMessage<'_>> {
+        match self {
+            Self::Fetched(yoke) => Some(&yoke.get().0),
+            Self::Copied { .. } => None,
+        }
+    }
+
+    /// The consumer that fetched this record, alive for as long as the record is.
+    pub(crate) fn consumer(&self) -> &StreamConsumer<TrackingContext> {
+        match self {
+            Self::Fetched(yoke) => yoke.backing_cart(),
+            Self::Copied { consumer, .. } => consumer,
+        }
+    }
+
+    /// The topic the record came from.
+    pub(crate) fn topic(&self) -> &str {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.topic(),
+            Self::Copied { message, .. } => message.topic(),
+        }
+    }
+
+    /// The partition the record came from.
+    pub(crate) fn partition(&self) -> i32 {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.partition(),
+            Self::Copied { message, .. } => message.partition(),
+        }
+    }
+
+    /// The record's offset in its partition.
+    pub(crate) fn offset(&self) -> i64 {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.offset(),
+            Self::Copied { message, .. } => message.offset(),
+        }
+    }
+
+    /// The record's timestamp, when the broker or the producer set one.
+    pub(crate) fn timestamp_millis(&self) -> Option<i64> {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.timestamp().to_millis(),
+            Self::Copied { message, .. } => message.timestamp().to_millis(),
+        }
+    }
+
+    /// The record's body, where librdkafka put it.
+    pub(crate) fn payload(&self) -> &[u8] {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.payload().unwrap_or_default(),
+            Self::Copied { message, .. } => message.payload().unwrap_or_default(),
+        }
+    }
+
+    /// The record's key, where librdkafka put it.
+    pub(crate) fn key(&self) -> Option<&[u8]> {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.key(),
+            Self::Copied { message, .. } => message.key(),
+        }
+    }
+
+    /// The record's wire headers, when it carries any. Asked only when something reads them:
+    /// librdkafka answers a record without headers by allocating a shadow buffer and freeing it
+    /// again.
+    pub(crate) fn headers(&self) -> Option<RecordHeaders<'_>> {
+        match self {
+            Self::Fetched(yoke) => yoke.get().0.headers().map(RecordHeaders::Fetched),
+            Self::Copied { message, .. } => message.headers().map(RecordHeaders::Copied),
+        }
+    }
+}
+
+impl fmt::Debug for HeldRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeldRecord")
+            .field("partition", &self.partition())
+            .field("offset", &self.offset())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A record's wire headers, in whichever form the record itself is held. The two native header
+/// types share a trait, but it carries a generic method and so cannot be asked for behind a
+/// reference to the trait.
+pub(crate) enum RecordHeaders<'a> {
+    /// Headers read where librdkafka put them.
+    Fetched(&'a BorrowedHeaders),
+    /// Headers of a record the wait copied out.
+    Copied(&'a OwnedHeaders),
+}
+
+impl RecordHeaders<'_> {
+    /// How many headers the record carries.
+    fn count(&self) -> usize {
+        match self {
+            Self::Fetched(headers) => headers.count(),
+            Self::Copied(headers) => headers.count(),
+        }
+    }
+
+    /// The header at `index`, which the iteration below keeps in bounds.
+    fn get(&self, index: usize) -> Header<'_, &[u8]> {
+        match self {
+            Self::Fetched(headers) => headers.get(index),
+            Self::Copied(headers) => headers.get(index),
+        }
+    }
+
+    /// Iterates over all headers in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Header<'_, &[u8]>> {
+        (0..self.count()).map(|index| self.get(index))
+    }
+}

@@ -1971,6 +1971,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+ "yoke",
 ]
 
 [[package]]
