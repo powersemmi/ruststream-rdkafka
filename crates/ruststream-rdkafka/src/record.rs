@@ -57,10 +57,13 @@ pub(crate) enum HeldRecord {
     Fetched(Yoke<Record<'static>, SharedConsumer>),
     /// A record the wait took out of the queue itself. Its borrow is the waiter's, not the
     /// cart's, so it cannot enter a yoke; it is copied instead, which is what every delivery
-    /// cost before this type existed.
+    /// cost before this type existed. The copy is boxed because it is the wider arm by far, and
+    /// an unboxed one sets the width of every delivery, including the overwhelming majority
+    /// that are the other arm: it cost 224 instructions per delivery in `memcpy` alone, moving
+    /// a copy that was not there.
     Copied {
         consumer: SharedConsumer,
-        message: OwnedMessage,
+        message: Box<OwnedMessage>,
     },
 }
 
@@ -111,7 +114,7 @@ impl HeldRecord {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(message)) => Poll::Ready(Ok(Self::Copied {
                     consumer: Arc::clone(consumer),
-                    message: message.detach(),
+                    message: Box::new(message.detach()),
                 })),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
             }
