@@ -50,9 +50,9 @@ pub(crate) struct PublishParts {
 /// record. Where the record goes when it carries no key is a per-record setting
 /// ([`KafkaOptions`](crate::KafkaOptions)), not a header.
 pub(crate) fn headers_for_publish(headers: &HeaderMap) -> PublishParts {
-    let key = headers
-        .get(PARTITION_KEY_HEADER)
-        .map(Bytes::copy_from_slice);
+    // The map owns its values by reference count, so the key travels out of it rather than
+    // being copied out.
+    let key = headers.get_shared(PARTITION_KEY_HEADER);
     let mut native = OwnedHeaders::new_with_capacity(headers.len());
     let mut count = 0;
     for (name, value) in headers.iter() {

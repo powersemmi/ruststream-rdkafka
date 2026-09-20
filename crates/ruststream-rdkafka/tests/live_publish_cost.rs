@@ -32,7 +32,8 @@ use ruststream::{
     Broker, HeaderMap, IncomingMessage, OutgoingMessage, PublishPolicy, Publisher, Str, Subscriber,
 };
 use ruststream_rdkafka::{
-    Commit, KafkaBroker, KafkaEosPublish, KafkaPublish, KafkaTopic, StartOffset,
+    Commit, KafkaBroker, KafkaEosPublish, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
+    StartOffset,
 };
 
 mod live;
@@ -202,5 +203,40 @@ async fn an_exactly_once_reply_costs_nothing_for_its_headers() {
         "a reply through the pipeline allocates {through_pipeline} where the publisher \
          underneath allocates {through_plain}, which is {} over the budget of {BUDGET}",
         through_pipeline - through_plain - BUDGET,
+    );
+}
+
+/// A publish takes the record key out of the map it was handed.
+///
+/// The partition key travels as a header and becomes the record's native key, so it is read on
+/// every publish that carries one. The map owns its values by reference count, so taking the key
+/// out of it costs nothing a keyless publish does not already pay.
+#[tokio::test]
+async fn a_keyed_publish_costs_nothing_for_its_key() {
+    let Some(url) = live::url("KAFKA_TEST_URL") else {
+        return;
+    };
+    let topic = unique("key-cost");
+    create_topic(&url, &topic).await;
+    let broker = KafkaBroker::new([url.clone()])
+        .connect()
+        .await
+        .expect("connect");
+    let publisher = KafkaPublish::default()
+        .pair(&broker)
+        .await
+        .expect("pair the publisher");
+
+    let empty = HeaderMap::new();
+    let mut keyed = HeaderMap::new();
+    keyed.insert(Str::from_static(PARTITION_KEY_HEADER), "order-1");
+
+    let keyless_cost = spent(&publisher, &topic, || headers(&empty, STAMPS)).await;
+    let keyed_cost = spent(&publisher, &topic, || headers(&keyed, STAMPS)).await;
+
+    assert_eq!(
+        keyed_cost, keyless_cost,
+        "a keyed publish allocates {keyed_cost} where a keyless one allocates \
+         {keyless_cost}: the key is being copied out of the map instead of taken from it",
     );
 }
