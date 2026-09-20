@@ -7,8 +7,13 @@ default: check
 
 check:
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
-    cargo check --workspace --all-targets --all-features
+    # The benchmark package is left out of the all-features legs on purpose: it is built with the
+    # feature set a service ships, and the framework's harness feature is a compile error in it.
+    # Its own leg follows each of them.
+    cargo clippy --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features -- -D warnings
+    cargo clippy -p ruststream-rdkafka-bench --all-targets -- -D warnings
+    cargo check --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features
+    cargo check -p ruststream-rdkafka-bench --all-targets
     cargo check --workspace --no-default-features
     # CI's stable leg denies rustdoc warnings, and broken intra-doc links are invisible to
     # every step above; running it here is what keeps a local pass from turning CI red.
@@ -33,6 +38,22 @@ test-brokers: brokers-up
     SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
     RUSTSTREAM_REQUIRE_LIVE=1 \
         cargo test --workspace --all-features -- --test-threads=1
+
+# What this crate costs over the rdkafka client it wraps, and what the runtime costs on top: two
+# scenarios, each run three times over - the client driven directly, this crate's own consumer,
+# and the whole service - against the stand the tests use. On demand only: it takes about fifteen
+# minutes and it wants the machine to itself. The page it feeds is docs/benchmarks.md.
+bench *ARGS: brokers-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'just brokers-down' EXIT
+    mkdir -p target
+    # RUSTFLAGS is cleared so the numbers are not tied to this machine's CPU: a binary built with
+    # `-C target-cpu=native` cannot be reproduced anywhere else.
+    RUSTFLAGS="" KAFKA_TEST_URL=127.0.0.1:9092 \
+    RUSTSTREAM_BENCH_OUT="$PWD/target/bench-paired.json" \
+        cargo bench -p ruststream-rdkafka-bench --bench paired {{ ARGS }}
+    python3 scripts/bench_results.py target/bench-paired.json docs/benchmarks/results.json
 
 fmt:
     cargo fmt --all

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ruststream-rdkafka"]
+members = ["crates/ruststream-rdkafka", "crates/ruststream-rdkafka-bench"]
 # cargo-generate scaffolds: their sources carry `{{project-name}}` placeholders that are not valid
 # Rust/TOML until rendered, so they stay out of the workspace. `exclude` alone is not enough:
 # cargo's git-source package discovery ignores it and parses every `Cargo.toml` in the repository,

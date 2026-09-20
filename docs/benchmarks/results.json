@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "crate": "ruststream-rdkafka",
+  "crate_version": "0.7.0",
+  "core_version": "0.7.0-rc.7",
+  "measured_at": "2026-09-20",
+  "environment": {
+    "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+    "architecture": "x86_64",
+    "cpu_frequency": "427-5912 MHz",
+    "cores": "12 physical, 24 logical",
+    "memory": "62.4 GiB",
+    "memory_speed": "unknown",
+    "os": "Linux 7.2.6-x64v3-xanmod1-1",
+    "broker": "apache/kafka:4.0.0 in Docker on localhost",
+    "rustc": "1.98.1",
+    "profile": "bench, inheriting release (opt-level = 3, lto = false, codegen-units = 16)",
+    "features": "ruststream-rdkafka default (json), ruststream macros,json",
+    "rustflags": "none (the recipe clears RUSTFLAGS, so the numbers are not tied to this CPU)",
+    "round_trip": "66 \u00b5s (one metadata request and its answer)"
+  },
+  "scenarios": [
+    {
+      "name": "consumer group, auto-commit, 512 B JSON",
+      "unit": "msg/s",
+      "messages": 9475343,
+      "pairs": 11,
+      "raw": {
+        "median": 1541700,
+        "min": 1134377,
+        "max": 1569983
+      },
+      "adapter": {
+        "median": 1088600,
+        "min": 972503,
+        "max": 1261460
+      },
+      "framework": {
+        "median": 1041964,
+        "min": 843170,
+        "max": 1103620
+      },
+      "adapter_overhead_percent": 29.4,
+      "overhead_percent": 32.4,
+      "adapter_verdict": "measured",
+      "verdict": "measured",
+      "broker_bound": false
+    },
+    {
+      "name": "consumer group, tracked commits, 512 B JSON, ack each",
+      "unit": "msg/s",
+      "messages": 10447802,
+      "pairs": 11,
+      "raw": {
+        "median": 1406314,
+        "min": 1383710,
+        "max": 1557267
+      },
+      "adapter": {
+        "median": 917735,
+        "min": 840520,
+        "max": 1043770
+      },
+      "framework": {
+        "median": 850337,
+        "min": 799297,
+        "max": 919486
+      },
+      "adapter_overhead_percent": 34.7,
+      "overhead_percent": 39.5,
+      "adapter_verdict": "measured",
+      "verdict": "measured",
+      "broker_bound": false
+    }
+  ]
+}
