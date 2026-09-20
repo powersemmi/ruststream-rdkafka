@@ -48,6 +48,10 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
 pub struct KafkaSubscriber {
     consumer: Arc<StreamConsumer<TrackingContext>>,
     topic: String,
+    /// The topic of the last delivery, as the shared string every delivery of it carries. A
+    /// fetch hands a consumer one topic's records at a time, so remembering the last one answers
+    /// a whole run without minting a name again.
+    last_topic: Option<Str>,
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
@@ -78,6 +82,7 @@ impl KafkaSubscriber {
         Self {
             consumer,
             topic,
+            last_topic: None,
             commit,
             tracker,
             lane_key,
@@ -172,7 +177,19 @@ impl KafkaSubscriber {
         }
     }
 
-    fn map_delivery(&self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
+    /// The delivery's topic as the shared string every delivery of that topic carries.
+    fn shared_topic(&mut self, topic: &str) -> Str {
+        if let Some(known) = &self.last_topic
+            && &**known == topic
+        {
+            return known.clone();
+        }
+        let minted = Str::from(topic);
+        self.last_topic = Some(minted.clone());
+        minted
+    }
+
+    fn map_delivery(&mut self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
         let mut headers = convert::headers_from_message(delivery);
         if matches!(self.commit, Commit::Transactional(_)) {
             // The source coordinates ride the delivery's headers so the reply path can pair a
@@ -219,10 +236,11 @@ impl KafkaSubscriber {
                 .map(Bytes::copy_from_slice),
             LaneKey::Partition => Some(Bytes::from(delivery.partition().to_string())),
         };
+        let topic = self.shared_topic(delivery.topic());
         KafkaMessage::new(
             payload,
             headers,
-            delivery.topic().to_owned(),
+            topic,
             delivery.partition(),
             delivery.offset(),
             delivery.timestamp().to_millis(),
@@ -266,40 +284,49 @@ impl Subscriber for KafkaSubscriber {
         // Cloned once per stream and never per delivery: the failure waiter has to live across
         // the same await as `recv`, while the subscriber is handed back on every yield.
         let context = Arc::clone(self.consumer.context());
-        futures::stream::unfold((self, context), |(sub, context)| async move {
-            loop {
-                // The waiter is armed before the check, so a failure landing between the two is
-                // not missed, and the select below is what makes it reach a subscription whose
-                // topic may never deliver anything.
-                let recorded = context.start_failure_waiter();
-                if let Some(err) = context.take_start_failure() {
-                    drop(recorded);
-                    return Some((Err(err), (sub, context)));
-                }
-                let received = tokio::select! {
-                    biased;
-                    () = recorded => continue,
-                    received = sub.consumer.recv() => received,
-                };
-                match received {
-                    Ok(delivery) => {
-                        #[allow(unused_mut)] // mutated by the registry transcode only
-                        let mut item = sub.map_delivery(&delivery);
-                        drop(delivery);
-                        // The prefetch first: it reads the envelope, which the transcode would
-                        // have replaced with a JSON document. The two are alternatives anyway.
-                        #[cfg(feature = "schema-registry")]
-                        sub.prefetch(&item).await;
-                        #[cfg(feature = "schema-registry")]
-                        sub.transcode(&mut item).await;
-                        sub.note_recovered();
-                        return Some((Ok(item), (sub, context)));
+        // Cloned beside it, so a delivery borrows the consumer rather than the subscriber: what
+        // the delivery is mapped into is the subscriber's own.
+        let consumer = Arc::clone(&self.consumer);
+        futures::stream::unfold(
+            (self, context, consumer),
+            |(sub, context, consumer)| async move {
+                loop {
+                    // The waiter is armed before the check, so a failure landing between the two
+                    // is not missed, and the select below is what makes it reach a subscription
+                    // whose topic may never deliver anything.
+                    let recorded = context.start_failure_waiter();
+                    if let Some(err) = context.take_start_failure() {
+                        drop(recorded);
+                        return Some((Err(err), (sub, context, consumer)));
                     }
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
+                    let received = tokio::select! {
+                        biased;
+                        () = recorded => continue,
+                        received = consumer.recv() => received,
+                    };
+                    match received {
+                        Ok(delivery) => {
+                            #[allow(unused_mut)] // mutated by the registry transcode only
+                            let mut item = sub.map_delivery(&delivery);
+                            drop(delivery);
+                            // The prefetch first: it reads the envelope, which the transcode
+                            // would have replaced with a JSON document. The two are alternatives
+                            // anyway.
+                            #[cfg(feature = "schema-registry")]
+                            sub.prefetch(&item).await;
+                            #[cfg(feature = "schema-registry")]
+                            sub.transcode(&mut item).await;
+                            sub.note_recovered();
+                            return Some((Ok(item), (sub, context, consumer)));
+                        }
+                        Err(err) if is_transient(&err) => sub.note_transient(&err),
+                        Err(err) => {
+                            return Some((Err(KafkaError::consume(err)), (sub, context, consumer)));
+                        }
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 }
 
@@ -334,52 +361,59 @@ impl BatchSubscriber for KafkaSubscriber {
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
         let context = Arc::clone(self.consumer.context());
-        futures::stream::unfold((self, context), move |(sub, context)| async move {
-            // Wait for the batch's first delivery, or for a start position the rebalance could
-            // not apply - see `stream` for why the wait is a select and not a check.
-            let first = loop {
-                let recorded = context.start_failure_waiter();
-                if let Some(err) = context.take_start_failure() {
-                    drop(recorded);
-                    return Some((Err(err), (sub, context)));
-                }
-                let received = tokio::select! {
-                    biased;
-                    () = recorded => continue,
-                    received = sub.consumer.recv() => received,
-                };
-                match received {
-                    Ok(delivery) => break sub.map_delivery(&delivery),
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
-                }
-            };
-            sub.note_recovered();
-
-            let mut batch = Vec::with_capacity(size.min(64));
-            batch.push(first);
-            // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
-            // so dropping the probe future loses nothing.
-            while batch.len() < size {
-                let Some(result) = sub.consumer.recv().now_or_never() else {
-                    break;
-                };
-                match result {
-                    Ok(delivery) => {
-                        let item = sub.map_delivery(&delivery);
-                        batch.push(item);
+        // See `stream`: the consumer is held beside the subscriber, not through it.
+        let consumer = Arc::clone(&self.consumer);
+        futures::stream::unfold(
+            (self, context, consumer),
+            move |(sub, context, consumer)| async move {
+                // Wait for the batch's first delivery, or for a start position the rebalance could
+                // not apply - see `stream` for why the wait is a select and not a check.
+                let first = loop {
+                    let recorded = context.start_failure_waiter();
+                    if let Some(err) = context.take_start_failure() {
+                        drop(recorded);
+                        return Some((Err(err), (sub, context, consumer)));
                     }
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    // Yield what was collected; a persistent error re-surfaces on the next
-                    // batch's first recv.
-                    Err(_) => break,
+                    let received = tokio::select! {
+                        biased;
+                        () = recorded => continue,
+                        received = consumer.recv() => received,
+                    };
+                    match received {
+                        Ok(delivery) => break sub.map_delivery(&delivery),
+                        Err(err) if is_transient(&err) => sub.note_transient(&err),
+                        Err(err) => {
+                            return Some((Err(KafkaError::consume(err)), (sub, context, consumer)));
+                        }
+                    }
+                };
+                sub.note_recovered();
+
+                let mut batch = Vec::with_capacity(size.min(64));
+                batch.push(first);
+                // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
+                // so dropping the probe future loses nothing.
+                while batch.len() < size {
+                    let Some(result) = consumer.recv().now_or_never() else {
+                        break;
+                    };
+                    match result {
+                        Ok(delivery) => {
+                            let item = sub.map_delivery(&delivery);
+                            batch.push(item);
+                        }
+                        Err(err) if is_transient(&err) => sub.note_transient(&err),
+                        // Yield what was collected; a persistent error re-surfaces on the next
+                        // batch's first recv.
+                        Err(_) => break,
+                    }
                 }
-            }
-            #[cfg(feature = "schema-registry")]
-            for item in &mut batch {
-                sub.transcode(item).await;
-            }
-            Some((Ok(batch), (sub, context)))
-        })
+                #[cfg(feature = "schema-registry")]
+                for item in &mut batch {
+                    sub.transcode(item).await;
+                }
+                Some((Ok(batch), (sub, context, consumer)))
+            },
+        )
     }
 }

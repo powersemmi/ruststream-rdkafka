@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
-use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned};
+use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
 
 use crate::seek::{KafkaPosition, KafkaSeeker};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -70,7 +70,10 @@ pub(crate) enum Settlement {
 pub struct KafkaMessage {
     payload: Bytes,
     headers: HeaderMap,
-    topic: String,
+    /// The topic, shared with the subscription that read it: a Kafka consumer reads a handful of
+    /// topics and delivers millions of records, so the name is minted once per topic and every
+    /// delivery of it takes a reference count.
+    topic: Str,
     partition: i32,
     offset: i64,
     timestamp_millis: Option<i64>,
@@ -100,7 +103,7 @@ impl KafkaMessage {
     pub(crate) fn new(
         payload: Bytes,
         headers: HeaderMap,
-        topic: String,
+        topic: Str,
         partition: i32,
         offset: i64,
         timestamp_millis: Option<i64>,
@@ -265,7 +268,7 @@ impl Positioned for KafkaMessage {
     /// This delivery's own coordinates: seeking to them redelivers exactly this record (and the
     /// ordered suffix behind it on the partition).
     fn position(&self) -> Self::Position {
-        KafkaPosition::topic_offset(&self.topic, self.partition, self.offset)
+        KafkaPosition::topic_offset(&*self.topic, self.partition, self.offset)
     }
 }
 
