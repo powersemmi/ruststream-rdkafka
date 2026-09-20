@@ -1963,6 +1963,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruststream-rdkafka-bench"
+version = "0.7.0"
+dependencies = [
+ "futures",
+ "rdkafka",
+ "ruststream",
+ "ruststream-rdkafka",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
