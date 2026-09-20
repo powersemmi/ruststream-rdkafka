@@ -17,31 +17,31 @@
     "profile": "bench, inheriting release (opt-level = 3, lto = false, codegen-units = 16)",
     "features": "ruststream-rdkafka default (json), ruststream macros,json",
     "rustflags": "none (the recipe clears RUSTFLAGS, so the numbers are not tied to this CPU)",
-    "round_trip": "80 \u00b5s (one metadata request and its answer)"
+    "round_trip": "66 \u00b5s (one metadata request and its answer)"
   },
   "scenarios": [
     {
       "name": "consumer group, auto-commit, 512 B JSON",
       "unit": "msg/s",
-      "messages": 9597026,
+      "messages": 9475343,
       "pairs": 11,
       "raw": {
-        "median": 1425762,
-        "min": 1370471,
-        "max": 1469665
+        "median": 1541700,
+        "min": 1134377,
+        "max": 1569983
       },
       "adapter": {
-        "median": 1150914,
-        "min": 981699,
-        "max": 1232556
+        "median": 1088600,
+        "min": 972503,
+        "max": 1261460
       },
       "framework": {
-        "median": 1025789,
-        "min": 817276,
-        "max": 1079560
+        "median": 1041964,
+        "min": 843170,
+        "max": 1103620
       },
-      "adapter_overhead_percent": 19.3,
-      "overhead_percent": 28.1,
+      "adapter_overhead_percent": 29.4,
+      "overhead_percent": 32.4,
       "adapter_verdict": "measured",
       "verdict": "measured",
       "broker_bound": false
@@ -49,25 +49,25 @@
     {
       "name": "consumer group, tracked commits, 512 B JSON, ack each",
       "unit": "msg/s",
-      "messages": 8268621,
+      "messages": 10447802,
       "pairs": 11,
       "raw": {
-        "median": 1390913,
-        "min": 1305118,
-        "max": 1452471
+        "median": 1406314,
+        "min": 1383710,
+        "max": 1557267
       },
       "adapter": {
-        "median": 972432,
-        "min": 933495,
-        "max": 1022953
+        "median": 917735,
+        "min": 840520,
+        "max": 1043770
       },
       "framework": {
-        "median": 875667,
-        "min": 801934,
-        "max": 912075
+        "median": 850337,
+        "min": 799297,
+        "max": 919486
       },
-      "adapter_overhead_percent": 30.1,
-      "overhead_percent": 37.0,
+      "adapter_overhead_percent": 34.7,
+      "overhead_percent": 39.5,
       "adapter_verdict": "measured",
       "verdict": "measured",
       "broker_bound": false
