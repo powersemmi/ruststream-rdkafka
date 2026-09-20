@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use futures::Stream;
@@ -18,7 +18,7 @@ use tracing::{debug, warn};
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
-use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
+use crate::message::{KafkaMessage, Lane, Settlement};
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -230,11 +230,11 @@ impl KafkaSubscriber {
                 ),
             },
         };
+        // The key itself is not built here: a subscription with no keyed lanes is never asked
+        // for one, and both forms answer out of what the delivery already holds.
         let lane = match self.lane_key {
-            LaneKey::RecordKey => headers
-                .get(PARTITION_KEY_HEADER)
-                .map(Bytes::copy_from_slice),
-            LaneKey::Partition => Some(Bytes::from(delivery.partition().to_string())),
+            LaneKey::RecordKey => Lane::RecordKey,
+            LaneKey::Partition => Lane::Partition(OnceLock::new()),
         };
         let topic = self.shared_topic(delivery.topic());
         KafkaMessage::new(

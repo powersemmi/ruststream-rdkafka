@@ -3,7 +3,8 @@
 use std::convert::Infallible;
 use std::fmt;
 use std::future::{Future, ready};
-use std::sync::Arc;
+use std::io::Write as _;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
@@ -44,6 +45,62 @@ pub(crate) enum Settlement {
     },
 }
 
+/// How a delivery answers [`IncomingMessage::partition_key`], which most deliveries are never
+/// asked.
+///
+/// Both forms answer out of what the delivery already holds, so a subscription with no keyed
+/// lanes - the default - pays nothing for a key nobody reads.
+pub(crate) enum Lane {
+    /// The record key, which the delivery carries as its [`PARTITION_KEY_HEADER`] header.
+    RecordKey,
+    /// The source partition, written into the delivery's own bytes on the first ask.
+    Partition(OnceLock<PartitionText>),
+}
+
+impl Lane {
+    /// This delivery's lane key.
+    fn of<'a>(&'a self, msg: &'a KafkaMessage) -> Option<&'a [u8]> {
+        match self {
+            Self::RecordKey => msg.headers.get(PARTITION_KEY_HEADER),
+            Self::Partition(text) => Some(
+                text.get_or_init(|| PartitionText::of(msg.partition))
+                    .as_bytes(),
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for Lane {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RecordKey => f.write_str("RecordKey"),
+            Self::Partition(_) => f.write_str("Partition"),
+        }
+    }
+}
+
+/// A partition number as the decimal text a lane key is, held inline: the widest `i32` is eleven
+/// bytes, which is shorter than the pointer a heap copy of it would cost.
+#[derive(Debug)]
+pub(crate) struct PartitionText {
+    bytes: [u8; 11],
+    len: usize,
+}
+
+impl PartitionText {
+    fn of(partition: i32) -> Self {
+        let mut bytes = [0u8; 11];
+        let mut cursor = &mut bytes[..];
+        write!(cursor, "{partition}").expect("eleven bytes hold the widest i32");
+        let len = 11 - cursor.len();
+        Self { bytes, len }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 /// One Kafka delivery: an owned snapshot of the record plus its settlement handle.
 ///
 /// Settlement mapping depends on the [`Commit`](crate::Commit) mode of the subscription:
@@ -78,9 +135,8 @@ pub struct KafkaMessage {
     offset: i64,
     timestamp_millis: Option<i64>,
     settlement: Settlement,
-    /// The keyed-lane key: the source partition (the default), or the record key under
-    /// `LaneKey::RecordKey`.
-    lane: Option<Bytes>,
+    /// How this delivery answers `partition_key()`.
+    lane: Lane,
     /// The subscription's own reposition handle, minted when it opened: this is what lets a
     /// per-delivery context be built from the delivery alone.
     seeker: Arc<KafkaSeeker>,
@@ -108,7 +164,7 @@ impl KafkaMessage {
         offset: i64,
         timestamp_millis: Option<i64>,
         settlement: Settlement,
-        lane: Option<Bytes>,
+        lane: Lane,
         seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
@@ -258,7 +314,7 @@ impl IncomingMessage for KafkaMessage {
     /// source partition (the default), or the record key under
     /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
-        self.lane.as_deref()
+        self.lane.of(self)
     }
 }
 
@@ -277,6 +333,6 @@ impl Partitioned for KafkaMessage {
     /// partition (the default), or the record key under
     /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
-        self.lane.as_deref()
+        self.lane.of(self)
     }
 }

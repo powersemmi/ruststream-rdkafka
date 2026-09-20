@@ -76,10 +76,10 @@ const BODY: &[u8] = b"{\"id\":1,\"item\":\"anvil\",\"quantity\":37,\"note\":\"a 
 /// What one delivery may allocate on this thread over what the raw client loop allocates for
 /// the same record.
 ///
-/// The payload is copied out of librdkafka's fetch buffer because the delivery outlives the
-/// poll that produced it. What else a delivery pays is what this budget bounds, and it may only
-/// go down.
-const BUDGET: usize = 3;
+/// One: the payload, which is copied out of librdkafka's fetch buffer because the delivery
+/// outlives the poll that produced it. Everything else a delivery carries is either shared with
+/// the subscription or written on the first ask. The budget may only go down.
+const BUDGET: usize = 1;
 
 /// Per-run unique names, so a rerun never reads another run's records.
 fn unique(base: &str) -> String {
@@ -222,8 +222,8 @@ async fn a_delivery_allocates_only_its_payload_over_the_raw_loop() {
 
     assert!(
         ours <= raw + BUDGET * STEP,
-        "over {STEP} deliveries this crate allocates {ours} where the raw loop allocates {raw}, \
-         which is {} per delivery over the budget of {BUDGET}",
-        (ours - raw) / STEP - BUDGET,
+        "over {STEP} deliveries this crate allocates {ours} where the raw loop allocates {raw}: \
+         {} per delivery against a budget of {BUDGET}",
+        (ours - raw) / STEP,
     );
 }
