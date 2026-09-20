@@ -635,7 +635,10 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
                 )));
             }
         };
-        let framed = OutgoingMessage::new(msg.name(), &framed).with_headers(msg.headers().clone());
+        // The message is rebuilt around the framed payload, so the map the publish filled moves
+        // into the new one instead of being copied into it.
+        let (topic, _payload, headers) = msg.into_parts();
+        let framed = OutgoingMessage::new(topic, &framed).with_headers(headers);
         self.inner.publish(framed, options).await
     }
 }
