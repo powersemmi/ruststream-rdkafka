@@ -78,16 +78,16 @@ const BODY: &[u8] = b"{\"id\":1,\"item\":\"anvil\",\"quantity\":37,\"note\":\"a 
 /// What one delivery may allocate on this thread over what the raw client loop allocates for
 /// the same record.
 ///
-/// One: the payload, which is copied out of librdkafka's fetch buffer because the delivery
-/// outlives the poll that produced it. Everything else a delivery carries is either shared with
-/// the subscription or written on the first ask. The budget may only go down.
-const BUDGET: usize = 1;
+/// None: the delivery holds the record where librdkafka fetched it, and everything else it
+/// carries is either shared with the subscription or written on the first ask. The budget may
+/// only go down.
+const BUDGET: usize = 0;
 
 /// What one settled delivery may allocate on this thread over the raw client loop, under
-/// [`Commit::Tracked`]: the payload copy plus the tracker's own bookkeeping (the keys it hashes
-/// the partition by, and librdkafka's topic handle behind `store_offset`). The budget may only
-/// go down.
-const TRACKED_BUDGET: usize = 5;
+/// [`Commit::Tracked`]: nothing. An acknowledgement looks its partition up under a key the
+/// delivery already holds, and stores the position off the record instead of off the topic's
+/// name. The budget may only go down.
+const TRACKED_BUDGET: usize = 0;
 
 /// Per-run unique names, so a rerun never reads another run's records.
 fn unique(base: &str) -> String {

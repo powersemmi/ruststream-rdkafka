@@ -211,6 +211,9 @@ impl KafkaSubscriber {
             );
             headers.set(map).expect("the cell was just created");
         }
+        // Minted once per topic and shared from here on: the delivery carries it, the tracker
+        // keys this partition by it, and the acknowledgement looks it up under the same name.
+        let topic = self.shared_topic(topic_name);
         // The generation is captured here, where the delivery is pulled, never where it settles:
         // that is what lets a reposition landing in between tell a delivery of the replaced read
         // position apart from one the new position produced.
@@ -218,11 +221,11 @@ impl KafkaSubscriber {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => Settlement::Tracked {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(topic_name, partition, offset),
+                generation: self.tracker.delivered(&topic, partition, offset),
             },
             Commit::Transactional(_) => Settlement::Transactional {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(topic_name, partition, offset),
+                generation: self.tracker.delivered(&topic, partition, offset),
             },
         };
         // The key itself is not built here: a subscription with no keyed lanes is never asked
@@ -231,7 +234,6 @@ impl KafkaSubscriber {
             LaneKey::RecordKey => Lane::RecordKey,
             LaneKey::Partition => Lane::Partition(OnceLock::new()),
         };
-        let topic = self.shared_topic(topic_name);
         KafkaMessage::new(
             record,
             headers,
