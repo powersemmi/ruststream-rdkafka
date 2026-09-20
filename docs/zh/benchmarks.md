@@ -11,7 +11,7 @@
 
 ## 数字 { #the-numbers }
 
-交错轮次的中位数，括号里是观察到的离散范围。越大越好。
+三个交错轮次中的最佳值，括号里是最差的一轮。越大越好。
 
 <div id="benchmark-results" data-benchmark-results="../../benchmarks/results.json" data-benchmark-labels='{"loading": "正在加载公布的结果...", "scenario": "场景", "raw": "裸客户端", "adapter": "适配层", "framework": "RustStream", "adapterOverhead": "适配层开销", "overhead": "开销", "indistinguishable": "无法区分", "brokerBound": "受 Broker 限制", "machine": "机器", "os": "操作系统", "broker": "Broker", "roundTrip": "往返时间", "build": "构建", "versions": "版本", "measured": "测量于", "unavailable": "读不到结果。它们公布在 {url}。", "unknownSchema": "公布的结果声明的 schema 是 {schema}，这一页不渲染它。"}'></div>
 

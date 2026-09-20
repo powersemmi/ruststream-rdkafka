@@ -8,7 +8,8 @@ site serves at `benchmarks/results.json`.
 
 The schema is the core's, declared at
 https://powersemmi.github.io/ruststream/latest/benchmarks/#publishing-results. This crate
-publishes the throughput table alone, so the document declares schema 1.
+publishes the throughput table alone, each loop as its best and worst round, so the document
+declares schema 3.
 
 The run also reports the round-trip time it probed, which belongs to the environment rather than
 to a scenario: it is a property of the cluster and the machine, and it is what the broker-bound
@@ -134,7 +135,7 @@ def main() -> int:
         return 2
     summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     document = {
-        "schema": 1,
+        "schema": 3,
         "crate": "ruststream-rdkafka",
         "crate_version": crate_version(),
         "core_version": core_version(),

@@ -25,7 +25,9 @@
 
   // The schema this page renders. A later revision may retype a field, and rendering it as if it
   // were this one would print wrong numbers instead of no numbers.
-  const SCHEMAS = [1];
+  // Schema 3 reports each loop as its best and worst round; a schema 1 document carried a
+  // median with its extremes, and both render.
+  const SCHEMAS = [1, 3];
   const TIMEOUT_MS = 8000;
   // Where the document sits when the page does not say. The English page is the one it sits
   // next to; a translated page carries the way back to it on the container.
@@ -66,6 +68,13 @@
   function side(measurement, unit, lang) {
     if (!measurement) {
       return "-";
+    }
+    if (typeof measurement.best === "number") {
+      const best = number(measurement.best, lang) + " " + unit;
+      if (typeof measurement.worst !== "number") {
+        return best;
+      }
+      return best + " (" + number(measurement.worst, lang) + ")";
     }
     const median = number(measurement.median, lang) + " " + unit;
     if (typeof measurement.min !== "number" || typeof measurement.max !== "number") {
