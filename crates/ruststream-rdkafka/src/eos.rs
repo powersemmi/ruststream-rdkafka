@@ -90,11 +90,12 @@ impl SourceOffset {
     /// Builds the coordinates by hand; in a handler prefer the
     /// [`keys::Source`](crate::context::keys::Source) key.
     #[must_use]
-    pub fn new(topic: impl Into<String>, partition: i32, offset: i64) -> Self {
+    pub fn new(topic: impl Into<Str>, partition: i32, offset: i64) -> Self {
         Self {
             // The name is shared from here on: a window enrolls, waits on and commits a
-            // partition under this key many times over, and none of those copies it.
-            topic: Str::from(topic.into()),
+            // partition under this key many times over, and none of those copies it. A caller
+            // holding the subscription's own name hands it over for a reference count.
+            topic: topic.into(),
             partition,
             offset,
         }
