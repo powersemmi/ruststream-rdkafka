@@ -49,22 +49,34 @@ jobs:
         if: matrix.toolchain == 'stable'
         run: cargo fmt --all -- --check
 
+      # The benchmark package is left out of every all-features leg on purpose: it is built with
+      # the feature set a service ships, and the framework's harness feature is a compile error
+      # in it. Its own leg follows each of them, so it stays linted and stays compiled.
       - name: cargo clippy
         if: matrix.toolchain == 'stable'
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features -- -D warnings
+
+      - name: cargo clippy (benchmarks)
+        if: matrix.toolchain == 'stable'
+        run: cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
 
       # Advisory, not a gate: surfaces a lint added by the next clippy release six weeks
       # before it turns the build red.
       - name: cargo clippy (beta, advisory)
         if: matrix.toolchain == 'beta'
         continue-on-error: true
-        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features -- -D warnings
+          cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
 
       - name: cargo check (no default features)
         run: cargo check --locked --workspace --no-default-features
 
       - name: cargo check (all features)
-        run: cargo check --locked --workspace --all-targets --all-features
+        run: cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features
+
+      - name: cargo check (benchmarks)
+        run: cargo check --locked -p ruststream-rdkafka-bench --all-targets
 
       # --no-fail-fast: a failing target must not hide failures in the targets behind it;
       # the log then lists every red test, not just the first binary's.
@@ -144,7 +156,8 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: "1.88"
         run: |
-          cargo check --locked --workspace --all-targets --all-features
+          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features
+          cargo check --locked -p ruststream-rdkafka-bench --all-targets
           cargo test --locked --workspace --all-features --no-fail-fast
 
   broker-integration:
