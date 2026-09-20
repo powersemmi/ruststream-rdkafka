@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use rdkafka::message::{BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders};
-use ruststream::HeaderMap;
+use ruststream::{HeaderMap, Str};
 
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::message::PARTITION_KEY_HEADER;
@@ -26,7 +26,10 @@ pub(crate) fn headers_from_message(msg: &BorrowedMessage<'_>) -> HeaderMap {
         }
     }
     if let Some(key) = msg.key() {
-        headers.insert(PARTITION_KEY_HEADER, Bytes::copy_from_slice(key));
+        headers.insert(
+            Str::from_static(PARTITION_KEY_HEADER),
+            Bytes::copy_from_slice(key),
+        );
     }
     headers
 }

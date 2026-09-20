@@ -12,7 +12,7 @@ use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
-use ruststream::{BatchSubscriber, Seekable, Subscriber};
+use ruststream::{BatchSubscriber, Seekable, Str, Subscriber};
 use tracing::{debug, warn};
 
 use crate::convert;
@@ -179,7 +179,7 @@ impl KafkaSubscriber {
             // publishing handler's reply with its consumed offset (see EosPipeline::replies);
             // stripped from every outgoing publish, so they never hit the wire.
             headers.insert(
-                EOS_SOURCE_HEADER,
+                Str::from_static(EOS_SOURCE_HEADER),
                 crate::eos::encode_source(
                     delivery.topic(),
                     delivery.partition(),

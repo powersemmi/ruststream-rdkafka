@@ -20,7 +20,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
-    OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
+    OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -822,9 +822,9 @@ impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
         _options: &mut Option<Options>,
         cx: &PublishContext<'_, C>,
     ) {
-        if let Some(source) = cx.headers().get(EOS_SOURCE_HEADER) {
-            let source = source.to_vec();
-            out.headers_mut().insert(EOS_SOURCE_HEADER, source);
+        if let Some(source) = cx.headers().get_shared(EOS_SOURCE_HEADER) {
+            out.headers_mut()
+                .insert(Str::from_static(EOS_SOURCE_HEADER), source);
         }
     }
 }
