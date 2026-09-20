@@ -31,7 +31,7 @@ use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
 use ruststream::{Broker, IncomingMessage, Subscriber};
-use ruststream_rdkafka::{KafkaBroker, KafkaMessage, KafkaTopic, StartOffset};
+use ruststream_rdkafka::{Commit, KafkaBroker, KafkaMessage, KafkaTopic, StartOffset};
 
 mod live;
 
@@ -80,6 +80,12 @@ const BODY: &[u8] = b"{\"id\":1,\"item\":\"anvil\",\"quantity\":37,\"note\":\"a 
 /// outlives the poll that produced it. Everything else a delivery carries is either shared with
 /// the subscription or written on the first ask. The budget may only go down.
 const BUDGET: usize = 1;
+
+/// What one settled delivery may allocate on this thread over the raw client loop, under
+/// [`Commit::Tracked`]: the payload copy plus the tracker's own bookkeeping (the keys it hashes
+/// the partition by, and librdkafka's topic handle behind `store_offset`). The budget may only
+/// go down.
+const TRACKED_BUDGET: usize = 5;
 
 /// Per-run unique names, so a rerun never reads another run's records.
 fn unique(base: &str) -> String {
@@ -132,8 +138,9 @@ async fn fill(url: &str, topic: &str, count: usize) {
 }
 
 /// Consumes `count` deliveries, reading nothing of them: a handler that only decodes the body
-/// asks for no more than this.
-async fn consume<S>(stream: &mut S, count: usize)
+/// asks for no more than this. Under [`Commit::Tracked`] each one is settled, which is the
+/// second thing a handler does.
+async fn consume<S>(stream: &mut S, count: usize, tracked: bool)
 where
     S: Stream<Item = Result<KafkaMessage, ruststream_rdkafka::KafkaError>> + Unpin,
 {
@@ -145,13 +152,17 @@ where
             .expect("the delivery arrives");
         // What every handler does: read the body. Nothing else is asked of the delivery.
         assert_eq!(IncomingMessage::payload(&delivery), BODY);
+        if tracked {
+            delivery.ack().await.expect("the offset settles");
+        }
     }
 }
 
 /// What a window of [`STEP`] deliveries costs this crate's consumer, counted after a first
 /// window of the same size: whatever the subscription paid to start is in the first one and not
 /// in the second.
-async fn crate_window(url: &str, topic: &str) -> usize {
+async fn crate_window(url: &str, topic: &str, commit: Commit) -> usize {
+    let tracked = commit == Commit::Tracked;
     let broker = KafkaBroker::new([url.to_owned()])
         .connect()
         .await
@@ -160,17 +171,18 @@ async fn crate_window(url: &str, topic: &str) -> usize {
         .subscribe_with(
             KafkaTopic::new(topic)
                 .group(unique("delivery-cost"))
-                .start(StartOffset::Earliest),
+                .start(StartOffset::Earliest)
+                .commit(commit),
         )
         .await
         .expect("subscribe");
     let mut stream = Box::pin(subscriber.stream());
 
-    consume(&mut stream, WARM).await;
+    consume(&mut stream, WARM, tracked).await;
     let first = allocations();
-    consume(&mut stream, STEP).await;
+    consume(&mut stream, STEP, tracked).await;
     let second = allocations();
-    consume(&mut stream, STEP).await;
+    consume(&mut stream, STEP, tracked).await;
     let third = allocations();
     assert_eq!(
         second - first,
@@ -207,7 +219,8 @@ async fn raw_window(url: &str, topic: &str) -> usize {
 /// A delivery costs the payload copy over what the raw client loop costs, and nothing else.
 ///
 /// The runtime is single-threaded so every allocation either loop makes lands on the counting
-/// thread.
+/// thread. The tracked window is measured beside the auto one and reported, because what a
+/// settled delivery costs on top is the other half of this crate's per-delivery bill.
 #[tokio::test]
 async fn a_delivery_allocates_only_its_payload_over_the_raw_loop() {
     let Some(url) = live::url("KAFKA_TEST_URL") else {
@@ -218,12 +231,25 @@ async fn a_delivery_allocates_only_its_payload_over_the_raw_loop() {
     fill(&url, &topic, WARM + 2 * STEP).await;
 
     let raw = raw_window(&url, &topic).await;
-    let ours = crate_window(&url, &topic).await;
+    let ours = crate_window(&url, &topic, Commit::Auto).await;
+    let tracked = crate_window(&url, &topic, Commit::Tracked).await;
 
+    println!(
+        "allocations over {STEP} deliveries: raw {raw}, auto {ours} (+{}), tracked {tracked} \
+         (+{})",
+        ours - raw,
+        tracked - raw,
+    );
     assert!(
         ours <= raw + BUDGET * STEP,
         "over {STEP} deliveries this crate allocates {ours} where the raw loop allocates {raw}: \
          {} per delivery against a budget of {BUDGET}",
         (ours - raw) / STEP,
+    );
+    assert!(
+        tracked <= raw + TRACKED_BUDGET * STEP,
+        "over {STEP} settled deliveries this crate allocates {tracked} where the raw loop \
+         allocates {raw}: {} per delivery against a budget of {TRACKED_BUDGET}",
+        (tracked - raw) / STEP,
     );
 }
