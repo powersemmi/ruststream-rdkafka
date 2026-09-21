@@ -72,13 +72,74 @@ impl Assigned {
     }
 }
 
+/// The delivered offsets of one partition that have not settled yet.
+///
+/// A handler that settles in order leaves one open at a time, which is the shape of almost every
+/// subscription, so that case holds the offset inline and touches no allocation. The ordered set
+/// is what a handler settling out of order needs - concurrent worker lanes, a `nack(true)` that
+/// holds an offset back - and the state returns to the inline form as soon as the burst is over.
+#[derive(Debug, Default)]
+enum Outstanding {
+    /// Everything delivered so far has settled.
+    #[default]
+    Settled,
+    /// Exactly one delivery is open.
+    One(i64),
+    /// Several are open, lowest first.
+    Several(BTreeSet<i64>),
+}
+
+impl Outstanding {
+    /// Records a delivered offset as open.
+    fn insert(&mut self, offset: i64) {
+        match self {
+            Self::Settled => *self = Self::One(offset),
+            Self::One(open) if *open == offset => {}
+            Self::One(open) => *self = Self::Several(BTreeSet::from([*open, offset])),
+            Self::Several(open) => {
+                open.insert(offset);
+            }
+        }
+    }
+
+    /// Settles an offset, answering whether it was open. A settle of an offset that is not is a
+    /// duplicate, or a leftover from before a replay reset.
+    fn remove(&mut self, offset: i64) -> bool {
+        match self {
+            Self::One(open) if *open == offset => {
+                *self = Self::Settled;
+                true
+            }
+            Self::Settled | Self::One(_) => false,
+            Self::Several(open) => {
+                let settled = open.remove(&offset);
+                match open.len() {
+                    0 => *self = Self::Settled,
+                    1 => *self = Self::One(*open.first().expect("one offset is left")),
+                    _ => {}
+                }
+                settled
+            }
+        }
+    }
+
+    /// The lowest offset still open, which is what bounds the position that may be stored.
+    fn lowest(&self) -> Option<i64> {
+        match self {
+            Self::Settled => None,
+            Self::One(open) => Some(*open),
+            Self::Several(open) => open.first().copied(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct PartitionState {
     /// The partition this state belongs to, so the pipeline can name it back.
     topic: Str,
     partition: i32,
     /// Delivered offsets that have not settled yet.
-    outstanding: BTreeSet<i64>,
+    outstanding: Outstanding,
     /// The highest delivered offset, `None` before the first delivery of this generation.
     highest: Option<i64>,
     /// The last position handed to the offset store; kept monotonic within a generation.
@@ -93,7 +154,7 @@ impl PartitionState {
         Self {
             topic,
             partition,
-            outstanding: BTreeSet::new(),
+            outstanding: Outstanding::Settled,
             highest: None,
             stored: None,
             generation: 0,
@@ -103,7 +164,7 @@ impl PartitionState {
     /// Starts the offset bookkeeping over at `offset` without touching the generation: a
     /// replayed delivery is the same read position continuing, not a new one.
     fn replay_from(&mut self, offset: i64) {
-        self.outstanding = BTreeSet::from([offset]);
+        self.outstanding = Outstanding::One(offset);
         self.highest = Some(offset);
         self.stored = None;
     }
@@ -173,7 +234,7 @@ impl CommitTracker {
         let index = partitions.slot(topic, partition);
         let state = &mut partitions.states[index];
         state.generation += 1;
-        state.outstanding.clear();
+        state.outstanding = Outstanding::Settled;
         state.highest = None;
         state.stored = None;
         drop(partitions);
@@ -227,7 +288,7 @@ impl CommitTracker {
             // position the subscription reads from now, so settling it must not move anything.
             return Ok(());
         }
-        if !state.outstanding.remove(&offset) {
+        if !state.outstanding.remove(offset) {
             // A duplicate settle, or a leftover from before a replay reset.
             return Ok(());
         }
@@ -236,7 +297,7 @@ impl CommitTracker {
         };
         let position = state
             .outstanding
-            .first()
+            .lowest()
             .map_or(highest, |lowest| lowest - 1);
         if position < 0 || state.stored.is_some_and(|stored| position <= stored) {
             // Nothing committable yet (an unsettled delivery still bounds the position).
@@ -625,6 +686,26 @@ mod tests {
         // the monotonic guard resets with it: the replayed offsets store again.
         tracker.delivered(&topic(), 0, 4);
         assert_eq!(settle(&tracker, 4), Some(4));
+    }
+
+    #[test]
+    fn a_burst_of_open_offsets_collapses_and_reopens() {
+        // Out-of-order settling opens several offsets, the set closes back down to one, and a
+        // later delivery has to reopen it: the position stays bounded by the lowest open offset
+        // through all three shapes.
+        let tracker = CommitTracker::default();
+        for offset in 0..=2 {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        assert_eq!(settle(&tracker, 1), None, "offset 0 is still open");
+        assert_eq!(settle(&tracker, 1), None, "and 1 settles only once");
+        assert_eq!(settle(&tracker, 2), None);
+        assert_eq!(settle(&tracker, 0), Some(2), "the whole prefix is settled");
+
+        tracker.delivered(&topic(), 0, 3);
+        tracker.delivered(&topic(), 0, 4);
+        assert_eq!(settle(&tracker, 4), None, "offset 3 is open again");
+        assert_eq!(settle(&tracker, 3), Some(4));
     }
 
     #[test]
