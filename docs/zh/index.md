@@ -42,7 +42,7 @@ serde = { version = "1", features = ["derive"] }
 ```text
 KafkaBroker::new(servers)          只记配置，同步，无 I/O
   |
-  | .connect().await?              创建生产者，探测集群
+  | .connect().await?              探测集群
   v
 ConnectedKafkaBroker               订阅和活的发布者都挂在它上面
   |
