@@ -214,7 +214,6 @@ impl KafkaSubscriber {
         let topic = self.delivered_topic.of(&record);
         let partition = record.partition();
         let offset = record.offset();
-        let timestamp_millis = record.timestamp_millis();
         // The headers stay unread unless the delivery is asked for them - except under
         // transactional commits, where the source coordinates ride them so the reply path can
         // pair a publishing handler's reply with its consumed offset (see EosPipeline::replies);
@@ -254,7 +253,6 @@ impl KafkaSubscriber {
             topic,
             partition,
             offset,
-            timestamp_millis,
             settlement,
             lane,
             Arc::clone(&self.seeker),

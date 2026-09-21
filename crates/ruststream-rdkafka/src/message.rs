@@ -83,11 +83,12 @@ impl fmt::Debug for Lane {
 }
 
 /// A partition number as the decimal text a lane key is, held inline: the widest `i32` is eleven
-/// bytes, which is shorter than the pointer a heap copy of it would cost.
+/// bytes, which is shorter than the pointer a heap copy of it would cost. The length is a byte
+/// because every delivery carries this cell whether or not anything reads it.
 #[derive(Debug)]
 pub(crate) struct PartitionText {
     bytes: [u8; 11],
-    len: usize,
+    len: u8,
 }
 
 impl PartitionText {
@@ -95,12 +96,12 @@ impl PartitionText {
         let mut bytes = [0u8; 11];
         let mut cursor = &mut bytes[..];
         write!(cursor, "{partition}").expect("eleven bytes hold the widest i32");
-        let len = 11 - cursor.len();
+        let len = u8::try_from(11 - cursor.len()).expect("eleven bytes hold the widest i32");
         Self { bytes, len }
     }
 
     fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..self.len]
+        &self.bytes[..self.len as usize]
     }
 }
 
@@ -145,7 +146,6 @@ pub struct KafkaMessage {
     topic: Str,
     partition: i32,
     offset: i64,
-    timestamp_millis: Option<i64>,
     settlement: Settlement,
     /// How this delivery answers `partition_key()`.
     lane: Lane,
@@ -174,7 +174,6 @@ impl KafkaMessage {
         topic: Str,
         partition: i32,
         offset: i64,
-        timestamp_millis: Option<i64>,
         settlement: Settlement,
         lane: Lane,
         seeker: Arc<KafkaSeeker>,
@@ -187,7 +186,6 @@ impl KafkaMessage {
             topic,
             partition,
             offset,
-            timestamp_millis,
             settlement,
             lane,
             seeker,
@@ -224,9 +222,12 @@ impl KafkaMessage {
     }
 
     /// The record's timestamp in milliseconds since the epoch, when the broker provided one.
+    ///
+    /// Read from the record on the ask rather than carried by the delivery: librdkafka answers
+    /// it out of the fetch buffer this delivery holds open, and most deliveries are never asked.
     #[must_use]
     pub fn timestamp_millis(&self) -> Option<i64> {
-        self.timestamp_millis
+        self.record.timestamp_millis()
     }
 
     /// The record key, surfaced from Kafka's native key (see [`PARTITION_KEY_HEADER`]).
@@ -357,5 +358,23 @@ impl Partitioned for KafkaMessage {
     /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
     fn partition_key(&self) -> Option<&[u8]> {
         self.lane.of(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_partition_lane_key_is_the_partition_in_decimal() {
+        // The widest `i32` is eleven bytes, which is what the inline buffer and its length are
+        // sized for; a lane key that came out short would quietly merge two partitions' lanes.
+        for partition in [0, 7, 42, i32::MAX, i32::MIN] {
+            assert_eq!(
+                PartitionText::of(partition).as_bytes(),
+                partition.to_string().as_bytes(),
+                "the lane key of partition {partition}",
+            );
+        }
     }
 }
