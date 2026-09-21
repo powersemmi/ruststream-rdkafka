@@ -325,7 +325,7 @@ impl Publisher for KafkaPublisher {
         options: Option<&Self::Options>,
     ) -> Result<(), Self::Error> {
         self.state.ensure_open(msg.name())?;
-        send_via(self.state.producer(), self.queue_timeout, msg, options).await
+        send_via(self.state.producer()?, self.queue_timeout, msg, options).await
     }
 }
 
@@ -619,7 +619,7 @@ impl Publisher for KafkaTransactionalPublisher {
             return send_via(&self.inner.producer, self.inner.queue_timeout, msg, options).await;
         }
         send_via(
-            self.inner.state.producer(),
+            self.inner.state.producer()?,
             self.inner.queue_timeout,
             msg,
             options,

@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
-use rdkafka::producer::{FutureProducer, Producer as _};
+use rdkafka::producer::{BaseProducer, FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use ruststream::{
     AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Str, Subscribe,
@@ -27,7 +27,9 @@ use crate::tracker::{CommitTracker, TrackingContext};
 /// clones from, the resolved configurations subscriptions and transactional producers derive
 /// from, and the registry of exactly-once sources.
 pub(crate) struct ConnState {
-    producer: FutureProducer,
+    /// The shared producer, opened by the first publish. A service that only consumes leaves it
+    /// empty and runs no producer client at all.
+    producer: OnceLock<FutureProducer>,
     producer_config: ClientConfig,
     base_config: ClientConfig,
     default_group: Option<String>,
@@ -46,8 +48,25 @@ pub(crate) struct ConnState {
 }
 
 impl ConnState {
-    pub(crate) fn producer(&self) -> &FutureProducer {
-        &self.producer
+    /// The shared producer, opening it on the first ask.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::Publish`] when librdkafka refuses to open the producer. The
+    /// configuration itself was accepted at connect, so what is left here is a resource the
+    /// client could not take.
+    pub(crate) fn producer(&self) -> Result<&FutureProducer, KafkaError> {
+        if let Some(producer) = self.producer.get() {
+            return Ok(producer);
+        }
+        let opened: FutureProducer = self
+            .producer_config
+            .create()
+            .map_err(|err| KafkaError::Publish(Box::new(err)))?;
+        // A concurrent first publish may have won the cell; its producer is the one everything
+        // uses from here, and the loser's is dropped unused.
+        let _ = self.producer.set(opened);
+        Ok(self.producer.get().expect("the cell holds a producer"))
     }
 
     pub(crate) fn producer_config(&self) -> &ClientConfig {
@@ -274,15 +293,24 @@ impl Broker for KafkaBroker {
         for (key, value) in &self.producer_config {
             producer_config.set(key, value);
         }
-        let producer: FutureProducer = producer_config.create().map_err(KafkaError::connect)?;
+        // The probe is a client of its own, built from the producer's configuration and dropped
+        // with this call: it answers whether the cluster is reachable and, on the way, whether
+        // librdkafka accepts the publish settings, so a refused property still fails here rather
+        // than at some publish later in the service's life. What a consume-only service must not
+        // do is keep a producer open for the life of the connection; that one is opened by the
+        // first publish.
+        let probe: BaseProducer = producer_config.create().map_err(KafkaError::connect)?;
 
         // fetch_metadata blocks, so it runs on the blocking pool.
-        let probe = producer.clone();
         let timeout = self.connect_timeout;
-        task::spawn_blocking(move || probe.client().fetch_metadata(None, timeout))
-            .await
-            .map_err(|err| KafkaError::Connect(Box::new(err)))?
-            .map_err(KafkaError::connect)?;
+        task::spawn_blocking(move || {
+            let reached = probe.client().fetch_metadata(None, timeout);
+            drop(probe);
+            reached
+        })
+        .await
+        .map_err(|err| KafkaError::Connect(Box::new(err)))?
+        .map_err(KafkaError::connect)?;
 
         // Every subject a registry codec publishes under, resolved here rather than on the first
         // publish: the codec's own encode is synchronous, and a subject that does not exist
@@ -293,7 +321,7 @@ impl Broker for KafkaBroker {
         }
 
         let state = Arc::new(ConnState {
-            producer,
+            producer: OnceLock::new(),
             producer_config,
             base_config,
             default_group: self.default_group,
@@ -577,7 +605,10 @@ impl ConnectedBroker for ConnectedKafkaBroker {
         // Closed before the flush: a publish racing the teardown must not enter a queue nobody
         // will drain afterwards.
         self.state.closed.store(true, Ordering::Release);
-        let producer = self.state.producer.clone();
+        // Nothing published through this connection, so there is nothing to flush.
+        let Some(producer) = self.state.producer.get().cloned() else {
+            return Ok(ClosedKafkaBroker { unflushed: 0 });
+        };
         let timeout = self.state.flush_timeout;
         // flush blocks (it polls the producer), so it runs on the blocking pool.
         let unflushed = task::spawn_blocking(move || {
@@ -681,6 +712,8 @@ fn assign_partitions(
 
 #[cfg(test)]
 mod tests {
+    use ruststream::{OutgoingMessage, Publisher as _};
+
     use super::*;
 
     #[test]
@@ -691,6 +724,49 @@ mod tests {
             Some("a:9092,b:9092")
         );
         assert_eq!(broker.describe_server().protocol, "kafka");
+    }
+
+    /// The stand's address, or `None` to skip - the gate the live suites in `tests/` use, in the
+    /// three lines it takes here: `just test-brokers` sets both variables, and a job that stood a
+    /// cluster up and then lost its address would otherwise report a skip as a pass.
+    fn live_url() -> Option<String> {
+        match std::env::var("KAFKA_TEST_URL") {
+            Ok(url) if !url.is_empty() => Some(url),
+            _ => {
+                assert!(
+                    !std::env::var("RUSTSTREAM_REQUIRE_LIVE").is_ok_and(|flag| !flag.is_empty()),
+                    "RUSTSTREAM_REQUIRE_LIVE is set, so this test must run, but KAFKA_TEST_URL \
+                     is unset or empty",
+                );
+                None
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_connection_opens_no_producer_until_something_publishes() {
+        let Some(url) = live_url() else { return };
+        let broker = KafkaBroker::new([url]).connect().await.expect("connect");
+        assert!(
+            broker.state.producer.get().is_none(),
+            "connecting must open no producer: a service that only consumes never publishes, and \
+             a producer is a client, its threads and a connection to the cluster",
+        );
+
+        let publisher = broker.publisher(KafkaPublish::default());
+        publisher
+            .publish(
+                OutgoingMessage::new("ruststream-lazy-producer", b"one".as_slice()),
+                None,
+            )
+            .await
+            .expect("publish");
+        assert!(
+            broker.state.producer.get().is_some(),
+            "the first publish opens the producer",
+        );
+
+        broker.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test]
