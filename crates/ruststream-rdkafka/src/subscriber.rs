@@ -218,8 +218,8 @@ impl KafkaSubscriber {
     /// is read here is what a delivery cannot answer from the record later, or what a later read
     /// could no longer see.
     fn map_delivery(&mut self, record: HeldRecord) -> KafkaMessage {
-        // Minted once per topic and shared from here on: the delivery carries it, the tracker
-        // keys this partition by it, and the acknowledgement looks it up under the same name.
+        // Minted once per topic and shared from here on: the delivery carries it, and the
+        // tracker opens this partition's slot under it.
         let topic = self.delivered_topic.of(&record);
         let partition = record.partition();
         let offset = record.offset();
@@ -244,11 +244,11 @@ impl KafkaSubscriber {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => Settlement::Tracked {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(&topic, partition, offset),
+                slot: self.tracker.delivered(&topic, partition, offset),
             },
             Commit::Transactional(_) => Settlement::Transactional {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(&topic, partition, offset),
+                slot: self.tracker.delivered(&topic, partition, offset),
             },
         };
         // The key itself is not built here: a subscription with no keyed lanes is never asked

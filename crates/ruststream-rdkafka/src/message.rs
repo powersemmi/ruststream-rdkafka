@@ -14,7 +14,7 @@ use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, 
 use crate::convert;
 use crate::record::HeldRecord;
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::tracker::CommitTracker;
+use crate::tracker::{CommitTracker, PartitionSlot};
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
 ///
@@ -28,9 +28,9 @@ pub const PARTITION_KEY_HEADER: &str = "kafka-partition-key";
 
 /// How this delivery settles when acked.
 ///
-/// The tracked forms carry the generation the delivery was pulled in, so a settle that arrives
-/// after the subscription was repositioned (a seek, a rebalance) is dropped instead of moving a
-/// position that no longer describes what this consumer reads.
+/// The tracked forms carry the partition slot the delivery was pulled in, so a settle that
+/// arrives after the subscription was repositioned (a seek, a rebalance) is dropped instead of
+/// moving a position that no longer describes what this consumer reads.
 pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.
     Advisory,
@@ -38,13 +38,13 @@ pub(crate) enum Settlement {
     /// through the consumer the delivery's own record keeps alive.
     Tracked {
         tracker: Arc<CommitTracker>,
-        generation: u64,
+        slot: PartitionSlot,
     },
     /// `Commit::Transactional`: an ack advances the shared watermark only - the EOS pipeline
     /// commits positions through the producer transaction, so nothing is stored here.
     Transactional {
         tracker: Arc<CommitTracker>,
-        generation: u64,
+        slot: PartitionSlot,
     },
 }
 
@@ -245,47 +245,28 @@ impl KafkaMessage {
     fn settle(self) -> Result<(), AckError> {
         match &self.settlement {
             Settlement::Advisory => Ok(()),
-            Settlement::Tracked {
-                tracker,
-                generation,
-            } => tracker
-                .settle_with(
-                    &self.topic,
-                    self.partition,
-                    self.offset,
-                    *generation,
-                    |position| {
-                        // The watermark is this delivery's own offset whenever nothing below it
-                        // is still outstanding, which is every settle of an in-order handler.
-                        // There the record answers for its own topic and librdkafka takes the
-                        // position off the record's topic handle, instead of looking one up by
-                        // name (a `CString`, a topic create and a topic destroy under its own
-                        // lock, per message).
-                        if let Some(record) = self.record.fetched()
-                            && position == self.offset
-                        {
-                            self.record.consumer().store_offset_from_message(record)
-                        } else {
-                            self.record.consumer().store_offset(
-                                &self.topic,
-                                self.partition,
-                                position,
-                            )
-                        }
-                    },
-                )
+            Settlement::Tracked { tracker, slot } => tracker
+                .settle_with(*slot, self.offset, |position| {
+                    // The watermark is this delivery's own offset whenever nothing below it
+                    // is still outstanding, which is every settle of an in-order handler.
+                    // There the record answers for its own topic and librdkafka takes the
+                    // position off the record's topic handle, instead of looking one up by
+                    // name (a `CString`, a topic create and a topic destroy under its own
+                    // lock, per message).
+                    if let Some(record) = self.record.fetched()
+                        && position == self.offset
+                    {
+                        self.record.consumer().store_offset_from_message(record)
+                    } else {
+                        self.record
+                            .consumer()
+                            .store_offset(&self.topic, self.partition, position)
+                    }
+                })
                 .map_err(|err| AckError::Broker(Box::new(err))),
-            Settlement::Transactional {
-                tracker,
-                generation,
-            } => {
-                let infallible: Result<(), Infallible> = tracker.settle_with(
-                    &self.topic,
-                    self.partition,
-                    self.offset,
-                    *generation,
-                    |_position| Ok(()),
-                );
+            Settlement::Transactional { tracker, slot } => {
+                let infallible: Result<(), Infallible> =
+                    tracker.settle_with(*slot, self.offset, |_position| Ok(()));
                 infallible.expect("no-op store cannot fail");
                 Ok(())
             }
