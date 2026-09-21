@@ -178,6 +178,9 @@ pub(crate) struct CommitTracker {
     /// Woken whenever a stored position advances; the EOS committer waits on it for its
     /// settle condition.
     advanced: Notify,
+    /// Whether anything has ever waited on `advanced`. Only an EOS pipeline does, and a
+    /// subscription without one would otherwise wake an empty list on every acknowledgement.
+    watched: AtomicBool,
     /// Set by every reposition, consumed by the EOS pipeline: an open window whose sources
     /// moved underneath it must abort instead of committing offsets from the read position the
     /// seek replaced.
@@ -305,7 +308,13 @@ impl CommitTracker {
         }
         store(position)?;
         state.stored = Some(position);
-        self.advanced.notify_waiters();
+        // Read while the partitions are still locked, which is what makes the gate safe: a
+        // waiter registers itself before it reads the position it is waiting for, and that read
+        // takes this same lock. So either the flag is already set here and the waiter is woken,
+        // or the waiter's own read comes after this store and finds it.
+        if self.watched.load(Ordering::Acquire) {
+            self.advanced.notify_waiters();
+        }
         Ok(())
     }
 
@@ -355,6 +364,7 @@ impl CommitTracker {
     /// A waiter for the next stored-position advance. Create it BEFORE checking the awaited
     /// condition, so an advance landing between the check and the await is not missed.
     pub(crate) fn advance_waiter(&self) -> Notified<'_> {
+        self.watched.store(true, Ordering::Release);
         self.advanced.notified()
     }
 
@@ -497,6 +507,9 @@ impl ConsumerContext for TrackingContext {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::future::Future as _;
+    use std::pin::pin;
+    use std::task::{Context, Waker};
 
     use super::*;
 
@@ -686,6 +699,27 @@ mod tests {
         // the monotonic guard resets with it: the replayed offsets store again.
         tracker.delivered(&topic(), 0, 4);
         assert_eq!(settle(&tracker, 4), Some(4));
+    }
+
+    #[test]
+    fn a_waiter_registered_before_a_settle_is_woken_by_it() {
+        // The EOS committer registers its waiter and only then reads the position it is waiting
+        // for. A settle that advances the position while that waiter is registered has to wake
+        // it; nothing else ends the window before the transaction deadline.
+        let tracker = CommitTracker::default();
+        let slot = tracker.delivered(&topic(), 0, 0);
+        let mut waiter = pin!(tracker.advance_waiter());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            waiter.as_mut().poll(&mut cx).is_pending(),
+            "nothing has advanced yet",
+        );
+
+        assert_eq!(settle_in(&tracker, 0, slot), Some(0));
+        assert!(
+            waiter.as_mut().poll(&mut cx).is_ready(),
+            "a settle that advanced the stored position has to wake a registered waiter",
+        );
     }
 
     #[test]
