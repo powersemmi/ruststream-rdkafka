@@ -11,7 +11,7 @@ use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
 use ruststream::{
-    AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Subscribe,
+    AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Str, Subscribe,
     SubscriptionSource,
 };
 use tokio::task;
@@ -19,7 +19,7 @@ use tokio::task;
 use crate::eos::EosSource;
 use crate::error::KafkaError;
 use crate::publisher::{KafkaPublish, KafkaPublisher};
-use crate::subscriber::KafkaSubscriber;
+use crate::subscriber::{DeliveredTopic, KafkaSubscriber};
 use crate::subscription::{Commit, KafkaTopic, Reader, StartOffset, SubscriptionPlan};
 use crate::tracker::{CommitTracker, TrackingContext};
 
@@ -517,15 +517,25 @@ impl ConnectedKafkaBroker {
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
-        match &plan.reader {
+        // Decided here, where the reader still says what was subscribed: a delivery of a
+        // subscription that reads one literal topic needs no name off the record.
+        let delivered_topic = match &plan.reader {
             Reader::Assigned { topic, partitions } => {
                 assign_partitions(&consumer, topic, partitions, def.start)?;
+                DeliveredTopic::One(Str::from(topic.as_str()))
             }
             Reader::Subscribed(names) => {
-                let names: Vec<&str> = names.iter().map(String::as_str).collect();
-                consumer.subscribe(&names).map_err(KafkaError::subscribe)?;
+                let literal = match names.as_slice() {
+                    [only] if !only.starts_with('^') => Some(Str::from(only.as_str())),
+                    _ => None,
+                };
+                let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+                consumer
+                    .subscribe(&borrowed)
+                    .map_err(KafkaError::subscribe)?;
+                literal.map_or(DeliveredTopic::PerRecord(None), DeliveredTopic::One)
             }
-        }
+        };
 
         let consumer = Arc::new(consumer);
         if let Commit::Transactional(pipeline) = &def.commit {
@@ -536,6 +546,7 @@ impl ConnectedKafkaBroker {
         let subscriber = KafkaSubscriber::new(
             consumer,
             plan.name,
+            delivered_topic,
             settings.commit,
             tracker,
             settings.lane_key,

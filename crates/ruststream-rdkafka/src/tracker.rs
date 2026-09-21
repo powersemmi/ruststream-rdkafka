@@ -258,6 +258,10 @@ pub(crate) struct TrackingContext {
     /// position it was opened at is what this wave exists to catch, so the failure waits here
     /// for the subscriber's stream to yield it.
     start_failure: Mutex<Option<KafkaError>>,
+    /// Whether `start_failure` holds anything. The consume loop asks once per delivery, and a
+    /// rebalance that could not open the subscription is a once-per-lifetime event, so the
+    /// answer is read from here instead of by taking the mutex on every record.
+    start_failed: AtomicBool,
     /// Woken when a start failure is recorded, so a stream waiting on a topic that may never
     /// deliver anything still reports it.
     start_failures: Notify,
@@ -270,6 +274,7 @@ impl TrackingContext {
             subscription: subscription.into(),
             start: Mutex::new(None),
             start_failure: Mutex::new(None),
+            start_failed: AtomicBool::new(false),
             start_failures: Notify::new(),
         }
     }
@@ -299,15 +304,23 @@ impl TrackingContext {
             *slot = Some(err);
         }
         drop(slot);
+        // Released after the slot is filled, so a reader that sees the flag sees the failure.
+        self.start_failed.store(true, Ordering::Release);
         self.start_failures.notify_waiters();
     }
 
     /// Takes the recorded start failure, for the subscriber to yield on its stream.
     pub(crate) fn take_start_failure(&self) -> Option<KafkaError> {
-        self.start_failure
+        if !self.start_failed.load(Ordering::Acquire) {
+            return None;
+        }
+        let taken = self
+            .start_failure
             .lock()
             .expect("start failure mutex poisoned")
-            .take()
+            .take();
+        self.start_failed.store(taken.is_none(), Ordering::Release);
+        taken
     }
 
     /// A waiter for the next start failure. Create it BEFORE calling

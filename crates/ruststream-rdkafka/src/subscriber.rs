@@ -33,6 +33,43 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
     err.rdkafka_error_code() == Some(RDKafkaErrorCode::UnknownTopicOrPartition)
 }
 
+/// Where a delivery's topic name comes from.
+///
+/// A subscription over one literal topic knows the answer before its first record, so the
+/// delivery takes the name the subscription already minted. Reading it back out of librdkafka
+/// costs a `CStr` walk and a UTF-8 validation of the same bytes on every delivery, and answers
+/// what the descriptor said.
+#[derive(Debug)]
+pub(crate) enum DeliveredTopic {
+    /// Every record of this subscription comes from this topic: one literal name, or the topic
+    /// whose partitions were assigned by hand.
+    One(Str),
+    /// Several names or a pattern: only the record knows which topic it came from. The last one
+    /// is kept because a fetch hands a consumer one topic's records at a time, so a whole run
+    /// answers without minting the name again.
+    PerRecord(Option<Str>),
+}
+
+impl DeliveredTopic {
+    /// The topic of this delivery, as the shared string every delivery of that topic carries.
+    fn of(&mut self, record: &HeldRecord) -> Str {
+        match self {
+            Self::One(name) => name.clone(),
+            Self::PerRecord(last) => {
+                let name = record.topic();
+                if let Some(known) = last
+                    && &**known == name
+                {
+                    return known.clone();
+                }
+                let minted = Str::from(name);
+                *last = Some(minted.clone());
+                minted
+            }
+        }
+    }
+}
+
 /// A consumer-group member on one topic, yielding [`KafkaMessage`] deliveries.
 ///
 /// Created by subscribing a [`KafkaTopic`](crate::KafkaTopic) descriptor (or a bare topic name)
@@ -49,10 +86,8 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
 pub struct KafkaSubscriber {
     consumer: Arc<StreamConsumer<TrackingContext>>,
     topic: String,
-    /// The topic of the last delivery, as the shared string every delivery of it carries. A
-    /// fetch hands a consumer one topic's records at a time, so remembering the last one answers
-    /// a whole run without minting a name again.
-    last_topic: Option<Str>,
+    /// Where a delivery's topic name comes from; see [`DeliveredTopic`].
+    delivered_topic: DeliveredTopic,
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
@@ -72,6 +107,7 @@ impl KafkaSubscriber {
     pub(crate) fn new(
         consumer: Arc<StreamConsumer<TrackingContext>>,
         topic: String,
+        delivered_topic: DeliveredTopic,
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
@@ -83,7 +119,7 @@ impl KafkaSubscriber {
         Self {
             consumer,
             topic,
-            last_topic: None,
+            delivered_topic,
             commit,
             tracker,
             lane_key,
@@ -178,23 +214,13 @@ impl KafkaSubscriber {
         }
     }
 
-    /// The delivery's topic as the shared string every delivery of that topic carries.
-    fn shared_topic(&mut self, topic: &str) -> Str {
-        if let Some(known) = &self.last_topic
-            && &**known == topic
-        {
-            return known.clone();
-        }
-        let minted = Str::from(topic);
-        self.last_topic = Some(minted.clone());
-        minted
-    }
-
     /// Turns a fetched record into a delivery. The record travels into the delivery whole: what
     /// is read here is what a delivery cannot answer from the record later, or what a later read
     /// could no longer see.
     fn map_delivery(&mut self, record: HeldRecord) -> KafkaMessage {
-        let topic_name = record.topic();
+        // Minted once per topic and shared from here on: the delivery carries it, the tracker
+        // keys this partition by it, and the acknowledgement looks it up under the same name.
+        let topic = self.delivered_topic.of(&record);
         let partition = record.partition();
         let offset = record.offset();
         let timestamp_millis = record.timestamp_millis();
@@ -207,13 +233,10 @@ impl KafkaSubscriber {
             let mut map = convert::headers_from_message(&record);
             map.insert(
                 Str::from_static(EOS_SOURCE_HEADER),
-                crate::eos::encode_source(topic_name, partition, offset),
+                crate::eos::encode_source(&topic, partition, offset),
             );
             headers.set(map).expect("the cell was just created");
         }
-        // Minted once per topic and shared from here on: the delivery carries it, the tracker
-        // keys this partition by it, and the acknowledgement looks it up under the same name.
-        let topic = self.shared_topic(topic_name);
         // The generation is captured here, where the delivery is pulled, never where it settles:
         // that is what lets a reposition landing in between tell a delivery of the replaced read
         // position apart from one the new position produced.
