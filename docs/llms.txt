@@ -1,0 +1,39 @@
+# ruststream-rdkafka
+
+> `ruststream-rdkafka` is the Apache Kafka broker crate for RustStream, a Rust framework for services that subscribe to message brokers and publish to them. It runs over `rdkafka` and librdkafka: a subscription is one consumer in one consumer group, Kafka settles by committed position, and the Confluent Schema Registry with Avro and Protobuf is part of the crate.
+
+A subscription is a descriptor: `KafkaTopic` (one topic in one group), `KafkaTopics` (several topics or a pattern) or `KafkaPartitions` (a manual assignment); a bare `#[subscriber("orders")]` reads the topic in the broker's default group. A service imports `ruststream_rdkafka::prelude::*`, which offers the policies as `Publish`, `TransactionalPublish`, `PartitionedPublish` and `EosPublish`; the record key and partition of one publish are its per-message settings. Every librdkafka property the crate does not type is reachable through the `config` passthroughs. A `cargo generate` template, `templates/kafka-topic`, scaffolds a service.
+
+This site holds the entry pages. The crate's guides are its module overviews on docs.rs, and the framework itself is documented on the RustStream site.
+
+## Site
+
+- [Home](https://powersemmi.github.io/ruststream-rdkafka/latest/): the transport model, the dependency lines and a first service
+- [Benchmarks](https://powersemmi.github.io/ruststream-rdkafka/latest/benchmarks/): what this crate and the framework's runtime cost over the raw `rdkafka` client, and how to re-measure it with `just bench`
+
+## Guides
+
+- [Overview](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html): the transport and a service
+- [Subscribing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing): the descriptors, consumer groups and their settings
+- [Settlement](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#settlement): what `ack` and `nack` mean under each commit mode
+- [Retries and dead-lettering](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#retries-and-dead-lettering): the retry cap and the dead-letter topic
+- [Batches](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#batches): batch handlers over a consumer
+- [Positions and seeking](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#positions-and-seeking): where a subscription starts and how a handler repositions it
+- [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing): the publish policies and where a policy is named
+- [Record keys and partitions](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#record-keys-and-partitions): the key and partition of one record
+- [Transactions](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#transactions): a transactional id on the policy, and publishes that become visible together or not at all
+- [Exactly-once pipelines](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#exactly-once-pipelines): consume, produce and commit in one transaction
+- [The prelude](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#the-prelude): the one glob a Kafka service imports
+- [The AsyncAPI document](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#the-asyncapi-document): the Kafka bindings the `asyncapi` feature reports
+- [Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html): the in-process broker behind the `testing` feature, driven by `TestApp`
+- [Operations](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#operations): addresses, SASL, TLS and timeouts
+- [Cargo features](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#cargo-features): the codecs, the registry formats, `asyncapi`, `testing`, `ssl` and `zstd`
+- [Schema Registry](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html): the Confluent client, the wire-format envelope and registration on the publish side
+- [Avro](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html): Avro behind the codec, with or without a registry
+- [Protobuf](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html): Protobuf as a self-serializing type
+
+## Optional
+
+- [API reference](https://docs.rs/ruststream-rdkafka): the full rustdoc of the crate
+- [RustStream llms.txt](https://powersemmi.github.io/ruststream/llms.txt): the index of the framework's own documentation
+- [Source](https://github.com/powersemmi/ruststream-rdkafka): the crate's repository and its template
