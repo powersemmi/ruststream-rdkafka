@@ -7,10 +7,9 @@ on:
   # naming `main` leaves it with no checks at all - which reads as a conflicting branch rather
   # than as a workflow that declined to run.
   #
-  # A draft runs nothing: every job below declines while `draft` is true, so an agent can open
-  # its work and the maintainer decides when CI spends its time on it. `ready_for_review` is what
-  # brings the workflow back at that moment, and it has to be listed because naming any type at
-  # all replaces the default set.
+  # A draft runs nothing until it is marked ready for review, which is what `ready_for_review` is
+  # here for: an agent opens its work as a draft, and the maintainer decides when CI spends its
+  # time on it. It has to be listed because naming any type at all replaces the default set.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -22,86 +21,65 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust:
-    name: Rust ${{ matrix.toolchain }}
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+  changes:
+    name: Detect changes
+    # Every other job needs this one, so the draft gate lives here: a skipped gate skips them all.
+    if: >-
+      github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # The floor, what users build with, and the early warning. Releases in between add
-        # nothing: what fails on a later one fails on the floor too. Keep the floor in step
-        # with `rust-version` in the workspace manifest.
-        toolchain: [stable, beta, "1.88"]
-    # Installing a toolchain does not select it: `rust-toolchain.toml` pins `stable` and
-    # outranks the rustup default the install action sets, so without this every leg would build
-    # on stable and the matrix would prove nothing. RUSTUP_TOOLCHAIN outranks the file.
-    env:
-      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      templates: ${{ steps.filter.outputs.templates }}
+      docs: ${{ steps.filter.outputs.docs }}
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - uses: dorny/paths-filter@v4
+        id: filter
         with:
-          toolchain: ${{ matrix.toolchain }}
-          components: rustfmt, clippy
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              # the stand the broker-integration job starts
+              - 'docker-compose.test.yml'
+              - '.github/workflows/ci.yml'
+            templates:
+              - 'templates/**'
+              - 'crates/ruststream-rdkafka/src/**'
+              - 'crates/ruststream-rdkafka/Cargo.toml'
+              - 'Cargo.toml'
+              - '.github/workflows/ci.yml'
+            docs:
+              - 'docs/**'
+              - 'properdocs.yml'
+              - 'overrides/**'
+              - 'crates/ruststream-rdkafka/examples/**'
+              - 'scripts/lint_doc_fences.py'
+              - 'scripts/check_doc_i18n.py'
+              - 'scripts/doc_glossary.toml'
+              - '.github/workflows/ci.yml'
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt
-        if: matrix.toolchain == 'stable'
-        run: cargo fmt --all -- --check
-
-      # The benchmark package is left out of every all-features leg on purpose: it is built with
-      # the feature set a service ships, and the framework's harness feature is a compile error
-      # in it. Its own leg follows each of them, so it stays linted and stays compiled.
-      - name: cargo clippy
-        if: matrix.toolchain == 'stable'
-        run: cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features -- -D warnings
-
-      - name: cargo clippy (benchmarks)
-        if: matrix.toolchain == 'stable'
-        run: cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
-
-      # Advisory, not a gate: surfaces a lint added by the next clippy release six weeks
-      # before it turns the build red.
-      - name: cargo clippy (beta, advisory)
-        if: matrix.toolchain == 'beta'
-        continue-on-error: true
-        run: |
-          cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features -- -D warnings
-          cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
-
-      - name: cargo check (no default features)
-        run: cargo check --locked --workspace --no-default-features
-
-      - name: cargo check (all features)
-        run: cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features
-
-      - name: cargo check (benchmarks)
-        run: cargo check --locked -p ruststream-rdkafka-bench --all-targets
-
-      # --no-fail-fast: a failing target must not hide failures in the targets behind it;
-      # the log then lists every red test, not just the first binary's.
-      - name: cargo test (in-process only, no live broker)
-        run: cargo test --locked --workspace --all-features --no-fail-fast
-
-      # The crate-root missing_docs deny covers item docs; this gate catches what rustc
-      # cannot: broken intra-doc links and redundant targets only rustdoc resolves.
-      - name: cargo doc
-        if: matrix.toolchain == 'stable'
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --locked --workspace --all-features --no-deps
-
-  features:
-    name: Each feature alone
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+  lint:
+    name: Lint and checks
+    needs: changes
+    # One runner for every check outside the build job: the dependency graph, spelling, the
+    # workflows, formatting, lints, the scaffolds, each feature alone and minimal versions. Not
+    # path-gated as a whole: advisories arrive over time, not only with manifest changes, so
+    # `cargo deny` runs on every pull request, and so do the spelling and workflow scans, which
+    # read the whole tree. The Rust steps run when the Rust sources changed, the scaffolds when
+    # they or the crate did. Each check runs whatever the one before it did, so a red formatting
+    # step hides no later verdict. Minimal versions rewrites the lock file and the manifests for
+    # good, so it comes last.
     runs-on: ubuntu-latest
+    env:
+      RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+      TEMPLATES_CHANGED: ${{ needs.changes.outputs.templates }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -109,69 +87,244 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # Dependency-graph gate: RustSec advisories, license allow-list, duplicate versions, and
+      # registry sources, per the checked-in deny.toml.
+      - name: cargo deny
+        run: cargo deny check
+
+      - name: Install uv
+        if: "!cancelled()"
+        uses: astral-sh/setup-uv@v7
+
+      - name: codespell
+        if: "!cancelled()"
+        run: uvx codespell
+
+      - name: zizmor
+        if: "!cancelled()"
+        run: uvx zizmor .github/workflows
+
+      # Installed beside stable, which `rust-toolchain.toml` keeps the default: the floor for
+      # minimal versions and a nightly for its resolver. The floor is spelled out here and in the
+      # build job; keep it in step with `rust-version` in the workspace manifest.
+      - name: Install the extra toolchains
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
+        run: rustup toolchain install --profile minimal 1.88 nightly
 
       - name: Cache cargo
+        if: >-
+          !cancelled()
+          && (env.RUST_CHANGED == 'true' || env.TEMPLATES_CHANGED == 'true')
         uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-hack
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
 
+      - name: Install cargo-generate
+        if: "!cancelled() && env.TEMPLATES_CHANGED == 'true'"
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-generate
+
+      - name: cargo fmt
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
+        run: cargo fmt --all -- --check
+
+      # The benchmark package is left out of the all-features lints on purpose: it is built with
+      # the feature set a service ships, and the framework's harness feature is a compile error in
+      # it. Its own lint follows, so it stays linted and stays compiled; `just bench` runs it.
+      - name: cargo clippy
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
+        run: |
+          cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features -- -D warnings
+          cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
+
+      # The template-contract drift check: render each scaffold and compile it, so an API change
+      # that breaks a template fails here, not a user's first `cargo build`. Compile-only, no live
+      # broker. The rendered projects pin `ruststream-rdkafka` by version; patch it at this
+      # checkout so the scaffolds build against the unreleased crate (`ruststream` itself is
+      # published).
+      - name: Render and check the templates
+        if: "!cancelled() && env.TEMPLATES_CHANGED == 'true'"
+        run: |
+          for tpl in kafka-topic; do
+            dest="$RUNNER_TEMP/$tpl"
+            mkdir -p "$dest"
+            cargo generate --path "templates/$tpl" \
+              --name smoke --destination "$dest" --vcs none
+            # The scaffold manifest is checked in as `Cargo.toml.liquid` so that cargo's git-source
+            # package discovery never parses its placeholder name. Assert that cargo-generate did
+            # drop the suffix, otherwise the append below would quietly write a manifest of its own.
+            test -f "$dest/smoke/Cargo.toml"
+            {
+              echo ""
+              echo "[patch.crates-io]"
+              echo "ruststream-rdkafka = { path = \"$GITHUB_WORKSPACE/crates/ruststream-rdkafka\" }"
+            } >> "$dest/smoke/Cargo.toml"
+            cargo check --manifest-path "$dest/smoke/Cargo.toml"
+          done
+
       # Every feature is additive, so each one has to compile on its own: the all-features
       # build hides an item that reaches for a sibling feature's API without gating itself.
       # --no-dev-deps: a dev-dependency in scope masks a missing feature gate in the library.
-      # It also rewrites the manifests in place, which is why this is the one job without
-      # --locked.
+      # It also rewrites the manifests while it runs, which is why it has no --locked and comes
+      # after every step that needs the tree as checked in.
       - name: cargo hack check (each feature)
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
         run: cargo hack check --workspace --each-feature --no-dev-deps
 
-  minimal-versions:
-    name: Minimal versions
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install nightly (resolver only)
-        uses: dtolnay/rust-toolchain@nightly
-
-      # The floor, for the build step below. Keep the version in step with
-      # `rust-version` in the workspace manifest.
-      - name: Install the MSRV toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88"
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
+      # Minimal versions is one chain: each step runs only when the one before it succeeded, since
+      # a step on a graph that failed to resolve checks nothing.
       # The full flag rather than -Z direct-minimal-versions: the narrow one leaves the assembled
       # graph unverified, and that is what a user builds. The price is that a third-party crate
-      # declaring a bound looser than it compiles against fails here; pin such a crate with a
-      # `cargo update -p <crate> --precise <version>` step, naming the reason. None needed today.
+      # declaring a bound looser than it compiles against fails here; such a crate gets a
+      # `cargo update -p <crate> --precise <version>` step after this one, naming the reason.
       - name: Resolve minimal versions
+        id: minimal-resolve
+        if: "!cancelled() && env.RUST_CHANGED == 'true'"
         run: cargo +nightly update -Z minimal-versions
 
       # Minimum dependencies on the minimum compiler: the worst case a user can assemble.
       # Resolution above needs nightly, so only this step drops to the floor. --locked keeps
       # the minimal resolution: without it cargo would quietly re-resolve it away.
       - name: Build and test against minimal versions
+        id: minimal-test
+        if: "!cancelled() && steps.minimal-resolve.outcome == 'success'"
         env:
           RUSTUP_TOOLCHAIN: "1.88"
         run: |
-          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets --all-features
+          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features
           cargo check --locked -p ruststream-rdkafka-bench --all-targets
           cargo test --locked --workspace --all-features --no-fail-fast
 
+  rust:
+    name: Build and test
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    # Stable first, then the early warning and the floor on the same runner, and those two only
+    # once stable passed as a whole: a break stable already reports is not worth two more
+    # builds. Releases between the floor and stable add nothing: what fails on a later one fails
+    # on the floor too. Stable is the default through `rust-toolchain.toml`; the later steps
+    # name theirs through RUSTUP_TOOLCHAIN, which outranks the file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install beta and the floor
+        run: |
+          rustup toolchain install --profile minimal --component clippy beta
+          rustup toolchain install --profile minimal 1.88
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # The crate-root missing_docs deny covers item docs; this gate catches what rustc
+      # cannot: broken intra-doc links and redundant targets only rustdoc resolves.
+      - name: cargo doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+
+      - name: cargo check (no default features)
+        run: cargo check --locked --workspace --no-default-features
+
+      # The benchmark package is left out of every all-features check on purpose: it is built
+      # with the feature set a service ships, and the framework's harness feature is a compile
+      # error in it. Its own check follows, so it stays compiled.
+      - name: cargo check (all features)
+        run: |
+          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features
+          cargo check --locked -p ruststream-rdkafka-bench --all-targets
+
+      # The in-process suite: the live tests skip themselves without KAFKA_TEST_URL, and the
+      # broker-integration job runs them against Kafka and the Schema Registry.
+      # --no-fail-fast: a failing target must not hide failures in the targets behind it;
+      # the log then lists every red test, not just the first binary's.
+      - name: cargo test (in-process only, no live broker)
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
+      # The gate the later toolchains wait on: it succeeds only when every stable step did.
+      - name: Stable passed
+        id: stable
+        run: echo "stable passed"
+
+      # Advisory, not a gate: surfaces a lint added by the next clippy release six weeks before
+      # it turns the build red.
+      - name: cargo clippy (beta, advisory)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        continue-on-error: true
+        env:
+          RUSTUP_TOOLCHAIN: beta
+        run: |
+          cargo clippy --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features -- -D warnings
+          cargo clippy --locked -p ruststream-rdkafka-bench --all-targets -- -D warnings
+
+      - name: cargo check (no default features, beta)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: beta
+        run: cargo check --locked --workspace --no-default-features
+
+      - name: cargo check (all features, beta)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: beta
+        run: |
+          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features
+          cargo check --locked -p ruststream-rdkafka-bench --all-targets
+
+      - name: cargo test (beta)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: beta
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
+      - name: cargo check (no default features, 1.88)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: "1.88"
+        run: cargo check --locked --workspace --no-default-features
+
+      - name: cargo check (all features, 1.88)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: "1.88"
+        run: |
+          cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
+            --all-features
+          cargo check --locked -p ruststream-rdkafka-bench --all-targets
+
+      - name: cargo test (1.88)
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        env:
+          RUSTUP_TOOLCHAIN: "1.88"
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
   broker-integration:
     name: "Broker integration (Kafka)"
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -223,78 +376,90 @@ jobs:
         if: always()
         run: docker compose -f docker-compose.test.yml down -v
 
-  templates:
-    name: Templates (render + compile)
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+  docs:
+    name: Build site
+    needs: [changes, lint]
+    # After the lint job, and only when it passed: a site built from code that fails its own
+    # gates is not worth the runner.
+    if: >-
+      needs.changes.outputs.docs == 'true'
+      && needs.lint.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-generate
-        uses: taiki-e/install-action@v2
+      - uses: actions/setup-python@v7
         with:
-          tool: cargo-generate
+          python-version: "3.12"
 
-      # The template-contract drift check: render each scaffold and compile it, so an API change
-      # that breaks a template fails here, not a user's first `cargo build`. Compile-only, no live
-      # broker. The rendered projects pin `ruststream-rdkafka` by version; patch it at this
-      # checkout so the scaffolds build against the unreleased crate (`ruststream` itself is
-      # published).
-      - name: Render and check the templates
+      - name: Install docs toolchain
+        run: pip install -r docs/requirements.txt
+
+      - name: Lint doc code fences
+        run: python3 scripts/lint_doc_fences.py
+
+      - name: Check translated pages against their originals
+        run: python3 scripts/check_doc_i18n.py
+
+      - name: Build site (strict)
+        run: properdocs build --strict
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    needs: lint
+    # After the lint job, and only when it passed. None of the three languages needs a build:
+    # Rust and Python are extracted from source, and `actions` reads the workflows.
+    if: needs.lint.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python, rust]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  result:
+    name: CI result
+    # The one check the `main` ruleset requires: it speaks for every job above, so a job that
+    # comes, goes or is renamed never touches the ruleset. Skipped counts as passed, anything
+    # else fails. A draft skips it with the rest, and the run that marking it ready starts
+    # reports again.
+    needs:
+      - changes
+      - lint
+      - rust
+      - broker-integration
+      - docs
+      - codeql
+    if: >-
+      always()
+      && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          for tpl in kafka-topic; do
-            dest="$RUNNER_TEMP/$tpl"
-            mkdir -p "$dest"
-            cargo generate --path "templates/$tpl" \
-              --name smoke --destination "$dest" --vcs none
-            # The scaffold manifest is checked in as `Cargo.toml.liquid` so that cargo's git-source
-            # package discovery never parses its placeholder name. Assert that cargo-generate did
-            # drop the suffix, otherwise the append below would quietly write a manifest of its own.
-            test -f "$dest/smoke/Cargo.toml"
-            {
-              echo ""
-              echo "[patch.crates-io]"
-              echo "ruststream-rdkafka = { path = \"$GITHUB_WORKSPACE/crates/ruststream-rdkafka\" }"
-            } >> "$dest/smoke/Cargo.toml"
-            cargo check --manifest-path "$dest/smoke/Cargo.toml"
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
           done
-
-  security:
-    name: Security scans
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
-
-      # Dependency-graph gate: RustSec advisories, license allow-list, duplicate
-      # versions, and registry sources, per the checked-in deny.toml. Not path-
-      # gated: advisories arrive over time, not only with manifest changes.
-      - name: cargo deny
-        run: cargo deny check
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: codespell
-        run: uvx codespell
-
-      - name: zizmor
-        run: uvx zizmor .github/workflows
