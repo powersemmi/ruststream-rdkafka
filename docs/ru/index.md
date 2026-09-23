@@ -46,7 +46,7 @@ serde = { version = "1", features = ["derive"] }
 ```text
 KafkaBroker::new(servers)          только настройка, синхронно, без ввода-вывода
   |
-  | .connect().await?              создаёт продюсера, опрашивает кластер
+  | .connect().await?              опрашивает кластер
   v
 ConnectedKafkaBroker               на нём держатся подписки и живые издатели
   |

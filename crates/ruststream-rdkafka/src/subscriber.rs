@@ -1,24 +1,27 @@
 //! The subscriber: a stream of Kafka deliveries from one topic subscription.
 
 use std::fmt;
+use std::future::Future;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::pin::{Pin, pin};
+use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
+#[cfg(feature = "schema-registry")]
 use bytes::Bytes;
-use futures::Stream;
-use futures::future::FutureExt as _;
-use rdkafka::Message as _;
+use futures::{Stream, ready};
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
-use ruststream::{BatchSubscriber, Seekable, Subscriber};
+use ruststream::{BatchSubscriber, Seekable, Str, Subscriber};
 use tracing::{debug, warn};
 
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
-use crate::message::{KafkaMessage, PARTITION_KEY_HEADER, Settlement};
+use crate::message::{KafkaMessage, Lane, Settlement};
+use crate::record::{HeldRecord, SharedConsumer};
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -30,6 +33,43 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
     // A subscribed topic that does not exist (yet): pending creation is routine when the
     // broker auto-creates topics, and librdkafka keeps refreshing metadata until it appears.
     err.rdkafka_error_code() == Some(RDKafkaErrorCode::UnknownTopicOrPartition)
+}
+
+/// Where a delivery's topic name comes from.
+///
+/// A subscription over one literal topic knows the answer before its first record, so the
+/// delivery takes the name the subscription already minted. Reading it back out of librdkafka
+/// costs a `CStr` walk and a UTF-8 validation of the same bytes on every delivery, and answers
+/// what the descriptor said.
+#[derive(Debug)]
+pub(crate) enum DeliveredTopic {
+    /// Every record of this subscription comes from this topic: one literal name, or the topic
+    /// whose partitions were assigned by hand.
+    One(Str),
+    /// Several names or a pattern: only the record knows which topic it came from. The last one
+    /// is kept because a fetch hands a consumer one topic's records at a time, so a whole run
+    /// answers without minting the name again.
+    PerRecord(Option<Str>),
+}
+
+impl DeliveredTopic {
+    /// The topic of this delivery, as the shared string every delivery of that topic carries.
+    fn of(&mut self, record: &HeldRecord) -> Str {
+        match self {
+            Self::One(name) => name.clone(),
+            Self::PerRecord(last) => {
+                let name = record.topic();
+                if let Some(known) = last
+                    && &**known == name
+                {
+                    return known.clone();
+                }
+                let minted = Str::from(name);
+                *last = Some(minted.clone());
+                minted
+            }
+        }
+    }
 }
 
 /// A consumer-group member on one topic, yielding [`KafkaMessage`] deliveries.
@@ -48,6 +88,8 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
 pub struct KafkaSubscriber {
     consumer: Arc<StreamConsumer<TrackingContext>>,
     topic: String,
+    /// Where a delivery's topic name comes from; see [`DeliveredTopic`].
+    delivered_topic: DeliveredTopic,
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
@@ -67,6 +109,7 @@ impl KafkaSubscriber {
     pub(crate) fn new(
         consumer: Arc<StreamConsumer<TrackingContext>>,
         topic: String,
+        delivered_topic: DeliveredTopic,
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
@@ -78,6 +121,7 @@ impl KafkaSubscriber {
         Self {
             consumer,
             topic,
+            delivered_topic,
             commit,
             tracker,
             lane_key,
@@ -161,71 +205,54 @@ impl KafkaSubscriber {
         }
     }
 
-    /// The registry-codec prefetch: resolves the writer schema this delivery's envelope names,
-    /// on the async consume path, so the synchronous codec that decodes it finds the schema in
-    /// the cache. The payload is left exactly as it arrived. A no-op without an attached
-    /// prefetch or for a payload carrying no envelope.
-    #[cfg(feature = "schema-registry")]
-    async fn prefetch(&self, item: &KafkaMessage) {
-        if let Some(prefetch) = &self.schema_prefetch {
-            prefetch.warm_delivery(IncomingMessage::payload(item)).await;
-        }
-    }
-
-    fn map_delivery(&self, delivery: &rdkafka::message::BorrowedMessage<'_>) -> KafkaMessage {
-        let mut headers = convert::headers_from_message(delivery);
+    /// Turns a fetched record into a delivery. The record travels into the delivery whole: what
+    /// is read here is what a delivery cannot answer from the record later, or what a later read
+    /// could no longer see.
+    fn map_delivery(&mut self, record: HeldRecord) -> KafkaMessage {
+        // Minted once per topic and shared from here on: the delivery carries it, and the
+        // tracker opens this partition's slot under it.
+        let topic = self.delivered_topic.of(&record);
+        let partition = record.partition();
+        let offset = record.offset();
+        // The headers stay unread unless the delivery is asked for them - except under
+        // transactional commits, where the source coordinates ride them so the reply path can
+        // pair a publishing handler's reply with its consumed offset (see EosPipeline::replies);
+        // stripped from every outgoing publish, so they never hit the wire.
+        let headers = OnceLock::new();
         if matches!(self.commit, Commit::Transactional(_)) {
-            // The source coordinates ride the delivery's headers so the reply path can pair a
-            // publishing handler's reply with its consumed offset (see EosPipeline::replies);
-            // stripped from every outgoing publish, so they never hit the wire.
-            headers.insert(
-                EOS_SOURCE_HEADER,
-                crate::eos::encode_source(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+            let mut map = convert::headers_from_message(&record);
+            map.insert(
+                Str::from_static(EOS_SOURCE_HEADER),
+                crate::eos::encode_source(&topic, partition, offset),
             );
+            headers.set(map).expect("the cell was just created");
         }
-        let payload = delivery
-            .payload()
-            .map_or_else(Bytes::new, Bytes::copy_from_slice);
         // The generation is captured here, where the delivery is pulled, never where it settles:
         // that is what lets a reposition landing in between tell a delivery of the replaced read
         // position apart from one the new position produced.
         let settlement = match &self.commit {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => Settlement::Tracked {
-                consumer: Arc::clone(&self.consumer),
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+                slot: self.tracker.delivered(&topic, partition, offset),
             },
             Commit::Transactional(_) => Settlement::Transactional {
                 tracker: Arc::clone(&self.tracker),
-                generation: self.tracker.delivered(
-                    delivery.topic(),
-                    delivery.partition(),
-                    delivery.offset(),
-                ),
+                slot: self.tracker.delivered(&topic, partition, offset),
             },
         };
+        // The key itself is not built here: a subscription with no keyed lanes is never asked
+        // for one, and both forms answer out of what the delivery already holds.
         let lane = match self.lane_key {
-            LaneKey::RecordKey => headers
-                .get(PARTITION_KEY_HEADER)
-                .map(Bytes::copy_from_slice),
-            LaneKey::Partition => Some(Bytes::from(delivery.partition().to_string())),
+            LaneKey::RecordKey => Lane::RecordKey,
+            LaneKey::Partition => Lane::Partition(OnceLock::new()),
         };
         KafkaMessage::new(
-            payload,
+            record,
             headers,
-            delivery.topic().to_owned(),
-            delivery.partition(),
-            delivery.offset(),
-            delivery.timestamp().to_millis(),
+            topic,
+            partition,
+            offset,
             settlement,
             lane,
             Arc::clone(&self.seeker),
@@ -263,43 +290,186 @@ impl Subscriber for KafkaSubscriber {
     /// delivery is lost by dropping the stream between polls), and the stream can be re-created
     /// by calling `stream` again: deliveries buffer in the consumer, not in the returned stream.
     fn stream(&mut self) -> impl Stream<Item = Result<Self::Message, Self::Error>> + Send + '_ {
-        // Cloned once per stream and never per delivery: the failure waiter has to live across
-        // the same await as `recv`, while the subscriber is handed back on every yield.
+        // Cloned once per stream and never per delivery: a wait owns the handles it needs, so
+        // it borrows nothing from the stream that holds it.
         let context = Arc::clone(self.consumer.context());
-        futures::stream::unfold((self, context), |(sub, context)| async move {
-            loop {
-                // The waiter is armed before the check, so a failure landing between the two is
-                // not missed, and the select below is what makes it reach a subscription whose
-                // topic may never deliver anything.
-                let recorded = context.start_failure_waiter();
-                if let Some(err) = context.take_start_failure() {
-                    drop(recorded);
-                    return Some((Err(err), (sub, context)));
-                }
-                let received = tokio::select! {
-                    biased;
-                    () = recorded => continue,
-                    received = sub.consumer.recv() => received,
-                };
-                match received {
-                    Ok(delivery) => {
-                        #[allow(unused_mut)] // mutated by the registry transcode only
-                        let mut item = sub.map_delivery(&delivery);
-                        drop(delivery);
-                        // The prefetch first: it reads the envelope, which the transcode would
-                        // have replaced with a JSON document. The two are alternatives anyway.
-                        #[cfg(feature = "schema-registry")]
-                        sub.prefetch(&item).await;
-                        #[cfg(feature = "schema-registry")]
-                        sub.transcode(&mut item).await;
-                        sub.note_recovered();
-                        return Some((Ok(item), (sub, context)));
+        let consumer = Arc::clone(&self.consumer);
+        KafkaStream {
+            #[cfg(feature = "schema-registry")]
+            registry: self.schema_registry.clone(),
+            #[cfg(feature = "schema-registry")]
+            prefetch: self.schema_prefetch.clone(),
+            #[cfg(feature = "schema-registry")]
+            finishing: None,
+            sub: self,
+            context,
+            consumer,
+            waiting: None,
+        }
+    }
+}
+
+/// The stream [`KafkaSubscriber::stream`] hands out.
+///
+/// Written out rather than unfolded from a closure: a combinator carries the delivery out of a
+/// future's output, through a tuple and into the stream's own return, and this type is 216 bytes,
+/// so the compiler moved it three times per message before the caller ever saw it.
+pub(crate) struct KafkaStream<'a> {
+    sub: &'a mut KafkaSubscriber,
+    context: Arc<TrackingContext>,
+    consumer: SharedConsumer,
+    /// The wait, kept across polls for as long as the fetch queue stays dry: the registration
+    /// `recv` makes with the consumer's queue dies with the future that made it, so re-arming it
+    /// per poll would drop the wakeup it was waiting for. Boxed because an `async fn` future
+    /// cannot be named, and built once per idle episode - a subscription keeping up with its
+    /// topic never reaches it.
+    waiting: Option<Pin<Box<dyn Future<Output = ColdTurn> + Send>>>,
+    /// The registry middleware, held here rather than reached through the subscriber, so the
+    /// future below owns what it reads.
+    #[cfg(feature = "schema-registry")]
+    registry: Option<crate::schema_registry::SchemaRegistry>,
+    #[cfg(feature = "schema-registry")]
+    prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    /// The registry's own async step, for the deliveries that have one. A subscription with no
+    /// registry attached never builds it.
+    #[cfg(feature = "schema-registry")]
+    finishing: Option<Pin<Box<dyn Future<Output = KafkaMessage> + Send>>>,
+}
+
+/// What one turn of the cold path resolved to.
+enum ColdTurn {
+    /// A record the wait took, or what the consumer reported instead of one.
+    Record(Result<HeldRecord, rdkafka::error::KafkaError>),
+    /// A start position the rebalance could not apply, taken while the wait was being armed.
+    Failed(KafkaError),
+    /// The start-failure waiter fired; the flag is read at the top of the next turn.
+    Woken,
+}
+
+/// Waits for a record, or for a start position the rebalance could not apply.
+///
+/// The waiter is enabled before the flag is read, so a failure landing between the two wakes this
+/// wait instead of being missed - which is what makes it reach a subscription whose topic may
+/// never deliver anything.
+///
+/// # Cancel safety
+///
+/// Cancel safe: dropping this future before it resolves takes no record.
+async fn cold_turn(context: Arc<TrackingContext>, consumer: SharedConsumer) -> ColdTurn {
+    let mut recorded = pin!(context.start_failure_waiter());
+    recorded.as_mut().enable();
+    if let Some(err) = context.take_start_failure() {
+        return ColdTurn::Failed(err);
+    }
+    tokio::select! {
+        biased;
+        () = recorded => ColdTurn::Woken,
+        received = HeldRecord::next(&consumer) => ColdTurn::Record(received),
+    }
+}
+
+/// Runs the registry middleware over a delivery.
+///
+/// The prefetch first: it reads the envelope, which the transcode would have replaced with a
+/// JSON document. The two are alternatives anyway.
+#[cfg(feature = "schema-registry")]
+async fn finish_delivery(
+    registry: Option<crate::schema_registry::SchemaRegistry>,
+    prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    mut item: KafkaMessage,
+) -> KafkaMessage {
+    if let Some(prefetch) = &prefetch {
+        prefetch
+            .warm_delivery(IncomingMessage::payload(&item))
+            .await;
+    }
+    if let Some(registry) = &registry
+        && let Some(json) = registry
+            .incoming_to_json(IncomingMessage::payload(&item))
+            .await
+    {
+        item.replace_payload(Bytes::from(json));
+    }
+    item
+}
+
+impl KafkaStream<'_> {
+    /// Hands the delivery on, through the registry middleware when one is attached.
+    fn deliver(&mut self, record: HeldRecord) -> Poll<Option<Result<KafkaMessage, KafkaError>>> {
+        self.sub.note_recovered();
+        let item = self.sub.map_delivery(record);
+        #[cfg(feature = "schema-registry")]
+        if self.registry.is_some() || self.prefetch.is_some() {
+            self.finishing = Some(Box::pin(finish_delivery(
+                self.registry.clone(),
+                self.prefetch.clone(),
+                item,
+            )));
+            return Poll::Pending;
+        }
+        Poll::Ready(Some(Ok(item)))
+    }
+}
+
+impl Stream for KafkaStream<'_> {
+    type Item = Result<KafkaMessage, KafkaError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            #[cfg(feature = "schema-registry")]
+            if let Some(finishing) = &mut this.finishing {
+                let item = ready!(finishing.as_mut().poll(cx));
+                this.finishing = None;
+                return Poll::Ready(Some(Ok(item)));
+            }
+            // A start position the rebalance could not apply preempts whatever was fetched: a
+            // subscription that was not opened where it was asked must not pass for a working
+            // one.
+            if let Some(err) = this.context.take_start_failure() {
+                return Poll::Ready(Some(Err(err)));
+            }
+            if let Some(waiting) = &mut this.waiting {
+                let turn = ready!(waiting.as_mut().poll(cx));
+                this.waiting = None;
+                match turn {
+                    // The waiter fired: the flag is read at the top of the next turn.
+                    ColdTurn::Woken => continue,
+                    ColdTurn::Failed(err) => return Poll::Ready(Some(Err(err))),
+                    ColdTurn::Record(Ok(record)) => {
+                        if let Poll::Ready(item) = this.deliver(record) {
+                            return Poll::Ready(item);
+                        }
+                        continue;
                     }
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
+                    ColdTurn::Record(Err(err)) if is_transient(&err) => {
+                        this.sub.note_transient(&err);
+                        continue;
+                    }
+                    ColdTurn::Record(Err(err)) => {
+                        return Poll::Ready(Some(Err(KafkaError::consume(err))));
+                    }
                 }
             }
-        })
+            // A record already fetched needs no waiter: the failure flag above is sticky, so it
+            // is read on the turn that finds nothing to deliver.
+            match HeldRecord::ready(&this.consumer) {
+                Some(Ok(record)) => {
+                    if let Poll::Ready(item) = this.deliver(record) {
+                        return Poll::Ready(item);
+                    }
+                }
+                Some(Err(err)) if is_transient(&err) => this.sub.note_transient(&err),
+                Some(Err(err)) => return Poll::Ready(Some(Err(KafkaError::consume(err)))),
+                // Nothing fetched, so the wait begins on the next turn of this loop.
+                None => {
+                    this.waiting = Some(Box::pin(cold_turn(
+                        Arc::clone(&this.context),
+                        Arc::clone(&this.consumer),
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -334,52 +504,59 @@ impl BatchSubscriber for KafkaSubscriber {
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
         let context = Arc::clone(self.consumer.context());
-        futures::stream::unfold((self, context), move |(sub, context)| async move {
-            // Wait for the batch's first delivery, or for a start position the rebalance could
-            // not apply - see `stream` for why the wait is a select and not a check.
-            let first = loop {
-                let recorded = context.start_failure_waiter();
-                if let Some(err) = context.take_start_failure() {
-                    drop(recorded);
-                    return Some((Err(err), (sub, context)));
-                }
-                let received = tokio::select! {
-                    biased;
-                    () = recorded => continue,
-                    received = sub.consumer.recv() => received,
-                };
-                match received {
-                    Ok(delivery) => break sub.map_delivery(&delivery),
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    Err(err) => return Some((Err(KafkaError::consume(err)), (sub, context))),
-                }
-            };
-            sub.note_recovered();
-
-            let mut batch = Vec::with_capacity(size.min(64));
-            batch.push(first);
-            // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
-            // so dropping the probe future loses nothing.
-            while batch.len() < size {
-                let Some(result) = sub.consumer.recv().now_or_never() else {
-                    break;
-                };
-                match result {
-                    Ok(delivery) => {
-                        let item = sub.map_delivery(&delivery);
-                        batch.push(item);
+        // See `stream`: the consumer is held beside the subscriber, not through it.
+        let consumer = Arc::clone(&self.consumer);
+        futures::stream::unfold(
+            (self, context, consumer),
+            move |(sub, context, consumer)| async move {
+                // Wait for the batch's first delivery, or for a start position the rebalance could
+                // not apply - see `stream` for why the wait is a select and not a check.
+                let first = loop {
+                    let recorded = context.start_failure_waiter();
+                    if let Some(err) = context.take_start_failure() {
+                        drop(recorded);
+                        return Some((Err(err), (sub, context, consumer)));
                     }
-                    Err(err) if is_transient(&err) => sub.note_transient(&err),
-                    // Yield what was collected; a persistent error re-surfaces on the next
-                    // batch's first recv.
-                    Err(_) => break,
+                    let received = tokio::select! {
+                        biased;
+                        () = recorded => continue,
+                        received = HeldRecord::next(&consumer) => received,
+                    };
+                    match received {
+                        Ok(record) => break sub.map_delivery(record),
+                        Err(err) if is_transient(&err) => sub.note_transient(&err),
+                        Err(err) => {
+                            return Some((Err(KafkaError::consume(err)), (sub, context, consumer)));
+                        }
+                    }
+                };
+                sub.note_recovered();
+
+                let mut batch = Vec::with_capacity(size.min(64));
+                batch.push(first);
+                // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
+                // so dropping the probe future loses nothing.
+                while batch.len() < size {
+                    let Some(result) = HeldRecord::ready(&consumer) else {
+                        break;
+                    };
+                    match result {
+                        Ok(record) => {
+                            let item = sub.map_delivery(record);
+                            batch.push(item);
+                        }
+                        Err(err) if is_transient(&err) => sub.note_transient(&err),
+                        // Yield what was collected; a persistent error re-surfaces on the next
+                        // batch's first recv.
+                        Err(_) => break,
+                    }
                 }
-            }
-            #[cfg(feature = "schema-registry")]
-            for item in &mut batch {
-                sub.transcode(item).await;
-            }
-            Some((Ok(batch), (sub, context)))
-        })
+                #[cfg(feature = "schema-registry")]
+                for item in &mut batch {
+                    sub.transcode(item).await;
+                }
+                Some((Ok(batch), (sub, context, consumer)))
+            },
+        )
     }
 }

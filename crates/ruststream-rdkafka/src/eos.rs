@@ -20,7 +20,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
-    OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher as _,
+    Lend, OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -81,7 +81,7 @@ struct LiveSource {
 /// [`keys::Source`](crate::context::keys::Source) field off a declared ctx parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceOffset {
-    topic: String,
+    topic: Str,
     partition: i32,
     offset: i64,
 }
@@ -90,15 +90,18 @@ impl SourceOffset {
     /// Builds the coordinates by hand; in a handler prefer the
     /// [`keys::Source`](crate::context::keys::Source) key.
     #[must_use]
-    pub fn new(topic: impl Into<String>, partition: i32, offset: i64) -> Self {
+    pub fn new(topic: impl Into<Str>, partition: i32, offset: i64) -> Self {
         Self {
+            // The name is shared from here on: a window enrolls, waits on and commits a
+            // partition under this key many times over, and none of those copies it. A caller
+            // holding the subscription's own name hands it over for a reference count.
             topic: topic.into(),
             partition,
             offset,
         }
     }
 
-    fn key(&self) -> (String, i32) {
+    fn key(&self) -> (Str, i32) {
         (self.topic.clone(), self.partition)
     }
 }
@@ -122,7 +125,7 @@ enum Phase {
 struct Window {
     phase: Phase,
     /// Highest enrolled source offset per (topic, partition).
-    enrolled: HashMap<(String, i32), i64>,
+    enrolled: HashMap<(Str, i32), i64>,
     /// A publish into this window failed: the transaction is poisoned and must abort.
     failed: bool,
     /// Distinguishes windows across commits, so a stale window task cannot touch its
@@ -145,10 +148,10 @@ struct PipelineInner {
     sources: Mutex<Vec<EosSource>>,
     /// Offsets committed by this pipeline per (topic, partition) ("next to consume"), the
     /// seek target when a window aborts.
-    committed: Mutex<HashMap<(String, i32), i64>>,
+    committed: Mutex<HashMap<(Str, i32), i64>>,
     /// The first offset ever enrolled per (topic, partition): the abort seek target before
     /// anything committed.
-    session_low: Mutex<HashMap<(String, i32), i64>>,
+    session_low: Mutex<HashMap<(Str, i32), i64>>,
 }
 
 /// The publish policy of [`EosPipeline`]: the pipeline id (the producer's transactional id)
@@ -433,7 +436,7 @@ impl EosPipeline {
 
     fn enroll(
         window: &mut Window,
-        session_low: &Mutex<HashMap<(String, i32), i64>>,
+        session_low: &Mutex<HashMap<(Str, i32), i64>>,
         source: &SourceOffset,
     ) {
         let key = source.key();
@@ -524,7 +527,7 @@ async fn stay_open(inner: &Arc<PipelineInner>) {
 /// the abort path (abort the transaction, seek the sources back) and reports the cause.
 async fn commit_window(
     inner: &Arc<PipelineInner>,
-    enrolled: &HashMap<(String, i32), i64>,
+    enrolled: &HashMap<(Str, i32), i64>,
 ) -> Result<(), KafkaError> {
     let sources = live_sources(&inner.id, &inner.publisher);
 
@@ -596,7 +599,7 @@ enum Repositioned {
 async fn wait_settled(
     inner: &Arc<PipelineInner>,
     sources: &[LiveSource],
-    enrolled: &HashMap<(String, i32), i64>,
+    enrolled: &HashMap<(Str, i32), i64>,
 ) -> Result<(), KafkaError> {
     let deadline = tokio::time::Instant::now() + inner.publisher.deadline();
     loop {
@@ -650,7 +653,7 @@ async fn wait_settled(
 /// Adds every source's settled positions (with its group metadata) to the transaction and
 /// commits it.
 async fn try_commit(inner: &Arc<PipelineInner>, sources: &[LiveSource]) -> Result<(), KafkaError> {
-    let mut sent: Vec<((String, i32), i64)> = Vec::new();
+    let mut sent: Vec<((Str, i32), i64)> = Vec::new();
     for source in sources {
         let positions = source.tracker.stored_positions();
         if positions.is_empty() {
@@ -698,7 +701,7 @@ fn group_metadata(source: &LiveSource) -> Result<ConsumerGroupMetadata, KafkaErr
 async fn abort_window(
     inner: &Arc<PipelineInner>,
     sources: &[LiveSource],
-    enrolled: &HashMap<(String, i32), i64>,
+    enrolled: &HashMap<(Str, i32), i64>,
     repositioned: Repositioned,
 ) {
     if let Err(err) = inner.publisher.abort().await {
@@ -822,14 +825,16 @@ impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
         _options: &mut Option<Options>,
         cx: &PublishContext<'_, C>,
     ) {
-        if let Some(source) = cx.headers().get(EOS_SOURCE_HEADER) {
-            let source = source.to_vec();
-            out.headers_mut().insert(EOS_SOURCE_HEADER, source);
+        if let Some(source) = cx.headers().get_shared(EOS_SOURCE_HEADER) {
+            out.headers_mut()
+                .insert(Str::from_static(EOS_SOURCE_HEADER), source);
         }
     }
 }
 
 impl Publisher for EosPipeline {
+    // The record goes out through the transactional publisher underneath, which reads the bytes.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 
@@ -864,9 +869,11 @@ impl Publisher for EosPipeline {
                     .to_owned(),
             ));
         };
-        let mut headers = msg.headers().clone();
+        // The reply is rebuilt without the coordinates, so the map the publish filled moves into
+        // the record rather than being copied into it.
+        let (topic, payload, mut headers) = msg.into_parts();
         headers.remove(EOS_SOURCE_HEADER);
-        let stripped = OutgoingMessage::new(msg.name(), msg.payload()).with_headers(headers);
+        let stripped = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
         self.publish(&source, stripped, options).await
     }
 }

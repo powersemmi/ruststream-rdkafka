@@ -1,11 +1,12 @@
 //! Conversions between rdkafka message data and `RustStream` types.
 
 use bytes::Bytes;
-use rdkafka::message::{BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders};
-use ruststream::HeaderMap;
+use rdkafka::message::{Header, OwnedHeaders};
+use ruststream::{HeaderMap, Str};
 
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::message::PARTITION_KEY_HEADER;
+use crate::record::HeldRecord;
 
 /// Collects a delivery's native headers, plus its native record key surfaced as
 /// [`PARTITION_KEY_HEADER`], into `RustStream` headers.
@@ -14,9 +15,9 @@ use crate::message::PARTITION_KEY_HEADER;
 /// foreign producer is skipped even when the record is keyless, so `key()` never reports a key
 /// Kafka did not partition by. Null-valued wire headers arrive with an empty value (presence
 /// preserved; core headers have no null representation).
-pub(crate) fn headers_from_message(msg: &BorrowedMessage<'_>) -> HeaderMap {
+pub(crate) fn headers_from_message(record: &HeldRecord) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Some(native) = msg.headers() {
+    if let Some(native) = record.headers() {
         for header in native.iter() {
             if header.key.eq_ignore_ascii_case(PARTITION_KEY_HEADER) {
                 continue;
@@ -25,8 +26,11 @@ pub(crate) fn headers_from_message(msg: &BorrowedMessage<'_>) -> HeaderMap {
             headers.insert(header.key, value);
         }
     }
-    if let Some(key) = msg.key() {
-        headers.insert(PARTITION_KEY_HEADER, Bytes::copy_from_slice(key));
+    if let Some(key) = record.key() {
+        headers.insert(
+            Str::from_static(PARTITION_KEY_HEADER),
+            Bytes::copy_from_slice(key),
+        );
     }
     headers
 }
@@ -46,9 +50,9 @@ pub(crate) struct PublishParts {
 /// record. Where the record goes when it carries no key is a per-record setting
 /// ([`KafkaOptions`](crate::KafkaOptions)), not a header.
 pub(crate) fn headers_for_publish(headers: &HeaderMap) -> PublishParts {
-    let key = headers
-        .get(PARTITION_KEY_HEADER)
-        .map(Bytes::copy_from_slice);
+    // The map owns its values by reference count, so the key travels out of it rather than
+    // being copied out.
+    let key = headers.get_shared(PARTITION_KEY_HEADER);
     let mut native = OwnedHeaders::new_with_capacity(headers.len());
     let mut count = 0;
     for (name, value) in headers.iter() {
@@ -71,6 +75,8 @@ pub(crate) fn headers_for_publish(headers: &HeaderMap) -> PublishParts {
 
 #[cfg(test)]
 mod tests {
+    use rdkafka::message::Headers as _;
+
     use super::*;
 
     #[test]

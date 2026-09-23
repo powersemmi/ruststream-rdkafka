@@ -7,6 +7,7 @@
 use ruststream::runtime::{ForReply, Names, Outgoing, PublishContext, PublishTransform};
 
 use crate::context::KafkaContext;
+use crate::context::keys::Topic;
 
 /// A [`PublishTransform`] sending each retry copy back to the topic its delivery arrived on.
 ///
@@ -68,6 +69,6 @@ impl<Options> PublishTransform<ForReply<KafkaContext>, Options> for ToSourceTopi
         _options: &mut Option<Options>,
         cx: &PublishContext<'_, KafkaContext>,
     ) {
-        out.set_name(cx.context(crate::context::keys::Topic).to_owned());
+        out.set_name(cx.context(Topic).to_owned());
     }
 }

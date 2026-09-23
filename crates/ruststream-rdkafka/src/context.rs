@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ruststream::{BuildBatchContext, BuildContext, Field};
+use ruststream::{BuildBatchContext, BuildContext, Field, Str};
 
 use crate::message::KafkaMessage;
 use crate::seek::{KafkaPosition, KafkaSeeker};
@@ -25,7 +25,7 @@ use crate::seek::{KafkaPosition, KafkaSeeker};
 /// delivery.
 #[derive(Debug, Clone)]
 pub struct KafkaContext {
-    topic: String,
+    topic: Str,
     partition: i32,
     offset: i64,
     timestamp_millis: Option<i64>,
@@ -64,11 +64,22 @@ impl KafkaContext {
         self.key.as_deref()
     }
 
+    /// The topic name in the form the subscription minted it: a field key reading it hands it
+    /// over for a reference count instead of copying it.
+    pub(crate) fn shared_topic(&self) -> Str {
+        self.topic.clone()
+    }
+
+    /// The record key in the form the delivery carries it, handed over the same way.
+    pub(crate) fn shared_key(&self) -> Option<Bytes> {
+        self.key.clone()
+    }
+
     /// This delivery's own coordinates: seeking to them redelivers exactly this record, and the
     /// ordered suffix behind it on the partition.
     #[must_use]
     pub fn position(&self) -> KafkaPosition {
-        KafkaPosition::topic_offset(&self.topic, self.partition, self.offset)
+        KafkaPosition::topic_offset(self.topic(), self.partition, self.offset)
     }
 
     /// The handle repositioning the subscription this delivery came from.
@@ -81,7 +92,7 @@ impl KafkaContext {
 impl BuildContext<KafkaMessage> for KafkaContext {
     fn build(msg: &KafkaMessage) -> Self {
         Self {
-            topic: msg.topic().to_owned(),
+            topic: msg.shared_topic(),
             partition: msg.partition(),
             offset: msg.offset(),
             timestamp_millis: msg.timestamp_millis(),
@@ -102,7 +113,9 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
     fn build(msg: &crate::testing::KafkaTestMessage) -> Self {
         Self {
-            topic: msg.topic().to_owned(),
+            // The in-process transport mints a topic name per delivery rather than sharing the
+            // subscription's, so this is the one context build that copies the name.
+            topic: Str::from(msg.topic()),
             partition: 0,
             offset: msg.offset(),
             timestamp_millis: None,
@@ -193,29 +206,33 @@ impl BuildBatchContext<crate::testing::KafkaTestMessage> for KafkaBatchContext {
 
 /// Zero-sized [`Field`] keys reading one [`KafkaContext`] field each.
 pub mod keys {
-    use ruststream::ContextField;
+    use bytes::Bytes;
+    use ruststream::{ContextField, Str};
 
     use super::{Field, KafkaBatchContext, KafkaContext, KafkaPosition, KafkaSeeker};
 
     use crate::eos::SourceOffset;
 
     /// Reads the source topic name.
+    ///
+    /// Both forms hand over the name the subscription minted: the borrow is a [`Str`], so owning
+    /// it is a reference count rather than a copy.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Topic;
 
     impl Field<KafkaContext> for Topic {
-        type Value<'a> = &'a str;
+        type Value<'a> = &'a Str;
 
-        fn get(self, src: &KafkaContext) -> &str {
-            src.topic()
+        fn get(self, src: &KafkaContext) -> &Str {
+            &src.topic
         }
     }
 
     impl ContextField for Topic {
         type Context = KafkaContext;
-        type Value = String;
-        fn read(self, src: &KafkaContext) -> String {
-            src.topic().to_owned()
+        type Value = Str;
+        fn read(self, src: &KafkaContext) -> Str {
+            src.shared_topic()
         }
     }
 
@@ -280,6 +297,9 @@ pub mod keys {
     }
 
     /// Reads the record key, when present.
+    ///
+    /// The owned form is the delivery's own buffer: the first read promotes it to a shared block,
+    /// one allocation per delivery, and every read after that is a reference count.
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub struct Key;
 
@@ -293,9 +313,9 @@ pub mod keys {
 
     impl ContextField for Key {
         type Context = KafkaContext;
-        type Value = Option<Vec<u8>>;
-        fn read(self, src: &KafkaContext) -> Option<Vec<u8>> {
-            src.key().map(<[u8]>::to_vec)
+        type Value = Option<Bytes>;
+        fn read(self, src: &KafkaContext) -> Option<Bytes> {
+            src.shared_key()
         }
     }
 
@@ -308,7 +328,7 @@ pub mod keys {
         type Value<'a> = SourceOffset;
 
         fn get(self, src: &KafkaContext) -> SourceOffset {
-            SourceOffset::new(src.topic(), src.partition(), src.offset())
+            SourceOffset::new(src.shared_topic(), src.partition(), src.offset())
         }
     }
 
@@ -316,7 +336,7 @@ pub mod keys {
         type Context = KafkaContext;
         type Value = SourceOffset;
         fn read(self, src: &KafkaContext) -> SourceOffset {
-            SourceOffset::new(src.topic(), src.partition(), src.offset())
+            SourceOffset::new(src.shared_topic(), src.partition(), src.offset())
         }
     }
 

@@ -16,16 +16,130 @@ use std::sync::{Arc, Mutex};
 
 use rdkafka::consumer::{BaseConsumer, ConsumerContext, Rebalance};
 use rdkafka::{ClientContext, TopicPartitionList};
+use ruststream::Str;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 
 use crate::error::KafkaError;
 use crate::seek::{self, KafkaPosition};
 
+/// Which partition's bookkeeping a delivery settles into, and which read position it belongs to.
+///
+/// Resolved once, where the record is pulled, and carried by the delivery from there: settling
+/// indexes the partition instead of hashing its name again. The generation is what makes a settle
+/// that arrives after a reposition (a seek, a revoke) a no-op rather than a move of a position
+/// that no longer describes what this consumer reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartitionSlot {
+    index: usize,
+    generation: u64,
+}
+
+/// The partitions this subscription has delivered from, and the slot each one owns.
+///
+/// Entries are never removed - a revoked partition keeps its slot and takes a new generation -
+/// so a slot handed to a delivery indexes the same partition for as long as that delivery lives.
 #[derive(Debug, Default)]
+struct Assigned {
+    states: Vec<PartitionState>,
+    /// Consulted when a partition is seen for the first time since the one before it, never
+    /// once a run of its records is flowing.
+    slots: HashMap<(Str, i32), usize>,
+    /// The slot the last lookup resolved. A fetch hands a consumer one partition's records at a
+    /// time, so a run of deliveries asks for the same partition under the very name the
+    /// subscription minted, and answering from here is a name comparison instead of a hash of
+    /// it.
+    last: Option<(Str, i32, usize)>,
+}
+
+impl Assigned {
+    /// The slot of a partition, opening one the first time it is seen.
+    fn slot(&mut self, topic: &Str, partition: i32) -> usize {
+        if let Some((name, known, index)) = &self.last
+            && *known == partition
+            && name == topic
+        {
+            return *index;
+        }
+        let next = self.states.len();
+        let index = *self.slots.entry((topic.clone(), partition)).or_insert(next);
+        if index == next {
+            self.states
+                .push(PartitionState::new(topic.clone(), partition));
+        }
+        self.last = Some((topic.clone(), partition, index));
+        index
+    }
+}
+
+/// The delivered offsets of one partition that have not settled yet.
+///
+/// A handler that settles in order leaves one open at a time, which is the shape of almost every
+/// subscription, so that case holds the offset inline and touches no allocation. The ordered set
+/// is what a handler settling out of order needs - concurrent worker lanes, a `nack(true)` that
+/// holds an offset back - and the state returns to the inline form as soon as the burst is over.
+#[derive(Debug, Default)]
+enum Outstanding {
+    /// Everything delivered so far has settled.
+    #[default]
+    Settled,
+    /// Exactly one delivery is open.
+    One(i64),
+    /// Several are open, lowest first.
+    Several(BTreeSet<i64>),
+}
+
+impl Outstanding {
+    /// Records a delivered offset as open.
+    fn insert(&mut self, offset: i64) {
+        match self {
+            Self::Settled => *self = Self::One(offset),
+            Self::One(open) if *open == offset => {}
+            Self::One(open) => *self = Self::Several(BTreeSet::from([*open, offset])),
+            Self::Several(open) => {
+                open.insert(offset);
+            }
+        }
+    }
+
+    /// Settles an offset, answering whether it was open. A settle of an offset that is not is a
+    /// duplicate, or a leftover from before a replay reset.
+    fn remove(&mut self, offset: i64) -> bool {
+        match self {
+            Self::One(open) if *open == offset => {
+                *self = Self::Settled;
+                true
+            }
+            Self::Settled | Self::One(_) => false,
+            Self::Several(open) => {
+                let settled = open.remove(&offset);
+                match open.len() {
+                    0 => *self = Self::Settled,
+                    1 => *self = Self::One(*open.first().expect("one offset is left")),
+                    _ => {}
+                }
+                settled
+            }
+        }
+    }
+
+    /// The lowest offset still open, which is what bounds the position that may be stored.
+    fn lowest(&self) -> Option<i64> {
+        match self {
+            Self::Settled => None,
+            Self::One(open) => Some(*open),
+            Self::Several(open) => open.first().copied(),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct PartitionState {
+    /// The partition this state belongs to, so the pipeline can name it back.
+    topic: Str,
+    partition: i32,
     /// Delivered offsets that have not settled yet.
-    outstanding: BTreeSet<i64>,
+    outstanding: Outstanding,
     /// The highest delivered offset, `None` before the first delivery of this generation.
     highest: Option<i64>,
     /// The last position handed to the offset store; kept monotonic within a generation.
@@ -36,10 +150,21 @@ struct PartitionState {
 }
 
 impl PartitionState {
+    fn new(topic: Str, partition: i32) -> Self {
+        Self {
+            topic,
+            partition,
+            outstanding: Outstanding::Settled,
+            highest: None,
+            stored: None,
+            generation: 0,
+        }
+    }
+
     /// Starts the offset bookkeeping over at `offset` without touching the generation: a
     /// replayed delivery is the same read position continuing, not a new one.
     fn replay_from(&mut self, offset: i64) {
-        self.outstanding = BTreeSet::from([offset]);
+        self.outstanding = Outstanding::One(offset);
         self.highest = Some(offset);
         self.stored = None;
     }
@@ -49,10 +174,13 @@ impl PartitionState {
 /// `Commit::Transactional` mode.
 #[derive(Debug, Default)]
 pub(crate) struct CommitTracker {
-    partitions: Mutex<HashMap<(String, i32), PartitionState>>,
+    partitions: Mutex<Assigned>,
     /// Woken whenever a stored position advances; the EOS committer waits on it for its
     /// settle condition.
     advanced: Notify,
+    /// Whether anything has ever waited on `advanced`. Only an EOS pipeline does, and a
+    /// subscription without one would otherwise wake an empty list on every acknowledgement.
+    watched: AtomicBool,
     /// Set by every reposition, consumed by the EOS pipeline: an open window whose sources
     /// moved underneath it must abort instead of committing offsets from the read position the
     /// seek replaced.
@@ -72,12 +200,13 @@ impl CommitTracker {
     // The guard spans the whole update: the generation returned here must be the one this
     // delivery was recorded under, so a concurrent reposition cannot slip in between.
     #[allow(clippy::significant_drop_tightening)]
-    pub(crate) fn delivered(&self, topic: &str, partition: i32, offset: i64) -> u64 {
+    pub(crate) fn delivered(&self, topic: &Str, partition: i32, offset: i64) -> PartitionSlot {
         let mut partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
-        let state = partitions.entry((topic.to_owned(), partition)).or_default();
+        let index = partitions.slot(topic, partition);
+        let state = &mut partitions.states[index];
         match state.highest {
             Some(highest) if offset <= highest => state.replay_from(offset),
             _ => {
@@ -85,7 +214,10 @@ impl CommitTracker {
                 state.outstanding.insert(offset);
             }
         }
-        state.generation
+        PartitionSlot {
+            index,
+            generation: state.generation,
+        }
     }
 
     /// Moves the bookkeeping of a partition to a fresh read position, as
@@ -97,14 +229,15 @@ impl CommitTracker {
     /// advance past a message the seek replayed but nobody has handled yet), and the highest
     /// delivered offset. The generation bump is what makes an in-flight delivery pulled before
     /// the seek settle into nothing instead of into the new position.
-    pub(crate) fn reposition(&self, topic: &str, partition: i32) {
+    pub(crate) fn reposition(&self, topic: &Str, partition: i32) {
         let mut partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
-        let state = partitions.entry((topic.to_owned(), partition)).or_default();
+        let index = partitions.slot(topic, partition);
+        let state = &mut partitions.states[index];
         state.generation += 1;
-        state.outstanding.clear();
+        state.outstanding = Outstanding::Settled;
         state.highest = None;
         state.stored = None;
         drop(partitions);
@@ -143,27 +276,22 @@ impl CommitTracker {
     #[allow(clippy::significant_drop_tightening)]
     pub(crate) fn settle_with<E>(
         &self,
-        topic: &str,
-        partition: i32,
+        slot: PartitionSlot,
         offset: i64,
-        generation: u64,
         store: impl FnOnce(i64) -> Result<(), E>,
     ) -> Result<(), E> {
         let mut partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
-        let Some(state) = partitions.get_mut(&(topic.to_owned(), partition)) else {
-            // The partition was revoked (or replay-reset) after this delivery; its position is
-            // no longer ours to advance.
-            return Ok(());
-        };
-        if state.generation != generation {
+        // A slot is only ever handed out by `delivered`, and the list it indexes never shrinks.
+        let state = &mut partitions.states[slot.index];
+        if state.generation != slot.generation {
             // The delivery was pulled before a reposition: its offset says nothing about the
             // position the subscription reads from now, so settling it must not move anything.
             return Ok(());
         }
-        if !state.outstanding.remove(&offset) {
+        if !state.outstanding.remove(offset) {
             // A duplicate settle, or a leftover from before a replay reset.
             return Ok(());
         }
@@ -172,7 +300,7 @@ impl CommitTracker {
         };
         let position = state
             .outstanding
-            .first()
+            .lowest()
             .map_or(highest, |lowest| lowest - 1);
         if position < 0 || state.stored.is_some_and(|stored| position <= stored) {
             // Nothing committable yet (an unsettled delivery still bounds the position).
@@ -180,49 +308,63 @@ impl CommitTracker {
         }
         store(position)?;
         state.stored = Some(position);
-        self.advanced.notify_waiters();
+        // Read while the partitions are still locked, which is what makes the gate safe: a
+        // waiter registers itself before it reads the position it is waiting for, and that read
+        // takes this same lock. So either the flag is already set here and the waiter is woken,
+        // or the waiter's own read comes after this store and finds it.
+        if self.watched.load(Ordering::Acquire) {
+            self.advanced.notify_waiters();
+        }
         Ok(())
     }
 
     /// The stored (settled) position of a partition, when this tracker owns it and progress
     /// has been made. The next offset to consume - what a Kafka commit wants - is this + 1.
-    pub(crate) fn stored_position(&self, topic: &str, partition: i32) -> Option<i64> {
+    pub(crate) fn stored_position(&self, topic: &Str, partition: i32) -> Option<i64> {
         let partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
         partitions
-            .get(&(topic.to_owned(), partition))
-            .and_then(|state| state.stored)
+            .slots
+            .get(&(topic.clone(), partition))
+            .and_then(|index| partitions.states[*index].stored)
     }
 
     /// Whether this tracker has delivered state for the partition (it belongs to this
     /// subscription in the current assignment, at its current read position).
-    pub(crate) fn covers(&self, topic: &str, partition: i32) -> bool {
+    pub(crate) fn covers(&self, topic: &Str, partition: i32) -> bool {
         let partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
         partitions
-            .get(&(topic.to_owned(), partition))
-            .is_some_and(|state| state.highest.is_some())
+            .slots
+            .get(&(topic.clone(), partition))
+            .is_some_and(|index| partitions.states[*index].highest.is_some())
     }
 
     /// Every partition with settled progress, as `((topic, partition), stored position)`.
-    pub(crate) fn stored_positions(&self) -> Vec<((String, i32), i64)> {
+    pub(crate) fn stored_positions(&self) -> Vec<((Str, i32), i64)> {
         let partitions = self
             .partitions
             .lock()
             .expect("commit tracker mutex poisoned");
         partitions
+            .states
             .iter()
-            .filter_map(|(key, state)| state.stored.map(|stored| (key.clone(), stored)))
+            .filter_map(|state| {
+                state
+                    .stored
+                    .map(|stored| ((state.topic.clone(), state.partition), stored))
+            })
             .collect()
     }
 
     /// A waiter for the next stored-position advance. Create it BEFORE checking the awaited
     /// condition, so an advance landing between the check and the await is not missed.
     pub(crate) fn advance_waiter(&self) -> Notified<'_> {
+        self.watched.store(true, Ordering::Release);
         self.advanced.notified()
     }
 
@@ -233,7 +375,7 @@ impl CommitTracker {
     /// committed offsets when the partition comes back.
     fn revoke(&self, revoked: &TopicPartitionList) {
         for element in revoked.elements() {
-            self.reposition(element.topic(), element.partition());
+            self.reposition(&Str::from(element.topic()), element.partition());
         }
     }
 }
@@ -254,6 +396,10 @@ pub(crate) struct TrackingContext {
     /// position it was opened at is what this wave exists to catch, so the failure waits here
     /// for the subscriber's stream to yield it.
     start_failure: Mutex<Option<KafkaError>>,
+    /// Whether `start_failure` holds anything. The consume loop asks once per delivery, and a
+    /// rebalance that could not open the subscription is a once-per-lifetime event, so the
+    /// answer is read from here instead of by taking the mutex on every record.
+    start_failed: AtomicBool,
     /// Woken when a start failure is recorded, so a stream waiting on a topic that may never
     /// deliver anything still reports it.
     start_failures: Notify,
@@ -266,6 +412,7 @@ impl TrackingContext {
             subscription: subscription.into(),
             start: Mutex::new(None),
             start_failure: Mutex::new(None),
+            start_failed: AtomicBool::new(false),
             start_failures: Notify::new(),
         }
     }
@@ -295,15 +442,23 @@ impl TrackingContext {
             *slot = Some(err);
         }
         drop(slot);
+        // Released after the slot is filled, so a reader that sees the flag sees the failure.
+        self.start_failed.store(true, Ordering::Release);
         self.start_failures.notify_waiters();
     }
 
     /// Takes the recorded start failure, for the subscriber to yield on its stream.
     pub(crate) fn take_start_failure(&self) -> Option<KafkaError> {
-        self.start_failure
+        if !self.start_failed.load(Ordering::Acquire) {
+            return None;
+        }
+        let taken = self
+            .start_failure
             .lock()
             .expect("start failure mutex poisoned")
-            .take()
+            .take();
+        self.start_failed.store(taken.is_none(), Ordering::Release);
+        taken
     }
 
     /// A waiter for the next start failure. Create it BEFORE calling
@@ -352,19 +507,27 @@ impl ConsumerContext for TrackingContext {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+    use std::future::Future as _;
+    use std::pin::pin;
+    use std::task::{Context, Waker};
 
     use super::*;
 
-    /// Runs a settle in the partition's current generation and returns the position it stored.
-    fn settle(tracker: &CommitTracker, offset: i64) -> Option<i64> {
-        settle_in(tracker, offset, generation(tracker, "t", 0))
+    /// The name a subscription would have minted, which is what the real path carries.
+    fn topic() -> Str {
+        Str::from_static("t")
     }
 
-    /// Runs a settle carrying `generation`, returning the position it stored, if any.
-    fn settle_in(tracker: &CommitTracker, offset: i64, generation: u64) -> Option<i64> {
+    /// Runs a settle in the partition's current slot and returns the position it stored.
+    fn settle(tracker: &CommitTracker, offset: i64) -> Option<i64> {
+        settle_in(tracker, offset, slot(tracker, "t", 0))
+    }
+
+    /// Runs a settle carrying `slot`, returning the position it stored, if any.
+    fn settle_in(tracker: &CommitTracker, offset: i64, slot: PartitionSlot) -> Option<i64> {
         let mut stored = None;
         tracker
-            .settle_with("t", 0, offset, generation, |position| {
+            .settle_with(slot, offset, |position| {
                 stored = Some(position);
                 Ok::<(), Infallible>(())
             })
@@ -372,21 +535,24 @@ mod tests {
         stored
     }
 
-    /// The current generation of a partition, without recording a delivery.
-    fn generation(tracker: &CommitTracker, topic: &str, partition: i32) -> u64 {
-        tracker
+    /// The current slot of a partition, without recording a delivery.
+    fn slot(tracker: &CommitTracker, topic: &str, partition: i32) -> PartitionSlot {
+        let mut partitions = tracker
             .partitions
             .lock()
-            .expect("commit tracker mutex poisoned")
-            .get(&(topic.to_owned(), partition))
-            .map_or(0, |state| state.generation)
+            .expect("commit tracker mutex poisoned");
+        let index = partitions.slot(&Str::from(topic), partition);
+        PartitionSlot {
+            index,
+            generation: partitions.states[index].generation,
+        }
     }
 
     #[test]
     fn contiguous_acks_advance_the_position() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 5);
-        tracker.delivered("t", 0, 6);
+        tracker.delivered(&topic(), 0, 5);
+        tracker.delivered(&topic(), 0, 6);
         assert_eq!(settle(&tracker, 5), Some(5));
         assert_eq!(settle(&tracker, 6), Some(6));
     }
@@ -396,9 +562,9 @@ mod tests {
         // Offset 2 is a gap the consumer never receives (a transaction marker or a
         // compacted-away record): settling around it must still advance.
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 0);
-        tracker.delivered("t", 0, 1);
-        tracker.delivered("t", 0, 3);
+        tracker.delivered(&topic(), 0, 0);
+        tracker.delivered(&topic(), 0, 1);
+        tracker.delivered(&topic(), 0, 3);
         assert_eq!(settle(&tracker, 0), Some(0));
         assert_eq!(settle(&tracker, 1), Some(2));
         assert_eq!(settle(&tracker, 3), Some(3));
@@ -408,7 +574,7 @@ mod tests {
     fn out_of_order_acks_stay_bounded_by_the_lowest_outstanding() {
         let tracker = CommitTracker::default();
         for offset in 3..=5 {
-            tracker.delivered("t", 0, offset);
+            tracker.delivered(&topic(), 0, offset);
         }
         assert_eq!(settle(&tracker, 4), Some(2));
         assert_eq!(settle(&tracker, 5), None);
@@ -419,7 +585,7 @@ mod tests {
     fn unsettled_delivery_blocks_the_position() {
         let tracker = CommitTracker::default();
         for offset in 0..3 {
-            tracker.delivered("t", 0, offset);
+            tracker.delivered(&topic(), 0, offset);
         }
         // Offset 0 is never settled (a nack(true) hole): nothing may be stored.
         assert_eq!(settle(&tracker, 1), None);
@@ -429,25 +595,59 @@ mod tests {
     #[test]
     fn partitions_are_tracked_independently() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 10);
-        let one = tracker.delivered("t", 1, 20);
-        let mut stored = None;
-        tracker
-            .settle_with("t", 1, 20, one, |position| {
-                stored = Some(position);
-                Ok::<(), Infallible>(())
-            })
-            .expect("infallible");
-        assert_eq!(stored, Some(20));
+        tracker.delivered(&topic(), 0, 10);
+        let one = tracker.delivered(&topic(), 1, 20);
+        assert_eq!(settle_in(&tracker, 20, one), Some(20));
         assert_eq!(settle(&tracker, 10), Some(10));
+    }
+
+    #[test]
+    fn a_slot_settles_the_partition_it_was_resolved_for() {
+        // Three partitions of two topics, delivered in an interleaved order so a slot that
+        // pointed at the wrong one would advance a position that belongs to another partition.
+        let other = Str::from_static("u");
+        let tracker = CommitTracker::default();
+        let a = tracker.delivered(&topic(), 0, 100);
+        let b = tracker.delivered(&topic(), 1, 200);
+        let c = tracker.delivered(&other, 0, 300);
+
+        assert_eq!(settle_in(&tracker, 200, b), Some(200));
+        assert_eq!(tracker.stored_position(&topic(), 1), Some(200));
+        assert_eq!(tracker.stored_position(&topic(), 0), None);
+        assert_eq!(tracker.stored_position(&other, 0), None);
+
+        assert_eq!(settle_in(&tracker, 300, c), Some(300));
+        assert_eq!(settle_in(&tracker, 100, a), Some(100));
+        let mut stored = tracker.stored_positions();
+        stored.sort();
+        assert_eq!(
+            stored,
+            vec![((topic(), 0), 100), ((topic(), 1), 200), ((other, 0), 300),],
+        );
+    }
+
+    #[test]
+    fn a_partition_keeps_its_slot_across_repositions() {
+        // A revoke and a re-assignment of the same partition must not open a second slot: the
+        // position the new generation stores has to be the one the pipeline reads back.
+        let tracker = CommitTracker::default();
+        let before = tracker.delivered(&topic(), 0, 5);
+        tracker.reposition(&topic(), 0);
+        let after = tracker.delivered(&topic(), 0, 9);
+        assert_eq!(
+            before.index, after.index,
+            "the same partition keeps one slot across a reposition",
+        );
+        assert_eq!(settle_in(&tracker, 9, after), Some(9));
+        assert_eq!(tracker.stored_positions(), vec![((topic(), 0), 9)]);
     }
 
     #[test]
     fn a_reposition_drops_the_settles_of_deliveries_pulled_before_it() {
         let tracker = CommitTracker::default();
-        let before = tracker.delivered("t", 0, 10);
+        let before = tracker.delivered(&topic(), 0, 10);
         // The seek target is offset 4: nothing at or past 10 may be committed any more.
-        tracker.reposition("t", 0);
+        tracker.reposition(&topic(), 0);
         assert_eq!(
             settle_in(&tracker, 10, before),
             None,
@@ -455,7 +655,7 @@ mod tests {
         );
 
         // The replayed deliveries carry the new generation and store normally.
-        let after = tracker.delivered("t", 0, 4);
+        let after = tracker.delivered(&topic(), 0, 4);
         assert_ne!(after, before, "a reposition must start a new generation");
         assert_eq!(settle_in(&tracker, 4, after), Some(4));
     }
@@ -463,18 +663,18 @@ mod tests {
     #[test]
     fn a_reposition_clears_the_stored_watermark() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 7);
+        tracker.delivered(&topic(), 0, 7);
         assert_eq!(settle(&tracker, 7), Some(7));
-        tracker.reposition("t", 0);
+        tracker.reposition(&topic(), 0);
         assert_eq!(
-            tracker.stored_position("t", 0),
+            tracker.stored_position(&topic(), 0),
             None,
             "the watermark of the replaced read position must not survive the seek",
         );
-        assert!(!tracker.covers("t", 0), "nothing is delivered yet");
+        assert!(!tracker.covers(&topic(), 0), "nothing is delivered yet");
 
         // A commit may only resume from what the new position actually delivered.
-        let generation = tracker.delivered("t", 0, 2);
+        let generation = tracker.delivered(&topic(), 0, 2);
         assert_eq!(settle_in(&tracker, 2, generation), Some(2));
     }
 
@@ -482,7 +682,7 @@ mod tests {
     fn the_reposition_flag_is_taken_once() {
         let tracker = CommitTracker::default();
         assert!(!tracker.take_repositioned());
-        tracker.reposition("t", 0);
+        tracker.reposition(&topic(), 0);
         assert!(tracker.take_repositioned());
         assert!(
             !tracker.take_repositioned(),
@@ -493,19 +693,60 @@ mod tests {
     #[test]
     fn replay_resets_the_partition_state() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 10);
+        tracker.delivered(&topic(), 0, 10);
         assert_eq!(settle(&tracker, 10), Some(10));
         // A replay from an earlier offset (seek / re-assignment) starts the state over, and
         // the monotonic guard resets with it: the replayed offsets store again.
-        tracker.delivered("t", 0, 4);
+        tracker.delivered(&topic(), 0, 4);
         assert_eq!(settle(&tracker, 4), Some(4));
+    }
+
+    #[test]
+    fn a_waiter_registered_before_a_settle_is_woken_by_it() {
+        // The EOS committer registers its waiter and only then reads the position it is waiting
+        // for. A settle that advances the position while that waiter is registered has to wake
+        // it; nothing else ends the window before the transaction deadline.
+        let tracker = CommitTracker::default();
+        let slot = tracker.delivered(&topic(), 0, 0);
+        let mut waiter = pin!(tracker.advance_waiter());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            waiter.as_mut().poll(&mut cx).is_pending(),
+            "nothing has advanced yet",
+        );
+
+        assert_eq!(settle_in(&tracker, 0, slot), Some(0));
+        assert!(
+            waiter.as_mut().poll(&mut cx).is_ready(),
+            "a settle that advanced the stored position has to wake a registered waiter",
+        );
+    }
+
+    #[test]
+    fn a_burst_of_open_offsets_collapses_and_reopens() {
+        // Out-of-order settling opens several offsets, the set closes back down to one, and a
+        // later delivery has to reopen it: the position stays bounded by the lowest open offset
+        // through all three shapes.
+        let tracker = CommitTracker::default();
+        for offset in 0..=2 {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        assert_eq!(settle(&tracker, 1), None, "offset 0 is still open");
+        assert_eq!(settle(&tracker, 1), None, "and 1 settles only once");
+        assert_eq!(settle(&tracker, 2), None);
+        assert_eq!(settle(&tracker, 0), Some(2), "the whole prefix is settled");
+
+        tracker.delivered(&topic(), 0, 3);
+        tracker.delivered(&topic(), 0, 4);
+        assert_eq!(settle(&tracker, 4), None, "offset 3 is open again");
+        assert_eq!(settle(&tracker, 3), Some(4));
     }
 
     #[test]
     fn duplicate_settles_are_ignored() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 0);
-        tracker.delivered("t", 0, 1);
+        tracker.delivered(&topic(), 0, 0);
+        tracker.delivered(&topic(), 0, 1);
         assert_eq!(settle(&tracker, 0), Some(0));
         assert_eq!(settle(&tracker, 0), None);
         assert_eq!(settle(&tracker, 1), Some(1));
@@ -514,11 +755,10 @@ mod tests {
     #[test]
     fn store_failure_is_retried_by_the_next_settle() {
         let tracker = CommitTracker::default();
-        tracker.delivered("t", 0, 0);
-        tracker.delivered("t", 0, 1);
-        let generation = generation(&tracker, "t", 0);
+        tracker.delivered(&topic(), 0, 0);
+        tracker.delivered(&topic(), 0, 1);
         let failed: Result<(), &str> =
-            tracker.settle_with("t", 0, 0, generation, |_| Err("store failed"));
+            tracker.settle_with(slot(&tracker, "t", 0), 0, |_| Err("store failed"));
         assert!(failed.is_err());
         // The failed settle consumed offset 0; the next settle advances past both.
         assert_eq!(settle(&tracker, 1), Some(1));

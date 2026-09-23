@@ -16,7 +16,7 @@ use bytes::Bytes;
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
 use ruststream::{
-    HeaderMap, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
+    HeaderMap, Lend, OutgoingMessage, PairError, PublishPolicy, Publisher, TransactionalPublisher,
 };
 
 use super::broker::{ConnectedKafkaTestBroker, TestBrokerState};
@@ -228,6 +228,8 @@ impl KafkaTestTransactionalPublisher {
 }
 
 impl Publisher for KafkaTestTransactionalPublisher {
+    // As the plain in-process publisher: the buffered entry copies the record.
+    type Payload = Lend;
     type Error = KafkaError;
     type Options = KafkaOptions;
 

@@ -1,0 +1,70 @@
+{
+  "schema": 3,
+  "crate": "ruststream-rdkafka",
+  "crate_version": "0.7.0",
+  "core_version": "0.7.0-rc.9",
+  "measured_at": "2026-09-21",
+  "environment": {
+    "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+    "architecture": "x86_64",
+    "cpu_frequency": "427-5912 MHz",
+    "cores": "12 physical, 24 logical",
+    "memory": "62.4 GiB",
+    "memory_speed": "unknown",
+    "os": "Linux 7.2.6-x64v3-xanmod1-1",
+    "broker": "apache/kafka:4.0.0 in Docker on localhost",
+    "rustc": "1.98.1",
+    "profile": "bench, inheriting release (opt-level = 3, lto = false, codegen-units = 16)",
+    "features": "ruststream-rdkafka default (json), ruststream macros,json",
+    "rustflags": "none (the recipe clears RUSTFLAGS, so the numbers are not tied to this CPU)",
+    "round_trip": "75 \u00b5s (one metadata request and its answer)"
+  },
+  "scenarios": [
+    {
+      "name": "consumer group, auto-commit, 512 B JSON",
+      "unit": "msg/s",
+      "messages": 9032091,
+      "pairs": 3,
+      "raw": {
+        "best": 1538988,
+        "worst": 1427540
+      },
+      "adapter": {
+        "best": 1359548,
+        "worst": 1292804
+      },
+      "framework": {
+        "best": 1152800,
+        "worst": 1104646
+      },
+      "adapter_overhead_percent": 11.7,
+      "overhead_percent": 25.1,
+      "adapter_verdict": "measured",
+      "verdict": "measured",
+      "broker_bound": false
+    },
+    {
+      "name": "consumer group, tracked commits, 512 B JSON, ack each",
+      "unit": "msg/s",
+      "messages": 10705471,
+      "pairs": 3,
+      "raw": {
+        "best": 1495033,
+        "worst": 1377336
+      },
+      "adapter": {
+        "best": 1191858,
+        "worst": 1045904
+      },
+      "framework": {
+        "best": 1040213,
+        "worst": 840858
+      },
+      "adapter_overhead_percent": 20.3,
+      "overhead_percent": 30.4,
+      "adapter_verdict": "measured",
+      "verdict": "measured",
+      "broker_bound": false
+    }
+  ]
+}

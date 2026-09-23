@@ -51,6 +51,7 @@ zstd = ["rdkafka/zstd"]
 ruststream = { workspace = true }
 rdkafka = { workspace = true }
 bytes = { workspace = true }
+yoke = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

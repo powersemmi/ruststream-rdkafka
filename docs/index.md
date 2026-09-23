@@ -45,7 +45,7 @@ Each state of the connection is its own type, so out-of-order use does not compi
 ```text
 KafkaBroker::new(servers)          configuration only, synchronous, no I/O
   |
-  | .connect().await?              creates the producer, probes the cluster
+  | .connect().await?              probes the cluster
   v
 ConnectedKafkaBroker               subscriptions and live publishers hang off this
   |

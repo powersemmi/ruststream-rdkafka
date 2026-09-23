@@ -59,6 +59,10 @@ Each state is its own type, so subscribing before the connect or publishing afte
 shutdown does not compile. What stays dynamic is aliasing: a publisher paired before the
 shutdown reports [`KafkaError::Closed`] rather than succeeding against a dead connection.
 
+Connecting probes the cluster and validates the publish settings against it; the producer
+itself is opened by the first publish, so a service that only consumes runs no producer client
+and holds one connection rather than two.
+
 # Subscribing
 
 The attribute names the subscription, and the descriptor carries its settings:

@@ -12,7 +12,7 @@ use std::time::Duration;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::{Offset, TopicPartitionList};
-use ruststream::Seeker;
+use ruststream::{Seeker, Str};
 use tokio::task;
 
 use crate::error::KafkaError;
@@ -283,7 +283,7 @@ where
     // from the old position could otherwise settle into the new one and commit past records the
     // replay has not handled yet.
     for element in targets.elements() {
-        tracker.reposition(element.topic(), element.partition());
+        tracker.reposition(&Str::from(element.topic()), element.partition());
     }
     clear_stored_offsets(consumer, &targets)?;
 

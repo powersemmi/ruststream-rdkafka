@@ -10,6 +10,7 @@ mod eos;
 mod error;
 mod message;
 mod publisher;
+mod record;
 mod redelivery;
 mod seek;
 mod subscriber;

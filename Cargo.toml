@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ruststream-rdkafka"]
+members = ["crates/ruststream-rdkafka", "crates/ruststream-rdkafka-bench"]
 # cargo-generate scaffolds: their sources carry `{{project-name}}` placeholders that are not valid
 # Rust/TOML until rendered, so they stay out of the workspace. `exclude` alone is not enough:
 # cargo's git-source package discovery ignores it and parses every `Cargo.toml` in the repository,
@@ -22,11 +22,13 @@ ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
 # The lower bound names the pre-release deliberately: cargo excludes pre-release versions from a
 # range whose bounds carry none, so `>=0.7.0` would refuse the 0.7.0-rc candidates. This form
 # admits the candidate now and the final 0.7.0 when it lands.
-ruststream = { version = ">=0.7.0-rc.7, <0.8.0", default-features = false }
+ruststream = { version = ">=0.7.0-rc.9, <0.8.0", default-features = false }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
 bytes = "1"
+# The cart a delivery carries its record on (see `record`).
+yoke = { version = "0.8", features = ["derive"] }
 futures = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
