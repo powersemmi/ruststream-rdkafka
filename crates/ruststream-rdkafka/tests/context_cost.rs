@@ -61,7 +61,11 @@ const WAIT: Duration = Duration::from_secs(1);
 /// One delivery's context, off the in-process transport: a keyed record, so the key field has
 /// something to answer.
 async fn context() -> KafkaContext {
-    let broker = KafkaTestBroker::new().connect().await.expect("connect");
+    let broker = KafkaTestBroker::new()
+        .default_group("tests")
+        .connect()
+        .await
+        .expect("connect");
     let mut subscriber = broker.subscribe_with("orders").await.expect("subscribe");
     let mut headers = HeaderMap::new();
     headers.insert(Str::from_static(PARTITION_KEY_HEADER), "order-1");

@@ -379,7 +379,7 @@ message Confirmation {
                     ProtobufFrame::new(sr)
                         .message("in-process-plain-confirmations", "rsplain.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
+                .with_broker(KafkaTestBroker::new().default_group("tests"), |b| {
                     b.include(confirm_in_process)
                         .out(DefaultSlot, KafkaPublish::default())
                         .build();
@@ -680,7 +680,7 @@ message Confirmation {
         async fn a_returned_reply_is_framed_by_the_mount_sites_policy() {
             let (_server, registry) = registry().await;
             let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0")).with_broker(
-                KafkaTestBroker::new(),
+                KafkaTestBroker::new().default_group("tests"),
                 |b| {
                     b.include(confirm).out(
                         Reply,
@@ -702,7 +702,7 @@ message Confirmation {
                     ProtobufFrame::new(registry.clone())
                         .message(REPLY_TOPIC, "rsreply.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
+                .with_broker(KafkaTestBroker::new().default_group("tests"), |b| {
                     b.include(confirm).out(
                         Reply,
                         KafkaPublish::framed(&registry)

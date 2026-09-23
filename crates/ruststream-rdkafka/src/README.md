@@ -534,7 +534,7 @@ async fn accept(payment: &Payment) -> HandlerOutcome {
 
 pub async fn zero_amounts_are_dropped() {
     let app = RustStream::new(AppInfo::new("payments", "0.1.0"))
-        .with_broker(KafkaTestBroker::new(), |b| {
+        .with_broker(KafkaTestBroker::new().default_group("payments-svc"), |b| {
             b.include(accept);
         });
     let tb = TestApp::start(app).await.expect("start");

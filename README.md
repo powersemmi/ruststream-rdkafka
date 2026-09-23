@@ -167,7 +167,7 @@ use ruststream_rdkafka::testing::KafkaTestBroker;
 // The harness seeds one payload type and reads back the other, so both derive `Serialize`,
 // `Deserialize`, and `PartialEq` here.
 let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
-    .with_broker(KafkaTestBroker::new(), |b| {
+    .with_broker(KafkaTestBroker::new().default_group("orders-svc"), |b| {
         b.include(confirm);
     });
 let tb = TestApp::start(app).await?;

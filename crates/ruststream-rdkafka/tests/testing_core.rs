@@ -54,7 +54,11 @@ const WAIT: Duration = Duration::from_secs(1);
 /// The in-process ladder every test starts from: synchronous construction, then the consuming
 /// `connect`, exactly like the real broker.
 async fn connected() -> ConnectedKafkaTestBroker {
-    KafkaTestBroker::new().connect().await.expect("connect")
+    KafkaTestBroker::new()
+        .default_group("tests")
+        .connect()
+        .await
+        .expect("connect")
 }
 
 async fn next_payload<S>(stream: &mut S) -> Vec<u8>
@@ -358,32 +362,6 @@ async fn members_of_one_group_share_a_topic_instead_of_each_getting_a_copy() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn subscriptions_without_a_group_are_each_alone_in_one() {
-    let broker = connected().await;
-    let mut first = broker
-        .subscribe_with("solo")
-        .await
-        .expect("subscribe first");
-    let mut second = broker
-        .subscribe_with("solo")
-        .await
-        .expect("subscribe second");
-
-    broker
-        .publisher(KafkaPublish::default())
-        .publish(OutgoingMessage::new("solo", b"both"), None)
-        .await
-        .expect("publish");
-
-    assert_eq!(drain_ready(&mut first).await, vec![b"both".to_vec()]);
-    assert_eq!(
-        drain_ready(&mut second).await,
-        vec![b"both".to_vec()],
-        "an anonymous subscription is alone in its own group, so nothing takes the topic from it",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_brokers_default_group_makes_bare_subscriptions_compete() {
     let broker = KafkaTestBroker::new()
         .default_group("orders-svc")
@@ -537,7 +515,9 @@ async fn a_record_key_lane_descriptor_lanes_by_the_record_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_server_reports_in_process_kafka() {
     // `DescribeServer` describes the configuration, so it sits on the unconnected form.
-    let spec = KafkaTestBroker::new().describe_server();
+    let spec = KafkaTestBroker::new()
+        .default_group("tests")
+        .describe_server();
     assert_eq!(spec.protocol, "kafka");
     assert!(spec.host.is_none(), "the in-process broker has no host");
 }
@@ -664,11 +644,13 @@ async fn retry_then_ack(order: &Order, ctx: &mut Context<'_, (), Attempts>) -> H
 // returning.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_app_drives_kafka_test_broker_to_quiescence() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(ack_order);
             b.include(ack_payment);
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -700,7 +682,7 @@ async fn test_app_drives_kafka_test_broker_to_quiescence() {
 async fn test_app_requeue_stays_balanced() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Attempts::default()) })
-        .with_broker(KafkaTestBroker::new(), |b| {
+        .with_broker(KafkaTestBroker::new().default_group("tests"), |b| {
             b.include(retry_then_ack);
         });
     let tb = TestApp::start(app).await.expect("start");
@@ -756,12 +738,14 @@ async fn defer_then_ack(order: &Order, ctx: &mut Context) -> HandlerOutcome {
 /// transform below stamps it, and the handler sees the stamp when it comes back.
 #[tokio::test(start_paused = true)]
 async fn a_deferred_copy_travels_the_retry_position() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(defer_then_ack)
                 .out_retry(KafkaPublish::default())
                 .transform(DeferredStamp);
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -803,12 +787,14 @@ async fn defer_forever(charge: &Charge) -> HandlerOutcome {
 /// spent delivery leaves through the dead-letter topic the mount site declared.
 #[tokio::test(start_paused = true)]
 async fn a_capped_registration_dead_letters_a_spent_delivery() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(defer_forever)
                 .max_attempts(nonzero!(3u32))
                 .dead_letter("charges.dlq");
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -840,14 +826,16 @@ async fn retry_forever(charge: &Charge) -> HandlerOutcome {
 /// the topic its copies go to. Here that topic is one the same subscription reads.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_named_retry_destination_carries_the_copies() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(retry_forever)
                 .max_attempts(nonzero!(2u32))
                 .dead_letter("refunds.dlq")
                 .out_retry(KafkaPublish::default())
                 .to("refunds.retry");
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -885,13 +873,15 @@ async fn regional_order(charge: &Charge, ctx: &mut Context<'_, KafkaContext>) ->
 /// fixed `.to(..)` would have named.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_retry_copy_returns_to_the_topic_it_arrived_on() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(regional_order)
                 .max_attempts(nonzero!(3u32))
                 .out_retry(KafkaPublish::default())
                 .transform(ToSourceTopic);
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -959,12 +949,14 @@ impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
 async fn round_robin_places_replies_around_the_cycle() {
     use ruststream_rdkafka::RoundRobin;
 
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(plan)
                 .out_reply(KafkaPublish::default())
                 .transform(RoundRobin::partitions(2));
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     // One delivery at a time: the harness reads back the settings of the most recent reply, so
@@ -989,15 +981,17 @@ async fn round_robin_places_replies_around_the_cycle() {
 async fn round_robin_leaves_keyed_replies_alone() {
     use ruststream_rdkafka::RoundRobin;
 
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             // KeyStamp runs first (added first): the reply is keyed by the time RoundRobin
             // sees it, so the cycle must not override the placement the key implies.
             b.include(plan_keyed)
                 .out_reply(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(2));
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1054,12 +1048,14 @@ async fn acknowledge(req: &ReceiptRequest) -> Acknowledgement {
 /// chain stamped on it: on Kafka the destination and the placement stay independent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_reply_lands_at_the_topic_its_type_names() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(issue_receipt)
                 .out(Reply, KafkaPublish::default())
                 .transform(KeyStamp);
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1084,10 +1080,12 @@ async fn a_declared_reply_lands_at_the_topic_its_type_names() {
 /// A reply type that names no topic lands where the include site's clause says.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_undeclared_reply_lands_at_the_topic_the_mount_site_names() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(acknowledge).out(Reply, KafkaPublish::default());
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1140,12 +1138,14 @@ async fn plan_through_slot(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_publisher_shaped_slot_is_captured_against_its_marker() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(plan_through_slot)
                 .out(Work, KafkaPublish::default())
                 .build();
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1195,12 +1195,14 @@ async fn place(
 /// record, so what the call site asked for is only visible there.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_partition_step_is_recorded_against_the_slot_it_left() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(place)
                 .out(Placement, KafkaPublish::default())
                 .build();
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1235,12 +1237,14 @@ async fn leave_placement(
 /// the partitioner places it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_publish_that_names_no_setting_carries_none() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(leave_placement)
                 .out(Placement, KafkaPublish::default())
                 .build();
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1290,7 +1294,7 @@ async fn rewind_stuck_job(
 async fn a_handler_replays_its_own_delivery_position_through_the_context() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
-        .with_broker(KafkaTestBroker::new(), |b| {
+        .with_broker(KafkaTestBroker::new().default_group("tests"), |b| {
             b.include(rewind_stuck_job);
         });
     let tb = TestApp::start(app).await.expect("start");
@@ -1354,7 +1358,7 @@ struct Cursor {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_batch_body_repositions_through_its_subscription_context() {
-    let broker = KafkaTestBroker::new();
+    let broker = KafkaTestBroker::new().default_group("tests");
     let seeded = broker.clone().connect().await.expect("connect");
     // The whole run is in the log before the subscription opens, so the opening replay is what
     // the body batches over. The marker asks to resume from offset 0, so whatever the window
@@ -1422,7 +1426,7 @@ async fn count_batches(jobs: &[Job]) -> HandlerOutcome {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_transport_cuts_batches_at_the_size_the_mount_named() {
-    let broker = KafkaTestBroker::new();
+    let broker = KafkaTestBroker::new().default_group("tests");
     let seeded = broker.clone().connect().await.expect("connect");
     // The whole run is on the log before the subscription opens, so the replay hands the
     // transport more than one batch's worth at once - which is what a batch size has to cut.
@@ -1467,7 +1471,7 @@ async fn replay_audit(job: &Job) -> HandlerOutcome {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_at_opens_a_subscription_on_the_retained_log() {
-    let broker = KafkaTestBroker::new();
+    let broker = KafkaTestBroker::new().default_group("tests");
     let seeded = broker.clone().connect().await.expect("connect");
     // Published before the app exists: only the start position makes these visible.
     for id in 0..2 {
@@ -1622,15 +1626,17 @@ async fn fan_out(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transactional_slot_mounts_and_publishes_only_what_it_commits() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(fan_out)
                 .out(
                     Shipments,
                     KafkaPublish::default().transactional_id("shipments-svc-1"),
                 )
                 .build();
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1915,8 +1921,9 @@ async fn bill_lane(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lanes_slot_mounts_and_publishes_through_its_partition_transaction() {
-    let app =
-        RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(KafkaTestBroker::new(), |b| {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        KafkaTestBroker::new().default_group("tests"),
+        |b| {
             b.include(bill_lane)
                 .out(
                     DefaultSlot,
@@ -1925,7 +1932,8 @@ async fn a_lanes_slot_mounts_and_publishes_through_its_partition_transaction() {
                         .per_partition(),
                 )
                 .build();
-        });
+        },
+    );
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaTestBroker>()
@@ -1965,4 +1973,60 @@ async fn publisher_errors_after_shutdown() {
         matches!(&err, KafkaError::Closed { topic } if topic == "orders"),
         "the error must name the topic it could not reach, got: {err}",
     );
+}
+
+#[derive(Debug, Deserialize)]
+struct Refused {
+    id: u64,
+}
+
+#[subscriber("refused-orders")]
+async fn bare_refused(order: &Refused) -> HandlerOutcome {
+    let _ = order.id;
+    HandlerOutcome::ack()
+}
+
+#[subscriber(KafkaTopic::new("refused-orders"))]
+async fn groupless_refused(order: &Refused) -> HandlerOutcome {
+    let _ = order.id;
+    HandlerOutcome::ack()
+}
+
+/// Kafka reads a topic only through a consumer group, so the real broker refuses a bare name on
+/// a broker that names no `default_group`. The stand-in refuses it too, at the same step and
+/// with the same error, so a service does not pass its tests and then fail to start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bare_name_without_a_default_group_is_refused_as_on_a_cluster() {
+    let app = RustStream::new(AppInfo::new("groupless", "0.1.0")).with_broker(
+        KafkaTestBroker::new(),
+        |b| {
+            b.include(bare_refused);
+        },
+    );
+
+    let failed = TestApp::start(app)
+        .await
+        .expect_err("a bare name on a broker with no default group must not start");
+    let message = failed.to_string();
+    assert!(message.contains("no consumer group"), "{message}");
+    assert!(message.contains("default_group"), "{message}");
+}
+
+/// A descriptor that names no group falls back to the broker's `default_group` as well, and is
+/// refused the same way when there is none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_topic_descriptor_without_a_group_is_refused_as_on_a_cluster() {
+    let app = RustStream::new(AppInfo::new("groupless", "0.1.0")).with_broker(
+        KafkaTestBroker::new(),
+        |b| {
+            b.include(groupless_refused);
+        },
+    );
+
+    let failed = TestApp::start(app)
+        .await
+        .expect_err("a descriptor with no group on a broker with none must not start");
+    let message = failed.to_string();
+    assert!(message.contains("no consumer group"), "{message}");
+    assert!(message.contains("default_group"), "{message}");
 }
