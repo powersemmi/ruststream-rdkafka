@@ -8,9 +8,9 @@
     clippy::must_use_candidate,
     clippy::needless_pass_by_value
 )]
-//! Replying: the handler returns a value, the runtime encodes it and hands it to the publisher
-//! this crate's `KafkaPublish` policy pairs on the in-process transport, which appends the record
-//! to the topic the reply type declares.
+//! Replying: the handler returns a value, the runtime encodes it and hands it to this crate's
+//! publisher, which produces it to the topic the reply type declares and awaits its delivery
+//! report.
 
 mod common;
 
@@ -19,16 +19,22 @@ use std::hint::black_box;
 use common::{Latch, MESSAGES, Order, Pending};
 use gungraun::{library_benchmark, library_benchmark_group, main};
 use ruststream::prelude::*;
+use ruststream_rdkafka::{KafkaTopic, StartOffset};
 use serde::Serialize;
 
-/// A reply with a destination of its own: the mount site adds nothing to it.
+/// A reply with a destination of its own, `common::REPLIES`: the mount site adds nothing to it.
 #[derive(Debug, Serialize, Outgoing)]
 #[outgoing(name = "confirmations")]
 struct Confirmation {
     id: u64,
 }
 
-#[subscriber("orders", publish)]
+#[subscriber(
+    KafkaTopic::new(common::topic())
+        .group(common::group())
+        .start(StartOffset::Earliest),
+    publish
+)]
 async fn confirm(order: &Order, ctx: &mut Context<'_, (), Latch>) -> Confirmation {
     ctx.state().arrived();
     Confirmation {
@@ -42,12 +48,12 @@ fn app(messages: usize) -> Pending {
     })
 }
 
-// The allocations per reply are the in-process transport's: the subscription's offset
-// tracking, and the copy of the record, its topic name and its log entry the transport retains.
-// The transport keeps every record it routes, so the cold part carries the retained log's growth
-// as well.
-#[library_benchmark(config = common::config(5, 49))]
-#[bench::first(app(1))]
+// Three runs allocated exactly 16,364 blocks over the primer and 2,000 replies, 8 per message: the
+// three of a consume, and five for the publish - the librdkafka header list, the delivery channel
+// and its boxed sender, the topic name as a C string, and the librdkafka message. The floor is
+// that count plus 0.1 percent, 16,382; one more allocation per message would reach 18,364.
+#[library_benchmark(config = common::config_every(8_010, 1_000, 362))]
+#[bench::first(app(0))]
 #[bench::base(app(MESSAGES))]
 #[bench::twice(app(2 * MESSAGES))]
 fn service(app: Pending) {

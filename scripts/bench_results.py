@@ -15,12 +15,12 @@ to a scenario: it is a property of the cluster and the machine, and it is what t
 verdict is computed from.
 
 `--code` reads the other run instead: the summary `cargo bench -- --output-format=json` writes for
-the code-cost benches under `crates/ruststream-rdkafka/benches`, one JSON object per benchmark.
-It writes the `code` section, one entry per scenario with instructions and allocations per
-message plus what starting the service cost once, by the core's method: every scenario is
-measured over one delivery, over MESSAGES and over twice MESSAGES, the slope between the last two
-is the steady state, and the one-delivery run is the cold start. Either run keeps the section the
-other one wrote.
+the code-cost benches under `crates/ruststream-rdkafka-bench/benches`, one JSON object per
+benchmark. It writes the `code` section, one entry per scenario with instructions and allocations
+per message plus what starting the service cost once, by the core's method: every scenario is
+measured over one delivery, and over MESSAGES and twice MESSAGES more, the slope between the last
+two is the steady state, and the one-delivery run is the cold start. Either run keeps the section
+the other one wrote.
 
 A field the machine does not publish is written as `unknown` rather than guessed: memory speed
 comes from the DMI tables, which most systems only let root read.
@@ -137,7 +137,7 @@ def environment(round_trip_micros: float) -> dict[str, str]:
     }
 
 
-# Deliveries per measured run of the code-cost benches, the default of their `MESSAGES`.
+# Deliveries per measured run of the code-cost benches after the primer, their `MESSAGES`.
 CODE_MESSAGES = 1000
 
 # An instruction count below this on a code run means the measured region stopped matching its
@@ -149,9 +149,9 @@ CODE_COLD_FLOOR = 1_000
 # The code table, in reading order: the published name, the benchmark as `file/function`, and
 # whether the benchmark's hard limit holds its allocation floor.
 CODE_SCENARIOS = [
-    ("consume, JSON decode into a small struct, ack each", "consume/service", True),
-    ("reply, published through this crate's publish policy", "reply/service", True),
-    ("consume in batches of 64, drained from the queue", "batch/service", True),
+    ("consumer group, JSON decode into a small struct, ack each", "consume/service", True),
+    ("reply through this crate's publisher, delivery report awaited", "reply/service", True),
+    ("consumer group in batches of 64, from what librdkafka fetched", "batch/service", True),
 ]
 
 
