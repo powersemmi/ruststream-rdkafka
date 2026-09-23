@@ -2064,7 +2064,6 @@ dependencies = [
  "apache-avro",
  "bytes",
  "futures",
- "gungraun",
  "prost",
  "prost-reflect",
  "protox",
@@ -2090,6 +2089,7 @@ name = "ruststream-rdkafka-bench"
 version = "0.7.0"
 dependencies = [
  "futures",
+ "gungraun",
  "rdkafka",
  "ruststream",
  "ruststream-rdkafka",

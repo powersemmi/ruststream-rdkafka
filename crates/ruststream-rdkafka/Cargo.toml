@@ -69,8 +69,6 @@ protox = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 
 [dev-dependencies]
-# The code-cost benchmarks (`benches/`): callgrind and DHAT through the runner the core pins.
-gungraun = "=0.19.4"
 ruststream = { workspace = true, features = [
     "asyncapi",
     "conformance",
@@ -89,23 +87,6 @@ schema_registry_converter = { version = "5", default-features = false, features 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
 tikv-jemalloc-sys = { version = "0.7.1", features = ["override_allocator_on_supported_platforms"] }
 tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
-
-# The code-cost benchmarks: one scenario per binary, each a service on the in-process transport.
-# `just bench-code` runs them under valgrind; `benches/common` is the shared setup.
-[[bench]]
-name = "consume"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "reply"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "batch"
-harness = false
-required-features = ["testing"]
 
 # The crate overview links into the feature-gated modules (`schema_registry`, `avro`,
 # `protobuf`, `testing`, the document), so a page built on the default features would have
