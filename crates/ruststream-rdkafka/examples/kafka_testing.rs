@@ -114,7 +114,7 @@ async fn refund(
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     // --8<-- [start:testapp]
-    let broker = KafkaTestBroker::new();
+    let broker = KafkaTestBroker::new().default_group("payments-svc");
     // Seeded before the app exists, so the subscription's opening replay hands the handler a log
     // it can actually skip through.
     seed_batches(&broker).await;

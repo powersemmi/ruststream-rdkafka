@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --8<-- [start:mount]
     let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
         .on_startup(async move |()| Ok::<_, std::io::Error>(Orders { seen: app_seen }))
-        .with_broker(KafkaTestBroker::new(), |b| {
+        .with_broker(KafkaTestBroker::new().default_group("orders-svc"), |b| {
             // The mount names the subscription and the reply's destination, and nothing else.
             // A Kafka descriptor (`KafkaTopic::new("orders").group(..)`) goes here the same way
             // when the subscription needs settings a bare name cannot carry.
