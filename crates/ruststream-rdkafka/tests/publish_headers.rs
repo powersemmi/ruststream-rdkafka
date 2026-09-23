@@ -111,7 +111,11 @@ async fn spent<P: Publisher>(publisher: &P, topic: &str, headers: HeaderMap) -> 
 #[tokio::test]
 async fn framing_a_message_costs_nothing_for_its_headers() {
     let (_server, registry) = registry().await;
-    let connected = KafkaTestBroker::new().connect().await.expect("connect");
+    let connected = KafkaTestBroker::new()
+        .default_group("tests")
+        .connect()
+        .await
+        .expect("connect");
     let framed = KafkaFramedPublish::over(KafkaPublish::default(), &registry)
         .pair(&connected)
         .await

@@ -41,7 +41,7 @@ async fn create_topic(url: &str, topic: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kafka_test_broker_passes_conformance_suite() {
-    harness::run_suite(KafkaTestBroker::new).await;
+    harness::run_suite(|| KafkaTestBroker::new().default_group("tests")).await;
 }
 
 // The harness takes higher-ranked closures that method paths cannot satisfy.
@@ -49,7 +49,7 @@ async fn kafka_test_broker_passes_conformance_suite() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kafka_test_broker_passes_lifecycle() {
     harness::lifecycle(
-        KafkaTestBroker::new,
+        || KafkaTestBroker::new().default_group("tests"),
         |name| KafkaTopic::new(name).group("conformance"),
         |connected| connected.publisher(KafkaPublish::default()),
     )
@@ -61,7 +61,7 @@ async fn kafka_test_broker_passes_lifecycle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn kafka_test_broker_reports_a_reachable_redelivery_address() {
     harness::redelivery_address(
-        KafkaTestBroker::new,
+        || KafkaTestBroker::new().default_group("tests"),
         |name| KafkaTopic::new(name).group("conformance"),
         |connected| connected.publisher(KafkaPublish::default()),
     )

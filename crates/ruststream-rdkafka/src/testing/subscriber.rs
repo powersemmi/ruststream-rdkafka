@@ -76,7 +76,7 @@ impl KafkaTestSubscriber {
     pub(crate) fn open_many(
         state: &Arc<TestBrokerState>,
         topics: &[String],
-        group: Option<&str>,
+        group: &str,
         lane_key: LaneKey,
         commit: Commit,
     ) -> Self {

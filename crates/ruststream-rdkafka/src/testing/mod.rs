@@ -38,9 +38,10 @@
 //! [`KafkaTopic::group`](crate::KafkaTopic::group) carries its meaning here: a record reaches one
 //! member of each consumer group, and every group reads its own copy, so replicas sharing a group
 //! divide the work in a test the way they divide it on a cluster.
-//! [`KafkaTestBroker::default_group`] mirrors the real broker's for subscriptions that name none;
-//! set it when the service under test sets one, or two bare `#[subscriber("orders")]` handlers
-//! are each alone in a group and both see every record.
+//! [`KafkaTestBroker::default_group`] mirrors the real broker's for subscriptions that name none,
+//! and so does the refusal without it: a bare `#[subscriber("orders")]`, or a descriptor that
+//! names no group, fails to subscribe with [`KafkaError::InvalidOptions`](crate::KafkaError)
+//! when the broker names no default group, as it does against a cluster.
 //!
 //! Which member gets a record is a partition assignment, not a rotation. Every topic here has
 //! exactly one partition and Kafka hands a partition to exactly one member, so a group's records

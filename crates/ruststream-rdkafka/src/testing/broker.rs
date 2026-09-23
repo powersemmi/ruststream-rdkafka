@@ -81,7 +81,10 @@ impl fmt::Debug for TestBrokerState {
 /// use ruststream_rdkafka::testing::KafkaTestBroker;
 /// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() -> Result<(), ruststream_rdkafka::KafkaError> {
-/// let broker = KafkaTestBroker::new().connect().await?;
+/// let broker = KafkaTestBroker::new()
+///     .default_group("orders-svc")
+///     .connect()
+///     .await?;
 /// let mut subscriber = broker.subscribe_with("orders").await?;
 /// broker
 ///     .publisher(KafkaPublish::default())
@@ -106,10 +109,10 @@ impl KafkaTestBroker {
     /// The consumer group subscriptions that do not name one join, mirroring
     /// [`KafkaBroker::default_group`](crate::KafkaBroker::default_group).
     ///
-    /// It matters here for the same reason it matters on a cluster: members of one group share a
-    /// topic's records instead of each getting a copy. Set it when the service under test sets
-    /// one, or two handlers on the same topic will each be alone in a group of their own and both
-    /// see every record - which is not what the same wiring does against Kafka.
+    /// It matters here for the same reasons it matters on a cluster: members of one group share a
+    /// topic's records instead of each getting a copy, and a subscription that names no group and
+    /// finds no default is refused with [`KafkaError::InvalidOptions`] when it subscribes. Set
+    /// it when the service under test sets one.
     ///
     /// # Examples
     ///
@@ -172,12 +175,12 @@ pub struct ConnectedKafkaTestBroker {
 impl ConnectedKafkaTestBroker {
     /// Subscribes to `topic` with descriptor defaults, mirroring
     /// [`ConnectedKafkaBroker`](crate::ConnectedKafkaBroker)'s `Subscribe` entry point: the
-    /// broker's [`default_group`](KafkaTestBroker::default_group) applies, and without one the
-    /// subscription is alone in a group of its own.
+    /// broker's [`default_group`](KafkaTestBroker::default_group) applies.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when `topic` is empty or a `^` pattern.
+    /// Returns [`KafkaError::InvalidOptions`] when `topic` is empty or a `^` pattern, and when
+    /// the broker names no [`default_group`](KafkaTestBroker::default_group), as a cluster does.
     // Returns a future without awaiting on purpose: call-site parity with the real broker, so
     // application code and tests compile unchanged against either.
     pub fn subscribe_with(
@@ -195,7 +198,8 @@ impl ConnectedKafkaTestBroker {
     ///
     /// Returns [`KafkaError::InvalidOptions`] when a name is empty, or when a name is a `^`
     /// pattern: the in-process broker routes by exact topic name, so pattern subscriptions
-    /// need a real cluster.
+    /// need a real cluster. It returns the same error when the broker names no
+    /// [`default_group`](KafkaTestBroker::default_group).
     pub fn subscribe_topics(
         &self,
         topics: &[String],
@@ -208,7 +212,8 @@ impl ConnectedKafkaTestBroker {
     /// # Errors
     ///
     /// Returns [`KafkaError::InvalidOptions`] for a manual partition assignment: the in-process
-    /// broker holds no partitions to assign, so that descriptor needs a real cluster.
+    /// broker holds no partitions to assign, so that descriptor needs a real cluster. It returns
+    /// the same error when neither the descriptor nor the broker names a consumer group.
     pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaTestSubscriber, KafkaError> {
         match plan.reader {
             Reader::Subscribed(topics) => self.open_subscription(
@@ -229,7 +234,9 @@ impl ConnectedKafkaTestBroker {
     /// errors stay `?` rather than a chain of early `ready(Err(..))` returns.
     ///
     /// `group`, `lane_key` and `commit` are what a descriptor carries into the subscription; the
-    /// bare-name entry points pass the by-name equivalents.
+    /// bare-name entry points pass the by-name equivalents. The group resolves as it does on the
+    /// real broker: the descriptor's own, else the broker's default, else the subscription is
+    /// refused, because Kafka reads a topic only through a consumer group.
     pub(crate) fn open_subscription(
         &self,
         topics: &[String],
@@ -253,10 +260,18 @@ impl ConnectedKafkaTestBroker {
             }
             self.state.ensure_open(topic)?;
         }
+        let group = group.or(self.default_group.as_deref()).ok_or_else(|| {
+            KafkaError::InvalidOptions(format!(
+                "subscription to {:?} has no consumer group: name one on the descriptor or \
+                     set `KafkaTestBroker::default_group`, as the service sets \
+                     `KafkaBroker::default_group`",
+                topics.join(","),
+            ))
+        })?;
         Ok(KafkaTestSubscriber::open_many(
             &self.state,
             topics,
-            group.or(self.default_group.as_deref()),
+            group,
             lane_key,
             commit,
         ))
