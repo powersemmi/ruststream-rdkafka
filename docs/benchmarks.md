@@ -13,9 +13,9 @@ this page publishes what it produced here.
 
 ## The numbers
 
-The best of three interleaved rounds, with the slowest round in parentheses. Higher is better.
+The best of three interleaved rounds, with the median round in parentheses. Higher is better.
 
-<div id="benchmark-results" data-benchmark-labels='{"loading": "Loading the published results...", "scenario": "Scenario", "raw": "Raw client", "adapter": "Adapter", "framework": "RustStream", "adapterOverhead": "Adapter overhead", "overhead": "Overhead", "indistinguishable": "indistinguishable", "brokerBound": "broker-bound", "machine": "Machine", "os": "OS", "broker": "Broker", "roundTrip": "Round trip", "build": "Build", "versions": "Versions", "measured": "Measured", "unavailable": "No results could be read. They are published at {url}.", "unknownSchema": "The published results declare schema {schema}, which this page does not render."}'></div>
+<div id="benchmark-results" data-benchmark-labels='{"loading": "Loading the published results...", "scenario": "Scenario", "raw": "Raw client", "adapter": "Adapter", "framework": "RustStream", "adapterOverhead": "Adapter overhead", "overhead": "Overhead", "indistinguishable": "indistinguishable", "brokerBound": "broker-bound", "machine": "Machine", "os": "OS", "broker": "Broker", "roundTrip": "Round trip", "build": "Build", "versions": "Versions", "measured": "Measured", "instructions": "Instructions per message", "allocations": "Allocations per message", "cold": "Cold start (instructions / allocations)", "unavailable": "No results could be read. They are published at {url}.", "unknownSchema": "The published results declare schema {schema}, which this page does not render."}'></div>
 
 The table is read in your browser from the document the last run wrote, so nothing on this page is
 a copy that could have gone stale.
@@ -54,6 +54,34 @@ The machine-readable form of the same run, which the framework's site reads to b
 cross-broker table, is at
 [`benchmarks/results.json`](https://powersemmi.github.io/ruststream-rdkafka/latest/benchmarks/results.json).
 
+## The crate's own code
+
+<div id="benchmark-code"></div>
+
+The second table is what a message costs on this crate's in-process transport, counted rather than
+timed: instructions under callgrind and allocations under DHAT. Each scenario is the service a user
+writes, started on `KafkaTestBroker`, so no socket, no server and no librdkafka are in the number.
+The transport pairs the crate's own `KafkaPublish` policy and carries the same commit modes and
+reposition handle as the live consumer, with the framework's dispatch above it. Receiving and
+publishing are its own: a delivery arrives over an in-process channel, not out of librdkafka's
+fetch buffer, and a reply is appended to the transport's retained log, not queued in the producer.
+What the live consumer costs over the raw client is in the table above.
+
+Instructions and allocations are per message in the steady state: the slope between a run of 1000
+deliveries and a run of 2000. The last column is what starting the service and taking the first
+delivery cost once. The numbers are absolute, the framework's own cost included; the core publishes
+that cost alone on its [benchmarks page](https://powersemmi.github.io/ruststream/latest/benchmarks/).
+
+A count repeats within a tenth of a percent between runs of one binary, so a change to the delivery
+path shows in it however small. `just bench-code` fails on an allocation above the floor a scenario
+declares, and with `--baseline=main` on more than two percent more instructions, and a pull request
+that changes the cost cites its numbers. The in-process transport is compiled with the `testing`
+feature, which brings the framework's test hooks with it. On a single delivery they stay empty
+outside a test. On a batch the framework copies each payload twice for the harness's records
+whether a test runs or not, so two of the batch row's allocations per message are ones a production
+service does not make. The other allocations per message are the transport's own bookkeeping: it
+tracks each delivery's offset under a copy of the topic name, and it retains every record it routes.
+
 ## The machine
 
 <div id="benchmark-environment"></div>
@@ -74,7 +102,8 @@ decoded, in all three loops alike. The offset is stored after that point, so one
 of the millions a run carries sits outside the number everywhere.
 
 A topic of several partitions, a pool of worker lanes, a batch handler and a transactional pipeline
-each answer a different question, and none of them is measured here.
+each answer a different question, and the comparison measures none of them. The code table counts a
+batch handler on the in-process transport.
 
 The numbers are a snapshot of one machine on one day. They are re-measured by hand, on a machine
 given to the run alone: the difference this page is about is smaller than the noise of a shared one.
@@ -89,3 +118,11 @@ The recipe starts the stand from `docker-compose.test.yml`, runs both scenarios,
 and rewrites `docs/benchmarks/results.json` with what it measured. It takes about fifteen minutes
 and wants the machine to itself. The message count is not fixed: a probe run sets it so that every
 measured run lasts at least five seconds on whatever machine it is taken on.
+
+```bash
+just bench-code
+```
+
+The recipe counts the code table under valgrind and rewrites the `code` section of the same
+document. Once built, it takes seconds and needs no stand, only valgrind and the benchmark runner:
+`cargo install --locked gungraun-runner --version =0.19.4`.
