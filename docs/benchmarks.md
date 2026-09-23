@@ -58,29 +58,30 @@ cross-broker table, is at
 
 <div id="benchmark-code"></div>
 
-The second table is what a message costs on this crate's in-process transport, counted rather than
-timed: instructions under callgrind and allocations under DHAT. Each scenario is the service a user
-writes, started on `KafkaTestBroker`, so no socket, no server and no librdkafka are in the number.
-The transport pairs the crate's own `KafkaPublish` policy and carries the same commit modes and
-reposition handle as the live consumer, with the framework's dispatch above it. Receiving and
-publishing are its own: a delivery arrives over an in-process channel, not out of librdkafka's
-fetch buffer, and a reply is appended to the transport's retained log, not queued in the producer.
-What the live consumer costs over the raw client is in the table above.
+The second table is what a message costs on the service's thread, counted rather than timed:
+instructions under callgrind and allocations under DHAT. Each scenario is the service a user
+writes, on `KafkaBroker` against the same stand: a consumer group reads a topic of one partition,
+and another thread fills the topic before the measured region starts. Everything the service's
+thread does is counted: the framework's dispatch, this crate's code and the librdkafka calls the
+crate makes on that thread. What librdkafka does on its own threads is not counted: fetching, the
+group protocol, producing records and the delivery reports. A reply's round trip to the broker is
+therefore not in its row, while the work the service's thread does to send the reply and take its
+delivery report is.
 
 Instructions and allocations are per message in the steady state: the slope between a run of 1000
-deliveries and a run of 2000. The last column is what starting the service and taking the first
-delivery cost once. The numbers are absolute, the framework's own cost included; the core publishes
-that cost alone on its [benchmarks page](https://powersemmi.github.io/ruststream/latest/benchmarks/).
+deliveries and a run of 2000. The last column is what starting the service, joining the consumer
+group and taking the first delivery cost once. The numbers are absolute, the framework's own cost
+included; the core publishes that cost alone on its
+[benchmarks page](https://powersemmi.github.io/ruststream/latest/benchmarks/).
 
-A count repeats within a tenth of a percent between runs of one binary, so a change to the delivery
-path shows in it however small. `just bench-code` fails on an allocation above the floor a scenario
-declares, and with `--baseline=main` on more than two percent more instructions, and a pull request
-that changes the cost cites its numbers. The in-process transport is compiled with the `testing`
-feature, which brings the framework's test hooks with it. On a single delivery they stay empty
-outside a test. On a batch the framework copies each payload twice for the harness's records
-whether a test runs or not, so two of the batch row's allocations per message are ones a production
-service does not make. The other allocations per message are the transport's own bookkeeping: it
-tracks each delivery's offset under a copy of the topic name, and it retains every record it routes.
+The broker is real, so a count moves a little between runs of one binary: how often the service's
+thread finds librdkafka's queue empty, or waits for a delivery report, depends on timing, and every
+wait costs a wakeup. Three runs of one binary made exactly the same allocations and agreed on
+instructions per message within a hundredth of a percent for consume and batch; a reply moved by up
+to three percent. `just bench-code` fails on an allocation above the floor a scenario declares (the
+highest count of three runs plus 0.1 percent), and on more than five percent more instructions than
+the run it compares with: the previous run, or `main` with `--baseline=main`. A pull request that
+changes the cost cites its numbers.
 
 ## The machine
 
@@ -103,7 +104,7 @@ of the millions a run carries sits outside the number everywhere.
 
 A topic of several partitions, a pool of worker lanes, a batch handler and a transactional pipeline
 each answer a different question, and the comparison measures none of them. The code table counts a
-batch handler on the in-process transport.
+batch handler, on the same stand.
 
 The numbers are a snapshot of one machine on one day. They are re-measured by hand, on a machine
 given to the run alone: the difference this page is about is smaller than the noise of a shared one.
@@ -123,6 +124,6 @@ measured run lasts at least five seconds on whatever machine it is taken on.
 just bench-code
 ```
 
-The recipe counts the code table under valgrind and rewrites the `code` section of the same
-document. Once built, it takes seconds and needs no stand, only valgrind and the benchmark runner:
-`cargo install --locked gungraun-runner --version =0.19.4`.
+The recipe starts the same stand, counts the code table under valgrind, stops the stand and
+rewrites the `code` section of the same document. It takes a minute or two and needs valgrind and
+the benchmark runner: `cargo install --locked gungraun-runner --version =0.19.4`.

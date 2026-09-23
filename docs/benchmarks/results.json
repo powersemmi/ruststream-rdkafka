@@ -76,41 +76,41 @@
   ],
   "code": [
     {
-      "name": "consume, JSON decode into a small struct, ack each",
+      "name": "consumer group, JSON decode into a small struct, ack each",
       "messages": 1000,
       "framework": {
-        "instructions": 3351.3,
-        "allocations": 1.0
+        "instructions": 4628.3,
+        "allocations": 3.0
       },
       "cold": {
-        "instructions": 23732,
-        "allocations": 35
+        "instructions": 996650,
+        "allocations": 265
       },
       "gated": true
     },
     {
-      "name": "reply, published through this crate's publish policy",
+      "name": "reply through this crate's publisher, delivery report awaited",
       "messages": 1000,
       "framework": {
-        "instructions": 5828.5,
-        "allocations": 5.0
+        "instructions": 10826.1,
+        "allocations": 8.0
       },
       "cold": {
-        "instructions": 28442,
-        "allocations": 44
+        "instructions": 1324279,
+        "allocations": 362
       },
       "gated": true
     },
     {
-      "name": "consume in batches of 64, drained from the queue",
+      "name": "consumer group in batches of 64, from what librdkafka fetched",
       "messages": 1000,
       "framework": {
-        "instructions": 3853.2,
-        "allocations": 3.2
+        "instructions": 4355.7,
+        "allocations": 3.0
       },
       "cold": {
-        "instructions": 28184,
-        "allocations": 43
+        "instructions": 980705,
+        "allocations": 266
       },
       "gated": true
     }
