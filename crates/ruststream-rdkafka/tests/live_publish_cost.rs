@@ -13,8 +13,8 @@
 //! copied, the shared keys and values are not.
 //!
 //! The plain publisher has a pair of its own, the raw client publishing the same record. What
-//! librdkafka allocates is invisible to a Rust allocator, so that comparison counts the C
-//! allocator's calls on this thread instead, the Rust allocations among them.
+//! librdkafka allocates is invisible to a Rust allocator, so that comparison reads the bytes this
+//! thread allocated through the C allocator instead, the Rust allocations among them.
 //!
 //! ```text
 //! just brokers-up
@@ -43,58 +43,21 @@ use ruststream_rdkafka::{
     Commit, KafkaBroker, KafkaEosPublish, KafkaPublish, KafkaTopic, PARTITION_KEY_HEADER,
     StartOffset,
 };
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use tikv_jemalloc_ctl::thread;
 
 mod live;
 
-/// Counts this thread's calls into the C allocator: librdkafka's allocations, and Rust's, which
-/// reach the same entry points through the system allocator.
+/// What this thread has allocated through the C allocator so far, in bytes: librdkafka's
+/// allocations, and Rust's, which reach the same allocator through the system one.
 ///
-/// The test binary defines the C allocator's entry points itself, so librdkafka's calls resolve
-/// here, and hands each call on to glibc's own implementation under its internal name.
+/// jemalloc replaces the C allocator in this test binary, so its per-thread counter sees what
+/// librdkafka allocates on the publishing thread as well as what Rust does.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-mod native {
-    use std::cell::Cell;
-    use std::ffi::c_void;
-
-    thread_local! {
-        // A constant initializer and no destructor: reading it allocates nothing, which is what
-        // lets the allocator itself read it.
-        static CALLS: Cell<usize> = const { Cell::new(0) };
-    }
-
-    unsafe extern "C" {
-        fn __libc_malloc(size: usize) -> *mut c_void;
-        fn __libc_calloc(count: usize, size: usize) -> *mut c_void;
-    }
-
-    fn count() {
-        CALLS.with(|calls| calls.set(calls.get() + 1));
-    }
-
-    /// # Safety
-    ///
-    /// The C allocator's contract, forwarded unchanged.
-    #[unsafe(no_mangle)]
-    pub(crate) unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-        count();
-        // SAFETY: the caller's request, forwarded unchanged to glibc's allocator.
-        unsafe { __libc_malloc(size) }
-    }
-
-    /// # Safety
-    ///
-    /// The C allocator's contract, forwarded unchanged.
-    #[unsafe(no_mangle)]
-    pub(crate) unsafe extern "C" fn calloc(count_of: usize, size: usize) -> *mut c_void {
-        count();
-        // SAFETY: the caller's request, forwarded unchanged to glibc's allocator.
-        unsafe { __libc_calloc(count_of, size) }
-    }
-
-    /// The C allocator's calls on this thread so far.
-    pub(crate) fn calls() -> usize {
-        CALLS.with(Cell::get)
-    }
+fn natively_allocated() -> u64 {
+    thread::allocatedp::read()
+        .expect("jemalloc reports its per-thread counter")
+        .get()
 }
 
 /// Counts this thread's allocations. A thread-local count rather than a global one: the client's
@@ -304,25 +267,25 @@ async fn a_keyed_publish_costs_nothing_for_its_key() {
 /// record, the C library's allocations included: nothing. The native header list is opened on the
 /// first wire header, and a reply carries none unless a transform stamps one.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-const BARE_BUDGET: usize = 0;
+const BARE_BUDGET: u64 = 0;
 
-/// Publishes `send` twice and counts the C allocator's calls of the second, with the producer and
-/// its topic already warm. The fewest of a few rounds, so a background task of the runtime that
-/// happens to allocate in between is not read as the publish's cost.
+/// Publishes `send` twice and reads what the second allocates through the C allocator, in bytes,
+/// with the producer and its topic already warm. The least of a few rounds, so a background task
+/// of the runtime that happens to allocate in between is not read as the publish's cost.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-async fn natively_spent<F, Fut>(send: F) -> usize
+async fn natively_spent<F, Fut>(send: F) -> u64
 where
     F: Fn() -> Fut,
     Fut: Future<Output = ()>,
 {
     send().await;
-    let mut fewest = usize::MAX;
+    let mut least = u64::MAX;
     for _ in 0..5 {
-        let before = native::calls();
+        let before = natively_allocated();
         send().await;
-        fewest = fewest.min(native::calls() - before);
+        least = least.min(natively_allocated() - before);
     }
-    fewest
+    least
 }
 
 /// A publish opens no native header list for a record without wire headers: it allocates what the
@@ -369,7 +332,7 @@ async fn a_publish_without_wire_headers_costs_what_the_raw_client_costs() {
 
     assert!(
         ours <= theirs + BARE_BUDGET,
-        "a publish without wire headers allocates {ours} times where the raw client allocates \
+        "a publish without wire headers allocates {ours} bytes where the raw client allocates \
          {theirs}, which is {} over the budget of {BARE_BUDGET}",
         ours - theirs - BARE_BUDGET,
     );
