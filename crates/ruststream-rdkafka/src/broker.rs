@@ -25,6 +25,7 @@ use ruststream::{
     AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Str, Subscribe,
     SubscriptionSource,
 };
+use tokio::runtime::Handle;
 use tokio::task;
 
 use crate::eos::EosSource;
@@ -59,6 +60,9 @@ pub(crate) struct ConnState {
     /// that alias the connection (publishers paired earlier, clones of the connected form) are
     /// still reachable, so their liveness is the one part of the contract that stays dynamic.
     closed: AtomicBool,
+    /// The runtime `connect` ran on. Every task the broker starts runs here, such as an
+    /// exactly-once pipeline's commit window, whichever thread's publish opens it.
+    runtime: Handle,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
@@ -100,6 +104,11 @@ pub(crate) enum Transport {
 const _: () = assert!(size_of::<Transport>() == size_of::<OnceLock<FutureProducer>>());
 
 impl ConnState {
+    /// The runtime the broker connected on.
+    pub(crate) const fn runtime(&self) -> &Handle {
+        &self.runtime
+    }
+
     /// The shared producer, opening it on the first ask.
     ///
     /// # Errors
@@ -394,6 +403,7 @@ impl Broker for KafkaBroker {
             flush_timeout: self.flush_timeout,
             eos_sources: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            runtime: Handle::current(),
             #[cfg(feature = "schema-registry")]
             schema_registry: self.schema_registry,
             #[cfg(feature = "schema-registry")]
@@ -457,6 +467,8 @@ impl KafkaBroker {
             flush_timeout: self.flush_timeout,
             eos_sources: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            // Taken when the transition is called, which is on the runtime that awaits it.
+            runtime: Handle::current(),
             #[cfg(feature = "schema-registry")]
             schema_registry: self.schema_registry,
             #[cfg(feature = "schema-registry")]

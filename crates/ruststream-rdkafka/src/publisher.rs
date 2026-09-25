@@ -767,7 +767,9 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
                     producer.begin_transaction().map_err(KafkaError::publish)
                 }
                 #[cfg(feature = "testing")]
-                TxProducer::InProcess { cluster, id } => cluster.begin(id),
+                TxProducer::InProcess { cluster, id } => {
+                    cluster.begin(id, self.inner.state.runtime())
+                }
             };
             if let Err(err) = begun {
                 return ready(Err(err));
