@@ -8,9 +8,11 @@
 //! where librdkafka put it for as long as a handler holds the delivery, and the body, the key
 //! and the headers are read out of the fetch buffer instead of copied out of it.
 //!
-//! The pair is a [`Yoke`]: the consumer is the cart, held inline as the `Arc` it already is, and
-//! the record is fetched against the reference the cart hands out, so the borrow is the
-//! compiler's own and this crate writes no `unsafe` of its own.
+//! The pair is a [`Yoke`]. Its cart is one `Arc` over the consumer and the block every delivery
+//! of the subscription shares (the commit tracker, the seeker, the topic name), so the one
+//! reference count a delivery takes keeps all of them alive. The record is fetched against the
+//! reference the cart hands out, so the borrow is the compiler's own and this crate writes no
+//! `unsafe` of its own.
 //!
 //! A yoke is built by a synchronous closure, which is what the consume loop wants: a record
 //! already fetched is taken without a future. The wait has no such builder, and a record taken
@@ -30,14 +32,64 @@ use rdkafka::message::{
     BorrowedHeaders, BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders,
     OwnedMessage,
 };
+use ruststream::Str;
 use yoke::{Yoke, Yokeable};
 
 #[cfg(feature = "testing")]
 use crate::in_process::{InProcessRecord, WireHeader};
-use crate::tracker::TrackingContext;
+use crate::seek::KafkaSeeker;
+use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The consumer a subscription reads through, shared with every delivery it produced.
 pub(crate) type SharedConsumer = Arc<StreamConsumer<TrackingContext>>;
+
+/// What every delivery of one subscription shares with it, behind one reference count: the
+/// commit tracker a settle reports to, the seeker a context hands out, and the topic name a
+/// delivery reads when it carries none of its own.
+#[derive(Debug)]
+pub(crate) struct Shared {
+    pub(crate) tracker: Arc<CommitTracker>,
+    pub(crate) seeker: Arc<KafkaSeeker>,
+    /// The subscription's topic: its one topic, or, for a subscription over several names or a
+    /// pattern, the name it was declared with.
+    topic: Str,
+}
+
+impl Shared {
+    pub(crate) const fn new(
+        tracker: Arc<CommitTracker>,
+        seeker: Arc<KafkaSeeker>,
+        topic: Str,
+    ) -> Self {
+        Self {
+            tracker,
+            seeker,
+            topic,
+        }
+    }
+
+    /// The topic of a delivery that carries `own` as its own name.
+    ///
+    /// A delivery (and the context built off it) is one public type for every form of
+    /// subscription, so whether it names its own topic is a field and not a type. The subscriber
+    /// gives every record of a subscription over several topics its own name; a delivery without
+    /// one belongs to a subscription over one topic, which is the name held here. The declared
+    /// name a subscription over several topics holds here is never what its deliveries answer.
+    pub(crate) fn topic<'a>(&'a self, own: Option<&'a Str>) -> &'a Str {
+        own.unwrap_or(&self.topic)
+    }
+}
+
+/// The cart a fetched record is yoked to: the consumer the record is borrowed from, and what the
+/// deliveries share, both behind the one reference count the yoke already costs.
+pub(crate) struct LiveShared {
+    pub(crate) consumer: SharedConsumer,
+    /// Counted apart from the cart, so a per-delivery context holds it without the consumer.
+    pub(crate) shared: Arc<Shared>,
+}
+
+/// The cart, as a delivery holds it.
+pub(crate) type Cart = Arc<LiveShared>;
 
 /// The record, as the yoke carries it: a wrapper of this crate's own, because the yokeable is
 /// the type the cart's borrow is proved covariant in and `rdkafka` does not implement the trait.
@@ -55,8 +107,9 @@ enum NotTaken {
 /// One fetched record, kept where librdkafka put it - or, for the record a wait resolved, the
 /// copy that is the only owned form such a record can take.
 pub(crate) enum HeldRecord {
-    /// The record in librdkafka's own buffer, yoked to the consumer that owns it.
-    Fetched(Yoke<Record<'static>, SharedConsumer>),
+    /// The record in librdkafka's own buffer, yoked to the cart that holds the consumer owning
+    /// it.
+    Fetched(Yoke<Record<'static>, Cart>),
     /// A record the wait took out of the queue itself. Its borrow is the waiter's, not the
     /// cart's, so it cannot enter a yoke; it is copied instead, which is what every delivery
     /// cost before this type existed. The copy is boxed because it is the wider arm by far, and
@@ -64,13 +117,17 @@ pub(crate) enum HeldRecord {
     /// that are the other arm: it cost 224 instructions per delivery in `memcpy` alone, moving
     /// a copy that was not there.
     Copied {
-        consumer: SharedConsumer,
+        cart: Cart,
         message: Box<OwnedMessage>,
     },
     /// A record of the in-process cluster the test harness connected, behind the `testing`
-    /// feature. Boxed like the copy, so the arm leaves the width of a delivery alone.
+    /// feature, with the block its subscription shares. Boxed like the copy, so the arm leaves
+    /// the width of a delivery alone.
     #[cfg(feature = "testing")]
-    InProcess(Box<InProcessRecord>),
+    InProcess {
+        shared: Arc<Shared>,
+        record: Box<InProcessRecord>,
+    },
 }
 
 // The in-process arm exists only under `testing`: a production build keeps the two arms it had,
@@ -84,9 +141,9 @@ impl HeldRecord {
     /// # Cancel safety
     ///
     /// Nothing is awaited: either a record is taken or nothing happens.
-    pub(crate) fn ready(consumer: &SharedConsumer) -> Option<Result<Self, KafkaError>> {
-        let taken = Yoke::try_attach_to_cart(Arc::clone(consumer), |consumer| {
-            consumer
+    pub(crate) fn ready(cart: &Cart) -> Option<Result<Self, KafkaError>> {
+        let taken = Yoke::try_attach_to_cart(Arc::clone(cart), |cart| {
+            cart.consumer
                 .recv()
                 .now_or_never()
                 .ok_or(NotTaken::Empty)?
@@ -115,16 +172,16 @@ impl HeldRecord {
     /// # Cancel safety
     ///
     /// Cancel safe: dropping this future before it resolves takes no record.
-    pub(crate) async fn next(consumer: &SharedConsumer) -> Result<Self, KafkaError> {
-        let mut waiter = pin!(consumer.recv());
+    pub(crate) async fn next(cart: &Cart) -> Result<Self, KafkaError> {
+        let mut waiter = pin!(cart.consumer.recv());
         poll_fn(move |cx| {
-            if let Some(taken) = Self::ready(consumer) {
+            if let Some(taken) = Self::ready(cart) {
                 return Poll::Ready(taken);
             }
             match waiter.as_mut().poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(message)) => Poll::Ready(Ok(Self::Copied {
-                    consumer: Arc::clone(consumer),
+                    cart: Arc::clone(cart),
                     message: Box::new(message.detach()),
                 })),
                 Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
@@ -149,16 +206,30 @@ impl HeldRecord {
         position: i64,
     ) -> Result<(), KafkaError> {
         match self {
-            Self::Fetched(yoke) if position == offset => {
-                yoke.backing_cart().store_offset_from_message(&yoke.get().0)
-            }
-            Self::Fetched(yoke) => yoke.backing_cart().store_offset(topic, partition, position),
-            Self::Copied { consumer, .. } => consumer.store_offset(topic, partition, position),
+            Self::Fetched(yoke) if position == offset => yoke
+                .backing_cart()
+                .consumer
+                .store_offset_from_message(&yoke.get().0),
+            Self::Fetched(yoke) => yoke
+                .backing_cart()
+                .consumer
+                .store_offset(topic, partition, position),
+            Self::Copied { cart, .. } => cart.consumer.store_offset(topic, partition, position),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => {
+            Self::InProcess { record, .. } => {
                 record.store(topic, partition, position);
                 Ok(())
             }
+        }
+    }
+
+    /// What every delivery of the subscription shares.
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        match self {
+            Self::Fetched(yoke) => &yoke.backing_cart().shared,
+            Self::Copied { cart, .. } => &cart.shared,
+            #[cfg(feature = "testing")]
+            Self::InProcess { shared, .. } => shared,
         }
     }
 
@@ -168,7 +239,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.topic(),
             Self::Copied { message, .. } => message.topic(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => record.topic(),
+            Self::InProcess { record, .. } => record.topic(),
         }
     }
 
@@ -178,7 +249,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.partition(),
             Self::Copied { message, .. } => message.partition(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => record.partition(),
+            Self::InProcess { record, .. } => record.partition(),
         }
     }
 
@@ -188,7 +259,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.offset(),
             Self::Copied { message, .. } => message.offset(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => record.offset(),
+            Self::InProcess { record, .. } => record.offset(),
         }
     }
 
@@ -198,7 +269,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.timestamp().to_millis(),
             Self::Copied { message, .. } => message.timestamp().to_millis(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => Some(record.timestamp_millis()),
+            Self::InProcess { record, .. } => Some(record.timestamp_millis()),
         }
     }
 
@@ -208,7 +279,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.payload().unwrap_or_default(),
             Self::Copied { message, .. } => message.payload().unwrap_or_default(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => record.payload(),
+            Self::InProcess { record, .. } => record.payload(),
         }
     }
 
@@ -218,7 +289,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.key(),
             Self::Copied { message, .. } => message.key(),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => record.key(),
+            Self::InProcess { record, .. } => record.key(),
         }
     }
 
@@ -230,7 +301,7 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke.get().0.headers().map(RecordHeaders::Fetched),
             Self::Copied { message, .. } => message.headers().map(RecordHeaders::Copied),
             #[cfg(feature = "testing")]
-            Self::InProcess(record) => Some(RecordHeaders::InProcess(record.headers())),
+            Self::InProcess { record, .. } => Some(RecordHeaders::InProcess(record.headers())),
         }
     }
 }

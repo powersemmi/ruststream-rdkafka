@@ -11,9 +11,9 @@ use bytes::Bytes;
 use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
 
 use crate::convert;
-use crate::record::HeldRecord;
+use crate::record::{HeldRecord, Shared};
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::tracker::{CommitTracker, PartitionSlot};
+use crate::tracker::PartitionSlot;
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
 ///
@@ -34,17 +34,11 @@ pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.
     Advisory,
     /// `Commit::Tracked`: an ack advances the shared watermark and stores the new position,
-    /// through the consumer the delivery's own record keeps alive.
-    Tracked {
-        tracker: Arc<CommitTracker>,
-        slot: PartitionSlot,
-    },
+    /// through the tracker and the consumer the delivery's own record keeps alive.
+    Tracked { slot: PartitionSlot },
     /// `Commit::Transactional`: an ack advances the shared watermark only - the EOS pipeline
     /// commits positions through the producer transaction, so nothing is stored here.
-    Transactional {
-        tracker: Arc<CommitTracker>,
-        slot: PartitionSlot,
-    },
+    Transactional { slot: PartitionSlot },
 }
 
 /// How a delivery answers [`IncomingMessage::partition_key`], which most deliveries are never
@@ -126,7 +120,6 @@ impl PartitionText {
 ///
 /// Wire headers map name for name; a null-valued Kafka header arrives with an empty value
 /// (presence preserved).
-#[derive(Debug)]
 pub struct KafkaMessage {
     /// The record librdkafka fetched, kept where it put it: the body, the key and the wire
     /// headers are read out of the fetch buffer, and the consumer that owns that buffer stays
@@ -139,18 +132,32 @@ pub struct KafkaMessage {
     /// The `RustStream` view of the record's headers, built on the first read: a delivery
     /// nothing asks headers of never pays for them.
     headers: OnceLock<HeaderMap>,
-    /// The topic, shared with the subscription that read it: a Kafka consumer reads a handful of
-    /// topics and delivers millions of records, so the name is minted once per topic and every
-    /// delivery of it takes a reference count.
-    topic: Str,
+    /// The record's topic, when the subscription reads several: a Kafka consumer reads a handful
+    /// of topics and delivers millions of records, so the name is minted once per topic and
+    /// every delivery of it takes a reference count. A subscription over one topic leaves it
+    /// empty, and the delivery reads the name its shared block holds, for no count of its own.
+    topic: Option<Str>,
     partition: i32,
     offset: i64,
     settlement: Settlement,
     /// How this delivery answers `partition_key()`.
     lane: Lane,
-    /// The subscription's own reposition handle, minted when it opened: this is what lets a
-    /// per-delivery context be built from the delivery alone.
-    seeker: Arc<KafkaSeeker>,
+}
+
+impl fmt::Debug for KafkaMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = f.debug_struct("KafkaMessage");
+        out.field("record", &self.record);
+        #[cfg(feature = "schema-registry")]
+        out.field("transcoded", &self.transcoded);
+        out.field("headers", &self.headers)
+            .field("topic", self.topic_name())
+            .field("partition", &self.partition)
+            .field("offset", &self.offset)
+            .field("settlement", &self.settlement)
+            .field("lane", &self.lane)
+            .finish()
+    }
 }
 
 impl fmt::Debug for Settlement {
@@ -170,12 +177,11 @@ impl KafkaMessage {
     pub(crate) fn new(
         record: HeldRecord,
         headers: OnceLock<HeaderMap>,
-        topic: Str,
+        topic: Option<Str>,
         partition: i32,
         offset: i64,
         settlement: Settlement,
         lane: Lane,
-        seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
             record,
@@ -187,25 +193,34 @@ impl KafkaMessage {
             offset,
             settlement,
             lane,
-            seeker,
         }
     }
 
-    /// The subscription's reposition handle, for the context built off this delivery.
+    /// The topic as the shared string: the record's own, or the subscription's.
+    fn topic_name(&self) -> &Str {
+        self.record.shared().topic(self.topic.as_ref())
+    }
+
+    /// The subscription's reposition handle, for the context built off a batch.
     pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
-        Arc::clone(&self.seeker)
+        Arc::clone(&self.record.shared().seeker)
+    }
+
+    /// What the subscription shares, for the context built off this delivery: one count holds
+    /// the seeker and the topic name alike.
+    pub(crate) fn shared_handle(&self) -> Arc<Shared> {
+        Arc::clone(self.record.shared())
+    }
+
+    /// The topic name this delivery carries itself, when its subscription reads several.
+    pub(crate) fn own_topic(&self) -> Option<Str> {
+        self.topic.clone()
     }
 
     /// The topic this record was consumed from.
     #[must_use]
     pub fn topic(&self) -> &str {
-        &self.topic
-    }
-
-    /// The same name, as the subscription minted it: taking it costs a reference count, so
-    /// anything built per delivery carries the name instead of copying it.
-    pub(crate) fn shared_topic(&self) -> Str {
-        self.topic.clone()
+        self.topic_name()
     }
 
     /// The partition this record was consumed from.
@@ -245,15 +260,21 @@ impl KafkaMessage {
     fn settle(self) -> Result<(), AckError> {
         match &self.settlement {
             Settlement::Advisory => Ok(()),
-            Settlement::Tracked { tracker, slot } => tracker
+            Settlement::Tracked { slot } => self
+                .record
+                .shared()
+                .tracker
                 .settle_with(*slot, self.offset, |position| {
                     self.record
-                        .store(&self.topic, self.partition, self.offset, position)
+                        .store(self.topic_name(), self.partition, self.offset, position)
                 })
                 .map_err(|err| AckError::Broker(Box::new(err))),
-            Settlement::Transactional { tracker, slot } => {
-                let infallible: Result<(), Infallible> =
-                    tracker.settle_with(*slot, self.offset, |_position| Ok(()));
+            Settlement::Transactional { slot } => {
+                let infallible: Result<(), Infallible> = self.record.shared().tracker.settle_with(
+                    *slot,
+                    self.offset,
+                    |_position| Ok(()),
+                );
                 infallible.expect("no-op store cannot fail");
                 Ok(())
             }
@@ -342,7 +363,7 @@ impl Positioned for KafkaMessage {
     /// This delivery's own coordinates: seeking to them redelivers exactly this record (and the
     /// ordered suffix behind it on the partition).
     fn position(&self) -> Self::Position {
-        KafkaPosition::topic_offset(&*self.topic, self.partition, self.offset)
+        KafkaPosition::topic_offset(&**self.topic_name(), self.partition, self.offset)
     }
 }
 
