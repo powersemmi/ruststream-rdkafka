@@ -8,6 +8,8 @@ mod convert;
 mod distribution;
 mod eos;
 mod error;
+#[cfg(feature = "testing")]
+mod in_process;
 mod message;
 mod publisher;
 mod record;
@@ -15,6 +17,8 @@ mod redelivery;
 mod seek;
 mod subscriber;
 mod subscription;
+#[cfg(feature = "testing")]
+mod testable;
 mod tracker;
 
 #[cfg(feature = "avro")]
@@ -25,8 +29,6 @@ pub mod prelude;
 pub mod protobuf;
 #[cfg(feature = "schema-registry")]
 pub mod schema_registry;
-#[cfg(feature = "testing")]
-pub mod testing;
 
 pub use broker::{ClosedKafkaBroker, ConnectedKafkaBroker, KafkaBroker};
 pub use distribution::RoundRobin;

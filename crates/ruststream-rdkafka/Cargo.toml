@@ -35,9 +35,11 @@ protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
 # topic behind a channel, the consumer group of an operation, the schema-registry coordinate of
 # a server. Forwarded from the core, where the document is built.
 asyncapi = ["ruststream/asyncapi", "dep:serde"]
-# Ships the in-process test broker (`testing` module). The conformance harness is broker-author
-# tooling and stays in this repo's dev-dependencies, out of the user-facing feature.
-testing = ["ruststream/testing"]
+# The in-process mode `TestApp::start` connects the production broker through: an in-process
+# Kafka cluster (topics, partitions, consumer groups, offsets, transactions). The conformance
+# harness is broker-author tooling and stays in this repo's dev-dependencies, out of the
+# user-facing feature.
+testing = ["ruststream/testing", "dep:regex"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
 # that build hermetically everywhere are surfaced here (SASL PLAIN/SCRAM/OAUTHBEARER need no
 # feature at all - librdkafka implements them built-in); anything else (gssapi, cmake-build,
@@ -64,6 +66,7 @@ apache-avro = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 prost-reflect = { workspace = true, optional = true }
 protox = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = [

@@ -8,7 +8,6 @@ use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "schema-registry")]
 use bytes::Bytes;
-use rdkafka::consumer::Consumer as _;
 use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
 
 use crate::convert;
@@ -248,21 +247,8 @@ impl KafkaMessage {
             Settlement::Advisory => Ok(()),
             Settlement::Tracked { tracker, slot } => tracker
                 .settle_with(*slot, self.offset, |position| {
-                    // The watermark is this delivery's own offset whenever nothing below it
-                    // is still outstanding, which is every settle of an in-order handler.
-                    // There the record answers for its own topic and librdkafka takes the
-                    // position off the record's topic handle, instead of looking one up by
-                    // name (a `CString`, a topic create and a topic destroy under its own
-                    // lock, per message).
-                    if let Some(record) = self.record.fetched()
-                        && position == self.offset
-                    {
-                        self.record.consumer().store_offset_from_message(record)
-                    } else {
-                        self.record
-                            .consumer()
-                            .store_offset(&self.topic, self.partition, position)
-                    }
+                    self.record
+                        .store(&self.topic, self.partition, self.offset, position)
                 })
                 .map_err(|err| AckError::Broker(Box::new(err))),
             Settlement::Transactional { tracker, slot } => {

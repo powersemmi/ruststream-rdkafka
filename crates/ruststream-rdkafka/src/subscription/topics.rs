@@ -246,28 +246,6 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopics {
     }
 }
 
-#[cfg(feature = "testing")]
-impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopics {
-    type Subscriber = crate::testing::KafkaTestSubscriber;
-    type Copies = NamedCopies;
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn subscribe(
-        self,
-        broker: &crate::testing::ConnectedKafkaTestBroker,
-    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
-        ready(self.into_plan().and_then(|plan| broker.open(plan)))
-    }
-
-    #[cfg(feature = "asyncapi")]
-    fn operation_bindings(&self) -> Bindings {
-        Self::operation_bindings(self)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

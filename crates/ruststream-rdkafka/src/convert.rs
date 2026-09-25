@@ -37,6 +37,15 @@ pub(crate) fn headers_from_message(record: &HeldRecord) -> HeaderMap {
 
 /// The outgoing record parts split from `RustStream` headers: the native wire headers and the
 /// record key.
+/// Whether a header of the framework's map travels as a Kafka wire header: the partition key
+/// becomes the record's own key instead, and the exactly-once source coordinates never leave the
+/// process.
+#[inline]
+pub(crate) fn rides_the_wire(name: &str) -> bool {
+    !name.eq_ignore_ascii_case(PARTITION_KEY_HEADER)
+        && !name.eq_ignore_ascii_case(EOS_SOURCE_HEADER)
+}
+
 #[derive(Debug)]
 pub(crate) struct PublishParts {
     pub(crate) headers: Option<OwnedHeaders>,
@@ -56,9 +65,7 @@ pub(crate) fn headers_for_publish(headers: &HeaderMap) -> PublishParts {
     let mut native = OwnedHeaders::new_with_capacity(headers.len());
     let mut count = 0;
     for (name, value) in headers.iter() {
-        if name.eq_ignore_ascii_case(PARTITION_KEY_HEADER)
-            || name.eq_ignore_ascii_case(EOS_SOURCE_HEADER)
-        {
+        if !rides_the_wire(name) {
             continue;
         }
         native = native.insert(Header {

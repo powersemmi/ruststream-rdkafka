@@ -8,7 +8,7 @@
     "Give every concurrent transactional flow its own `transactional_id`, since a second producer on one id fences the first: use `per_partition()` with `Out<impl PartitionLanes>` for a worker pool, and `EosPublish` with `Commit::Transactional(id)` plus the `EosReplies` transform for consume-transform-produce.",
     "Reach for a registry-backed codec first (`AvroCodec`, or `SchemaFramed` over `JsonCodec`) with `KafkaBroker::schema_prefetch`; `KafkaBroker::schema_registry` plus `SchemaFrame` is the JSON transcode compatibility path, and the two never sit on one broker.",
     "Carry a Protobuf message on the core's byte lanes with `#[wire(..)]` and frame it at publish time with `KafkaPublish::framed(&registry)` or the app-wide `ProtobufFrame` layer; a `prost` message can never be a codec's value.",
-    "Test a service against `ruststream_rdkafka::testing::KafkaTestBroker` with `ruststream::testing::TestApp` and write no mocks; it gives every topic one partition and does not reproduce exactly-once, real partitions or broker-side transaction guarantees.",
+    "Test a service by handing the app `main` runs to `ruststream::testing::TestApp::start`, which connects `KafkaBroker` in process with the `testing` feature, and address it as `tb.broker::<KafkaBroker>()`; write no mocks and build no second app.",
     "Reach any librdkafka property this crate does not surface through `KafkaBroker::config`, `KafkaBroker::producer_config` or the descriptor's `config`, which is applied last and wins over the typed options."
   ]
 }

@@ -104,27 +104,6 @@ impl BuildContext<KafkaMessage> for KafkaContext {
     }
 }
 
-/// The in-process transport carries the same context, so a service reading its broker fields
-/// mounts on [`KafkaTestBroker`](crate::testing::KafkaTestBroker) unchanged and is testable with
-/// `TestApp`. What it reports is what that transport actually has: the topic and the log offset
-/// are real and the seeker really repositions, the partition is zero (the transport gives each
-/// topic one), and there is no record timestamp because it stamps none.
-#[cfg(feature = "testing")]
-impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
-    fn build(msg: &crate::testing::KafkaTestMessage) -> Self {
-        Self {
-            // The in-process transport mints a topic name per delivery rather than sharing the
-            // subscription's, so this is the one context build that copies the name.
-            topic: Str::from(msg.topic()),
-            partition: 0,
-            offset: msg.offset(),
-            timestamp_millis: None,
-            key: msg.key().map(Bytes::copy_from_slice),
-            seeker: msg.seeker_handle(),
-        }
-    }
-}
-
 /// The subscription-scoped context of a batch handler: the reposition handle every delivery of
 /// the batch shares.
 ///
@@ -187,17 +166,6 @@ impl KafkaBatchContext {
 
 impl BuildBatchContext<KafkaMessage> for KafkaBatchContext {
     fn build(first: &KafkaMessage) -> Self {
-        Self {
-            seeker: first.seeker_handle(),
-        }
-    }
-}
-
-/// The in-process transport carries the batch context too: its seeker repositions the retained
-/// log, so a batch body that replays is testable with `TestApp`.
-#[cfg(feature = "testing")]
-impl BuildBatchContext<crate::testing::KafkaTestMessage> for KafkaBatchContext {
-    fn build(first: &crate::testing::KafkaTestMessage) -> Self {
         Self {
             seeker: first.seeker_handle(),
         }

@@ -523,14 +523,6 @@ impl KafkaFramedPublish {
 }
 
 impl KafkaFramedPublish {
-    /// Splits the policy into producer settings and framing, for a broker that mints its own
-    /// publisher (the in-process test broker does).
-    pub(crate) fn into_parts(self) -> (KafkaPublish, ProtobufFraming) {
-        (self.publish, self.framing)
-    }
-}
-
-impl KafkaFramedPublish {
     /// What the messages this policy publishes say about their schema: the Confluent envelope
     /// puts the schema id in the payload, and the naming strategy says which subject it was
     /// registered under.
@@ -566,10 +558,9 @@ impl PublishPolicy<ConnectedKafkaBroker> for KafkaFramedPublish {
 /// The live half of [`KafkaFramedPublish`]: a publisher that puts the Confluent envelope on each
 /// message before it goes on the topic.
 ///
-/// Generic over the publisher underneath, so a mount site naming
-/// [`KafkaPublish::framed`](crate::KafkaPublish::framed) compiles unchanged against the real
-/// broker and against the in-process [`KafkaTestBroker`](crate::testing::KafkaTestBroker) - the
-/// same promise [`KafkaPublish`] itself makes.
+/// Generic over the publisher underneath; pairing
+/// [`KafkaPublish::framed`](crate::KafkaPublish::framed) puts it over the broker's
+/// [`KafkaPublisher`], in production and in a test's in-process mode alike.
 #[derive(Clone, Debug)]
 pub struct KafkaFramedPublisher<P = KafkaPublisher> {
     inner: P,

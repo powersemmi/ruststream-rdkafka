@@ -192,45 +192,6 @@ impl RedeliveryAddressed<ConnectedKafkaBroker> for KafkaTopic {
     }
 }
 
-#[cfg(feature = "testing")]
-impl SubscriptionSource<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic {
-    type Subscriber = crate::testing::KafkaTestSubscriber;
-    type Copies = AddressedCopies;
-
-    fn name(&self) -> &str {
-        &self.topic
-    }
-
-    // Returns a future without awaiting: opening an in-process subscription is synchronous, and
-    // the trait is what shapes the signature.
-    fn subscribe(
-        self,
-        broker: &crate::testing::ConnectedKafkaTestBroker,
-    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
-        ready(self.into_plan().and_then(|plan| broker.open(plan)))
-    }
-
-    #[cfg(feature = "asyncapi")]
-    fn channel_bindings(&self) -> Bindings {
-        Self::channel_bindings(self)
-    }
-
-    #[cfg(feature = "asyncapi")]
-    fn operation_bindings(&self) -> Bindings {
-        Self::operation_bindings(self)
-    }
-}
-
-#[cfg(feature = "testing")]
-impl RedeliveryAddressed<crate::testing::ConnectedKafkaTestBroker> for KafkaTopic {
-    fn redelivery_address(
-        &self,
-        _broker: &crate::testing::ConnectedKafkaTestBroker,
-    ) -> impl Future<Output = Result<RedeliveryAddress, KafkaError>> {
-        ready(Ok(RedeliveryAddress::new(self.topic.clone())))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
