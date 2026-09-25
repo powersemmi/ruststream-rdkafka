@@ -110,8 +110,8 @@ impl PartitionText {
 /// Settlement mapping depends on the [`Commit`](crate::Commit) mode of the subscription:
 ///
 /// Under `Commit::Auto` (the default) librdkafka owns the committed position - it is stored
-/// the moment a message is handed to the application - so `ack` and both `nack` forms are
-/// advisory no-ops; in particular `nack(true)` does NOT cause a redelivery.
+/// the moment a message is handed to the application - so `ack` and `nack(false)` are advisory
+/// no-ops, and `nack(true)` reports [`AckError::Unsupported`]: nothing brings the record back.
 ///
 /// Under `Commit::Tracked`:
 ///
@@ -312,8 +312,9 @@ impl IncomingMessage for KafkaMessage {
     /// Settles negatively. `requeue = false` drops the delivery: the offset settles so the
     /// committed position can move past it. `requeue = true` leaves the offset unsettled, which
     /// is Kafka's own redelivery - the committed position stays below it and the partition is
-    /// re-consumed from there on its next fetch. Under `Commit::Auto` both forms are advisory
-    /// no-ops (see the type-level settlement mapping).
+    /// re-consumed from there on its next fetch. Under `Commit::Auto` `requeue = false` is an
+    /// advisory no-op and `requeue = true` is unsupported (see the type-level settlement
+    /// mapping).
     ///
     /// Kafka counts no deliveries of its own, so a registration that caps its attempts with
     /// `max_attempts(..)` gets the framework's count instead: the runtime republishes the
@@ -321,17 +322,24 @@ impl IncomingMessage for KafkaMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Broker`] under the same conditions as [`ack`](Self::ack).
+    /// Returns [`AckError::Unsupported`] for `requeue = true` under `Commit::Auto`, where the
+    /// position was stored when the record was handed over, and [`AckError::Broker`] under the
+    /// same conditions as [`ack`](Self::ack).
     ///
     /// # Cancel safety
     ///
     /// Cancel safe: the watermark update is synchronous, so the future either completed or did
     /// nothing.
     fn nack(self, requeue: bool) -> impl Future<Output = Result<(), AckError>> {
-        // Leaving the offset unsettled is the whole mechanism: under Tracked the committed
-        // position stays below it, so Kafka redelivers from there on the next fetch of this
-        // partition.
-        ready(if requeue { Ok(()) } else { self.settle() })
+        ready(match (requeue, &self.settlement) {
+            // Auto-commit stored the position as the record was handed over, so no requeue is
+            // left to perform: a success here would promise a redelivery that never comes.
+            (true, Settlement::Advisory) => Err(AckError::Unsupported),
+            // Leaving the offset unsettled is the whole mechanism: the committed position stays
+            // below it, so Kafka redelivers from there on the next fetch of this partition.
+            (true, _) => Ok(()),
+            (false, _) => self.settle(),
+        })
     }
 
     /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the

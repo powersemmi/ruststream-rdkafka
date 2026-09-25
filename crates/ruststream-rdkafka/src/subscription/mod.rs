@@ -89,8 +89,9 @@ pub enum LaneKey {
 pub enum Commit {
     /// librdkafka auto-commit, the librdkafka default: positions are stored as messages are
     /// handed to the application and committed every `auto.commit.interval.ms`. `ack` and
-    /// `nack` are advisory no-ops; a crash can lose the tail of processed-but-uncommitted work
-    /// or skip unprocessed deliveries that were already stored.
+    /// `nack(false)` are advisory no-ops and `nack(true)` reports
+    /// [`AckError::Unsupported`](ruststream::AckError::Unsupported); a crash can lose the tail of
+    /// processed-but-uncommitted work or skip unprocessed deliveries that were already stored.
     #[default]
     Auto,
     /// Per-message acknowledgement: `enable.auto.offset.store` is switched off and an `ack`
