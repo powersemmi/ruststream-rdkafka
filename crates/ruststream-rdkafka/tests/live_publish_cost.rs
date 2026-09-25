@@ -12,6 +12,10 @@
 //! of the header map is one allocation of that difference, whatever the map holds - the table is
 //! copied, the shared keys and values are not.
 //!
+//! The plain publisher has a pair of its own, the raw client publishing the same record. What
+//! librdkafka allocates is invisible to a Rust allocator, so that comparison counts the C
+//! allocator's calls on this thread instead, the Rust allocations among them.
+//!
 //! ```text
 //! just brokers-up
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test live_publish_cost -- --test-threads=1
@@ -28,6 +32,10 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use rdkafka::producer::{FutureProducer, FutureRecord};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use rdkafka::util::Timeout;
 use ruststream::{
     Broker, HeaderMap, IncomingMessage, OutgoingMessage, PublishPolicy, Publisher, Str, Subscriber,
 };
@@ -37,6 +45,57 @@ use ruststream_rdkafka::{
 };
 
 mod live;
+
+/// Counts this thread's calls into the C allocator: librdkafka's allocations, and Rust's, which
+/// reach the same entry points through the system allocator.
+///
+/// The test binary defines the C allocator's entry points itself, so librdkafka's calls resolve
+/// here, and hands each call on to glibc's own implementation under its internal name.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod native {
+    use std::cell::Cell;
+    use std::ffi::c_void;
+
+    thread_local! {
+        // A constant initializer and no destructor: reading it allocates nothing, which is what
+        // lets the allocator itself read it.
+        static CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    unsafe extern "C" {
+        fn __libc_malloc(size: usize) -> *mut c_void;
+        fn __libc_calloc(count: usize, size: usize) -> *mut c_void;
+    }
+
+    fn count() {
+        CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+
+    /// # Safety
+    ///
+    /// The C allocator's contract, forwarded unchanged.
+    #[unsafe(no_mangle)]
+    pub(crate) unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
+        count();
+        // SAFETY: the caller's request, forwarded unchanged to glibc's allocator.
+        unsafe { __libc_malloc(size) }
+    }
+
+    /// # Safety
+    ///
+    /// The C allocator's contract, forwarded unchanged.
+    #[unsafe(no_mangle)]
+    pub(crate) unsafe extern "C" fn calloc(count_of: usize, size: usize) -> *mut c_void {
+        count();
+        // SAFETY: the caller's request, forwarded unchanged to glibc's allocator.
+        unsafe { __libc_calloc(count_of, size) }
+    }
+
+    /// The C allocator's calls on this thread so far.
+    pub(crate) fn calls() -> usize {
+        CALLS.with(Cell::get)
+    }
+}
 
 /// Counts this thread's allocations. A thread-local count rather than a global one: the client's
 /// own threads are not what this measures.
@@ -238,5 +297,80 @@ async fn a_keyed_publish_costs_nothing_for_its_key() {
         keyed_cost, keyless_cost,
         "a keyed publish allocates {keyed_cost} where a keyless one allocates \
          {keyless_cost}: the key is being copied out of the map instead of taken from it",
+    );
+}
+
+/// What a publish without a wire header may allocate over the raw client publishing the same
+/// record, the C library's allocations included: nothing. The native header list is opened on the
+/// first wire header, and a reply carries none unless a transform stamps one.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const BARE_BUDGET: usize = 0;
+
+/// Publishes `send` twice and counts the C allocator's calls of the second, with the producer and
+/// its topic already warm. The fewest of a few rounds, so a background task of the runtime that
+/// happens to allocate in between is not read as the publish's cost.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+async fn natively_spent<F, Fut>(send: F) -> usize
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = ()>,
+{
+    send().await;
+    let mut fewest = usize::MAX;
+    for _ in 0..5 {
+        let before = native::calls();
+        send().await;
+        fewest = fewest.min(native::calls() - before);
+    }
+    fewest
+}
+
+/// A publish opens no native header list for a record without wire headers: it allocates what the
+/// raw client allocates for the same record.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[tokio::test]
+async fn a_publish_without_wire_headers_costs_what_the_raw_client_costs() {
+    let Some(url) = live::url("KAFKA_TEST_URL") else {
+        return;
+    };
+    let topic = unique("bare-cost");
+    create_topic(&url, &topic).await;
+    let broker = KafkaBroker::new([url.clone()])
+        .connect()
+        .await
+        .expect("connect");
+    let publisher = KafkaPublish::default()
+        .pair(&broker)
+        .await
+        .expect("pair the publisher");
+    let raw: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &url)
+        .create()
+        .expect("raw producer");
+
+    let ours = natively_spent(async || {
+        publisher
+            .publish(OutgoingMessage::new(&topic, BODY), None)
+            .await
+            .map_err(|err| err.to_string())
+            .expect("the cluster accepts the publish");
+    })
+    .await;
+    let theirs = natively_spent(async || {
+        raw.send(
+            FutureRecord::<[u8], [u8]>::to(&topic).payload(BODY),
+            Timeout::Never,
+        )
+        .await
+        .map_err(|(err, _record)| err.to_string())
+        .expect("the cluster accepts the raw publish");
+    })
+    .await;
+
+    assert!(
+        ours <= theirs + BARE_BUDGET,
+        "a publish without wire headers allocates {ours} times where the raw client allocates \
+         {theirs}, which is {} over the budget of {BARE_BUDGET}",
+        ours - theirs - BARE_BUDGET,
     );
 }

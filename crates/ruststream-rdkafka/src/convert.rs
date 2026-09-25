@@ -62,20 +62,23 @@ pub(crate) fn headers_for_publish(headers: &HeaderMap) -> PublishParts {
     // The map owns its values by reference count, so the key travels out of it rather than
     // being copied out.
     let key = headers.get_shared(PARTITION_KEY_HEADER);
-    let mut native = OwnedHeaders::new_with_capacity(headers.len());
-    let mut count = 0;
+    // The native list is opened on the first wire header: librdkafka allocates it, so a record
+    // with no wire header (every reply, unless a transform stamps one) allocates none.
+    let mut native: Option<OwnedHeaders> = None;
     for (name, value) in headers.iter() {
         if !rides_the_wire(name) {
             continue;
         }
-        native = native.insert(Header {
+        let list = native
+            .take()
+            .unwrap_or_else(|| OwnedHeaders::new_with_capacity(headers.len()));
+        native = Some(list.insert(Header {
             key: name,
             value: Some(value),
-        });
-        count += 1;
+        }));
     }
     PublishParts {
-        headers: (count > 0).then_some(native),
+        headers: native,
         key,
     }
 }
