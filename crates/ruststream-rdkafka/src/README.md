@@ -441,7 +441,9 @@ through `b.after_startup(EosPublish::new(id), hook)`.
 
 Every `commit_interval` (100 ms by default) the window closes: the pipeline waits for its
 participants to settle, adds the settled positions and the consumer's group metadata to the
-transaction, and commits. A publish error, a commit error or a settle stall aborts the window
+transaction, and commits. The window's commit runs on the runtime the broker connected on, so
+the publish that opens a window may come from a handler on a dedicated thread whose runtime stops
+afterwards. A publish error, a commit error or a settle stall aborts the window
 instead, the consumers seek back to the last committed offsets, and the whole window replays
 into a fresh transaction. So end-to-end latency is at least the commit interval, a `retry()`
 from a participant stalls its window until the transaction deadline, and the deferred

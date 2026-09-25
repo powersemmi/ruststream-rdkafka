@@ -8,6 +8,9 @@
 
 #![cfg(feature = "testing")]
 
+use std::thread;
+use std::time::Duration;
+
 use futures::{FutureExt as _, Stream, StreamExt};
 use ruststream::testing::{InProcess as _, TestableBroker as _};
 use ruststream::{
@@ -16,10 +19,12 @@ use ruststream::{
     Subscriber, SubscriptionSource as _, TransactionalPublisher,
 };
 use ruststream_rdkafka::{
-    Commit, ConnectedKafkaBroker, KafkaBroker, KafkaError, KafkaMessage, KafkaOptions,
-    KafkaPartitions, KafkaPosition, KafkaPublish, KafkaTopic, KafkaTopics, LaneKey,
-    PARTITION_KEY_HEADER, StartOffset,
+    Commit, ConnectedKafkaBroker, KafkaBroker, KafkaEosPublish, KafkaError, KafkaMessage,
+    KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish, KafkaTopic, KafkaTopics, LaneKey,
+    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
 };
+use tokio::runtime;
+use tokio::sync::oneshot;
 
 /// The production broker as a service configures it, connected in process: its address is never
 /// dialled.
@@ -186,6 +191,77 @@ async fn an_auto_commit_requeue_is_unsupported_and_brings_nothing_back() {
         ready(&mut stream).is_none(),
         "the group committed past the record"
     );
+}
+
+/// A handler on a dedicated thread may be the one whose publish opens an exactly-once window,
+/// from a runtime that stops afterwards. The window's commit is the pipeline's own task and runs
+/// on the runtime the broker connected on, so the window still commits and its record becomes
+/// visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_opened_from_a_stopped_runtime_still_commits() {
+    let broker = connected().await;
+    publish(&broker, "eos-foreign-in", b"a").await;
+    let pipeline = KafkaEosPublish::new("eos-foreign")
+        .commit_interval(Duration::from_millis(50))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
+    let mut subscriber = KafkaTopic::new("eos-foreign-in")
+        .group("eos-foreign-workers")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Transactional("eos-foreign".into()))
+        .subscribe(&broker)
+        .await
+        .expect("subscribe the input");
+    let mut output = tracked("eos-foreign-out", "eos-foreign-readers")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe the output");
+
+    let mut input = Box::pin(subscriber.stream());
+    let msg = ready(&mut input).expect("the input record");
+    let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+    let forwarding = pipeline.clone();
+    on_foreign_runtime(async move || {
+        forwarding
+            .publish(
+                &source,
+                OutgoingMessage::new("eos-foreign-out", b"a".as_slice()),
+                None,
+            )
+            .await
+            .expect("the publish opens the window");
+    })
+    .await;
+    msg.ack().await.expect("ack");
+
+    let mut output = Box::pin(output.stream());
+    let committed = tokio::time::timeout(Duration::from_secs(5), output.next())
+        .await
+        .expect("a window opened from a stopped runtime must still commit")
+        .expect("the output stream is open")
+        .expect("a delivery, not an error");
+    assert_eq!(committed.payload(), b"a");
+}
+
+/// Runs `work` on a single-threaded runtime of its own thread, stopped as soon as `work` returns,
+/// the way a handler on a dedicated thread publishes.
+async fn on_foreign_runtime<Output: Send + 'static>(
+    work: impl AsyncFnOnce() -> Output + Send + 'static,
+) -> Output {
+    let (done, finished) = oneshot::channel();
+    thread::spawn(move || {
+        let runtime = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        let output = runtime.block_on(work());
+        drop(runtime);
+        let _ = done.send(output);
+    });
+    finished
+        .await
+        .expect("the foreign runtime's work completes")
 }
 
 /// A tracked subscription reading `topic` in `group`, from the start of the log.

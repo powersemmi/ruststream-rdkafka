@@ -490,7 +490,14 @@ impl EosPipeline {
                 Self::enroll(&mut window, &self.inner.session_low, source);
                 let epoch = window.epoch;
                 drop(window);
-                tokio::spawn(run_window(Arc::clone(&self.inner), epoch));
+                // On the runtime the broker connected on, not the publishing caller's: the
+                // publish that opens a window may come from a handler on a dedicated thread,
+                // whose runtime may stop while the window still has to commit.
+                self.inner
+                    .publisher
+                    .state()
+                    .runtime()
+                    .spawn(run_window(Arc::clone(&self.inner), epoch));
                 self.inner.phase_changed.notify_waiters();
                 Ok(epoch)
             }
