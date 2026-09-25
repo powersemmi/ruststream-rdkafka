@@ -129,7 +129,7 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 [发布](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) 讲发布策略、记录 key 与显式分区、投递保证、事务与精确一次管线。
 [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) 讲 Confluent 信封，旁边是
 [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) 和 [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html)，
-[`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) 讲进程内 Broker。
+[测试](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) 讲如何在 `TestApp` 下运行服务自己的应用：在进程内，或连接运行中的 Kafka。
 
 安装、教程和 Broker 列表在框架自己的站点上：
 <https://powersemmi.github.io/ruststream/>。

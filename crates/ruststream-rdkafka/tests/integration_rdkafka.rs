@@ -7,9 +7,9 @@
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features -- --test-threads=1
 //! ```
 //!
-//! These cover exactly what the in-process test broker does not simulate: consumer groups,
-//! committed positions across subscriber restarts, the two commit modes, start offsets, and
-//! native-key partitioning.
+//! These run the transport against the cluster itself: consumer groups, committed positions
+//! across subscriber restarts, the commit modes, start offsets, native-key partitioning over
+//! topics with several partitions, and transactions.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -2129,8 +2129,8 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
 }
 
 // The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
-// batch-scoped context - is application-level behaviour, so it is exercised over the in-process
-// transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
+// batch-scoped context - is application-level behaviour, so it is exercised on the production
+// app with `TestApp` in `tests/harness.rs`. What lives here is the transport itself:
 // that a real consumer moves, and that the offset bookkeeping follows it (see
 // `a_seek_moves_the_tracked_watermark_with_the_read_position` and
 // `positions_reach_every_assigned_partition_and_report_bad_targets` above).
@@ -2266,9 +2266,8 @@ impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
     }
 }
 
-// The round-robin cycle is a producer-side placement, and only a topic with real partitions can
-// show where a record went: the in-process transport gives every topic one partition and records
-// the setting instead of honouring it.
+// The round-robin cycle is a producer-side placement, and only a topic created with several
+// partitions can show where a record went, so the test creates one on the cluster.
 #[subscriber(
     KafkaTopic::new(std::env::var("SPREAD_IN_TOPIC").expect("topic env"))
         .group("spread-svc")

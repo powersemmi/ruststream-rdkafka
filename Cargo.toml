@@ -45,6 +45,8 @@ apache-avro = { version = "0.22", features = ["derive"] }
 prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
+# The in-process cluster's pattern subscriptions, behind the `testing` feature.
+regex = "1"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

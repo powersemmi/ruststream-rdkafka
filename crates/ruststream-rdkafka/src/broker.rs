@@ -1,8 +1,17 @@
 //! The broker ladder: the unconnected handle, the connected form, and the terminal witness.
 
+// Without the `testing` feature a transport enum has one variant, so a `match` on it has a single
+// arm; the matches stay so the in-process arm has its place when the feature is on.
+#![cfg_attr(
+    not(feature = "testing"),
+    allow(clippy::infallible_destructuring_match)
+)]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+#[cfg(all(feature = "testing", not(feature = "schema-registry")))]
+use std::future::ready;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -10,6 +19,8 @@ use std::time::Duration;
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{BaseProducer, FutureProducer, Producer as _};
 use rdkafka::{ClientConfig, Offset, TopicPartitionList};
+#[cfg(feature = "testing")]
+use ruststream::testing::InProcess;
 use ruststream::{
     AddressedCopies, Broker, ConnectedBroker, DescribeServer, ServerSpec, Str, Subscribe,
     SubscriptionSource,
@@ -18,18 +29,25 @@ use tokio::task;
 
 use crate::eos::EosSource;
 use crate::error::KafkaError;
+#[cfg(feature = "testing")]
+use crate::in_process::{Cluster, MemberSpec, ProducerSettings};
 use crate::publisher::{KafkaPublish, KafkaPublisher};
+#[cfg(feature = "schema-registry")]
+use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
 use crate::subscriber::{DeliveredTopic, KafkaSubscriber};
-use crate::subscription::{Commit, KafkaTopic, Reader, StartOffset, SubscriptionPlan};
+use crate::subscription::{
+    Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan,
+};
+#[cfg(feature = "testing")]
+use crate::testable::Routes;
 use crate::tracker::{CommitTracker, TrackingContext};
 
 /// The live client state behind [`ConnectedKafkaBroker`]: the shared producer every publisher
 /// clones from, the resolved configurations subscriptions and transactional producers derive
 /// from, and the registry of exactly-once sources.
 pub(crate) struct ConnState {
-    /// The shared producer, opened by the first publish. A service that only consumes leaves it
-    /// empty and runs no producer client at all.
-    producer: OnceLock<FutureProducer>,
+    /// What the connection speaks over.
+    transport: Transport,
     producer_config: ClientConfig,
     base_config: ClientConfig,
     default_group: Option<String>,
@@ -42,10 +60,44 @@ pub(crate) struct ConnState {
     /// still reachable, so their liveness is the one part of the contract that stays dynamic.
     closed: AtomicBool,
     #[cfg(feature = "schema-registry")]
-    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    schema_registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
-    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    schema_prefetch: Option<SchemaPrefetch>,
+    /// What every subscription of this connection reads, which is how the test harness answers
+    /// where a publish is delivered.
+    #[cfg(feature = "testing")]
+    pub(crate) routes: Routes,
 }
+
+/// The error of a librdkafka operation reached on a connection to the in-process cluster, which
+/// every such operation routes around.
+#[cfg(feature = "testing")]
+fn in_process_has_no_client() -> KafkaError {
+    KafkaError::InvalidOptions(
+        "the in-process connection has no librdkafka client; this operation belongs to a \
+         connection made with `connect`"
+            .to_owned(),
+    )
+}
+
+/// What a connection speaks over: the cluster through librdkafka, or, under the `testing`
+/// feature, the in-process cluster the test harness connected instead.
+///
+/// Without the feature there is one variant, so the type is the producer cell itself and every
+/// `match` on it is irrefutable: a production build carries no second transport and no branch to
+/// it.
+pub(crate) enum Transport {
+    /// The shared producer, opened by the first publish. A service that only consumes leaves it
+    /// empty and runs no producer client at all.
+    Kafka(OnceLock<FutureProducer>),
+    #[cfg(feature = "testing")]
+    InProcess(Arc<Cluster>),
+}
+
+// The zero-cost promise of the in-process mode, held by the compiler: a build without it gives
+// the transport exactly the size of the producer cell it wraps.
+#[cfg(not(feature = "testing"))]
+const _: () = assert!(size_of::<Transport>() == size_of::<OnceLock<FutureProducer>>());
 
 impl ConnState {
     /// The shared producer, opening it on the first ask.
@@ -56,7 +108,12 @@ impl ConnState {
     /// configuration itself was accepted at connect, so what is left here is a resource the
     /// client could not take.
     pub(crate) fn producer(&self) -> Result<&FutureProducer, KafkaError> {
-        if let Some(producer) = self.producer.get() {
+        let cell = match &self.transport {
+            Transport::Kafka(cell) => cell,
+            #[cfg(feature = "testing")]
+            Transport::InProcess(_) => return Err(in_process_has_no_client()),
+        };
+        if let Some(producer) = cell.get() {
             return Ok(producer);
         }
         let opened: FutureProducer = self
@@ -65,8 +122,17 @@ impl ConnState {
             .map_err(|err| KafkaError::Publish(Box::new(err)))?;
         // A concurrent first publish may have won the cell; its producer is the one everything
         // uses from here, and the loser's is dropped unused.
-        let _ = self.producer.set(opened);
-        Ok(self.producer.get().expect("the cell holds a producer"))
+        let _ = cell.set(opened);
+        Ok(cell.get().expect("the cell holds a producer"))
+    }
+
+    /// The in-process cluster this connection speaks to, when the harness connected it.
+    #[cfg(feature = "testing")]
+    pub(crate) fn in_process(&self) -> Option<&Arc<Cluster>> {
+        match &self.transport {
+            Transport::Kafka(_) => None,
+            Transport::InProcess(cluster) => Some(cluster),
+        }
     }
 
     pub(crate) fn producer_config(&self) -> &ClientConfig {
@@ -150,9 +216,9 @@ pub struct KafkaBroker {
     connect_timeout: Duration,
     flush_timeout: Duration,
     #[cfg(feature = "schema-registry")]
-    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    schema_registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
-    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    schema_prefetch: Option<SchemaPrefetch>,
 }
 
 impl KafkaBroker {
@@ -226,7 +292,7 @@ impl KafkaBroker {
         self
     }
 
-    /// Attaches a [`SchemaRegistry`](crate::schema_registry::SchemaRegistry) client to the
+    /// Attaches a [`SchemaRegistry`](SchemaRegistry) client to the
     /// consume edge: every subscription transcodes Confluent-framed deliveries to plain JSON
     /// on its (async) delivery path, before they reach the synchronous codec - so handlers
     /// stay ordinary serde types on the default `json` codec, streams and batches alike.
@@ -236,12 +302,12 @@ impl KafkaBroker {
     /// app-wide with `RustStream::publish_layer`.
     #[cfg(feature = "schema-registry")]
     #[must_use]
-    pub fn schema_registry(mut self, registry: crate::schema_registry::SchemaRegistry) -> Self {
+    pub fn schema_registry(mut self, registry: SchemaRegistry) -> Self {
         self.schema_registry = Some(registry);
         self
     }
 
-    /// Attaches a [`SchemaPrefetch`](crate::schema_registry::SchemaPrefetch), the async half of
+    /// Attaches a [`SchemaPrefetch`](SchemaPrefetch), the async half of
     /// a registry-backed codec: [`connect`](ruststream::Broker::connect) resolves the subjects
     /// its codecs publish under, and every subscription resolves the writer schema an arriving
     /// envelope names - both before the synchronous codec runs, which is the only way a sync
@@ -255,7 +321,7 @@ impl KafkaBroker {
     /// envelope, but the pairing is a configuration mistake either way.
     #[cfg(feature = "schema-registry")]
     #[must_use]
-    pub fn schema_prefetch(mut self, prefetch: crate::schema_registry::SchemaPrefetch) -> Self {
+    pub fn schema_prefetch(mut self, prefetch: SchemaPrefetch) -> Self {
         self.schema_prefetch = Some(prefetch);
         self
     }
@@ -321,7 +387,7 @@ impl Broker for KafkaBroker {
         }
 
         let state = Arc::new(ConnState {
-            producer: OnceLock::new(),
+            transport: Transport::Kafka(OnceLock::new()),
             producer_config,
             base_config,
             default_group: self.default_group,
@@ -332,10 +398,77 @@ impl Broker for KafkaBroker {
             schema_registry: self.schema_registry,
             #[cfg(feature = "schema-registry")]
             schema_prefetch: self.schema_prefetch,
+            #[cfg(feature = "testing")]
+            routes: Routes::default(),
         });
         Ok(ConnectedKafkaBroker { state })
     }
 }
+
+/// The in-process mode: the connected form a test runs the production app against, speaking to
+/// an in-process cluster instead of librdkafka and carrying every setting of this broker.
+///
+/// It refuses what [`connect`](Broker::connect) refuses before it reaches the network: no
+/// bootstrap server, a producer property librdkafka does not accept, and a registry subject a
+/// schema prefetch cannot resolve.
+#[cfg(feature = "testing")]
+impl InProcess for KafkaBroker {
+    fn connect_in_process(
+        self,
+    ) -> impl Future<Output = Result<Self::Connected, Self::Error>> + Send {
+        // The schema prefetch is the one step that awaits, and it exists only with the
+        // `schema-registry` feature; without it the transition resolves at once.
+        #[cfg(feature = "schema-registry")]
+        let prefetch = self.schema_prefetch.clone();
+        let connected = self.into_in_process();
+        #[cfg(feature = "schema-registry")]
+        return async move {
+            if let Some(prefetch) = &prefetch {
+                prefetch.warm_subjects().await?;
+            }
+            connected
+        };
+        #[cfg(not(feature = "schema-registry"))]
+        ready(connected)
+    }
+}
+
+#[cfg(feature = "testing")]
+impl KafkaBroker {
+    /// The connected form over a fresh in-process cluster, refusing what `connect` refuses
+    /// before it reaches the network.
+    fn into_in_process(self) -> Result<ConnectedKafkaBroker, KafkaError> {
+        if self.servers.is_empty() {
+            return Err(KafkaError::InvalidOptions(
+                "at least one bootstrap server is required".to_owned(),
+            ));
+        }
+        let base_config = self.base_config();
+        let mut producer_config = base_config.clone();
+        for (key, value) in &self.producer_config {
+            producer_config.set(key, value);
+        }
+        let settings = ProducerSettings::read(&producer_config).map_err(KafkaError::connect)?;
+        let state = Arc::new(ConnState {
+            transport: Transport::InProcess(Cluster::new(settings)),
+            producer_config,
+            base_config,
+            default_group: self.default_group,
+            flush_timeout: self.flush_timeout,
+            eos_sources: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            #[cfg(feature = "schema-registry")]
+            schema_registry: self.schema_registry,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: self.schema_prefetch,
+            routes: Routes::default(),
+        });
+        Ok(ConnectedKafkaBroker { state })
+    }
+}
+
+#[cfg(feature = "testing")]
+ruststream::register_testable_broker!(KafkaBroker);
 
 impl DescribeServer for KafkaBroker {
     /// The bootstrap coordinate clients connect to, one `host:port` per configured address.
@@ -367,7 +500,7 @@ impl KafkaBroker {
         {
             self.schema_registry
                 .as_ref()
-                .and_then(crate::schema_registry::SchemaRegistry::base_url)
+                .and_then(SchemaRegistry::base_url)
         }
         #[cfg(not(feature = "schema-registry"))]
         {
@@ -497,9 +630,65 @@ impl ConnectedKafkaBroker {
             validate_manual_assignment(&plan, group.as_deref())?;
         }
 
-        let def = &plan.settings;
+        let config = self.consumer_config(&plan.settings, group.as_deref());
+        #[cfg(feature = "testing")]
+        self.state.routes.record(&plan, group.as_deref());
+        #[cfg(feature = "testing")]
+        if let Some(cluster) = self.state.in_process() {
+            return self.open_in_process(cluster, plan, group, &config);
+        }
+
+        let tracker = Arc::new(CommitTracker::default());
+        let context = TrackingContext::new(Arc::clone(&tracker), &plan.name);
+        let consumer: StreamConsumer<TrackingContext> = config
+            .create_with_context(context)
+            .map_err(KafkaError::subscribe)?;
+        // Decided here, where the reader still says what was subscribed: a delivery of a
+        // subscription that reads one literal topic needs no name off the record.
+        let delivered_topic = match &plan.reader {
+            Reader::Assigned { topic, partitions } => {
+                assign_partitions(&consumer, topic, partitions, plan.settings.start)?;
+                DeliveredTopic::One(Str::from(topic.as_str()))
+            }
+            Reader::Subscribed(names) => {
+                let literal = match names.as_slice() {
+                    [only] if !only.starts_with('^') => Some(Str::from(only.as_str())),
+                    _ => None,
+                };
+                let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+                consumer
+                    .subscribe(&borrowed)
+                    .map_err(KafkaError::subscribe)?;
+                literal.map_or(DeliveredTopic::PerRecord(None), DeliveredTopic::One)
+            }
+        };
+
+        let consumer = Arc::new(consumer);
+        if let Commit::Transactional(pipeline) = &plan.settings.commit {
+            self.state
+                .register_eos(pipeline, EosSource::new(&tracker, &consumer));
+        }
+        let settings = plan.settings;
+        let subscriber = KafkaSubscriber::new(
+            consumer,
+            plan.name,
+            delivered_topic,
+            settings.commit,
+            tracker,
+            settings.lane_key,
+        );
+        #[cfg(feature = "schema-registry")]
+        let subscriber = subscriber
+            .with_schema_registry(self.state.schema_registry.clone())
+            .with_schema_prefetch(self.state.schema_prefetch.clone());
+        Ok(subscriber)
+    }
+
+    /// The consumer configuration a subscription with `def` settings in `group` reads with: the
+    /// broker's base configuration, the typed options, and the descriptor's passthrough last.
+    fn consumer_config(&self, def: &GroupSettings, group: Option<&str>) -> ClientConfig {
         let mut config = self.state.base_config.clone();
-        if let Some(group) = &group {
+        if let Some(group) = group {
             config.set("group.id", group);
         } else {
             // librdkafka requires a group.id even for assign(); an assign-only consumer
@@ -539,40 +728,52 @@ impl ConnectedKafkaBroker {
         for (key, value) in &def.config {
             config.set(key, value);
         }
+        config
+    }
+}
 
+#[cfg(feature = "testing")]
+impl ConnectedKafkaBroker {
+    /// Opens the member of the in-process cluster a resolved descriptor asks for, with the
+    /// consumer configuration the live path would have created its consumer from.
+    fn open_in_process(
+        &self,
+        cluster: &Arc<Cluster>,
+        plan: SubscriptionPlan,
+        group: Option<String>,
+        config: &ClientConfig,
+    ) -> Result<KafkaSubscriber, KafkaError> {
         let tracker = Arc::new(CommitTracker::default());
-        let context = TrackingContext::new(Arc::clone(&tracker), &plan.name);
-        let consumer: StreamConsumer<TrackingContext> = config
-            .create_with_context(context)
-            .map_err(KafkaError::subscribe)?;
-        // Decided here, where the reader still says what was subscribed: a delivery of a
-        // subscription that reads one literal topic needs no name off the record.
         let delivered_topic = match &plan.reader {
+            Reader::Assigned { topic, .. } => DeliveredTopic::One(Str::from(topic.as_str())),
+            Reader::Subscribed(names) => match names.as_slice() {
+                [only] if !only.starts_with('^') => DeliveredTopic::One(Str::from(only.as_str())),
+                _ => DeliveredTopic::PerRecord(None),
+            },
+        };
+        let (names, assigned) = match &plan.reader {
+            Reader::Subscribed(names) => (Some(names.as_slice()), None),
             Reader::Assigned { topic, partitions } => {
-                assign_partitions(&consumer, topic, partitions, def.start)?;
-                DeliveredTopic::One(Str::from(topic.as_str()))
-            }
-            Reader::Subscribed(names) => {
-                let literal = match names.as_slice() {
-                    [only] if !only.starts_with('^') => Some(Str::from(only.as_str())),
-                    _ => None,
-                };
-                let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
-                consumer
-                    .subscribe(&borrowed)
-                    .map_err(KafkaError::subscribe)?;
-                literal.map_or(DeliveredTopic::PerRecord(None), DeliveredTopic::One)
+                (None, Some((topic.clone(), partitions.clone())))
             }
         };
-
-        let consumer = Arc::new(consumer);
-        if let Commit::Transactional(pipeline) = &def.commit {
+        let spec = MemberSpec::read(
+            plan.name.clone(),
+            group,
+            names,
+            assigned,
+            plan.settings.start,
+            config,
+            Arc::clone(&tracker),
+        )?;
+        let member = cluster.join(spec)?;
+        if let Commit::Transactional(pipeline) = &plan.settings.commit {
             self.state
-                .register_eos(pipeline, EosSource::new(&tracker, &consumer));
+                .register_eos(pipeline, EosSource::in_process(&tracker, &member));
         }
         let settings = plan.settings;
-        let subscriber = KafkaSubscriber::new(
-            consumer,
+        let subscriber = KafkaSubscriber::in_process(
+            member,
             plan.name,
             delivered_topic,
             settings.commit,
@@ -605,8 +806,14 @@ impl ConnectedBroker for ConnectedKafkaBroker {
         // Closed before the flush: a publish racing the teardown must not enter a queue nobody
         // will drain afterwards.
         self.state.closed.store(true, Ordering::Release);
+        let cell = match &self.state.transport {
+            Transport::Kafka(cell) => cell,
+            // The in-process cluster takes a record as it is produced, so nothing is in flight.
+            #[cfg(feature = "testing")]
+            Transport::InProcess(_) => return Ok(ClosedKafkaBroker { unflushed: 0 }),
+        };
         // Nothing published through this connection, so there is nothing to flush.
-        let Some(producer) = self.state.producer.get().cloned() else {
+        let Some(producer) = cell.get().cloned() else {
             return Ok(ClosedKafkaBroker { unflushed: 0 });
         };
         let timeout = self.state.flush_timeout;
@@ -748,7 +955,7 @@ mod tests {
         let Some(url) = live_url() else { return };
         let broker = KafkaBroker::new([url]).connect().await.expect("connect");
         assert!(
-            broker.state.producer.get().is_none(),
+            matches!(&broker.state.transport, Transport::Kafka(cell) if cell.get().is_none()),
             "connecting must open no producer: a service that only consumes never publishes, and \
              a producer is a client, its threads and a connection to the cluster",
         );
@@ -762,7 +969,7 @@ mod tests {
             .await
             .expect("publish");
         assert!(
-            broker.state.producer.get().is_some(),
+            matches!(&broker.state.transport, Transport::Kafka(cell) if cell.get().is_some()),
             "the first publish opens the producer",
         );
 

@@ -9,6 +9,8 @@ use std::task::{Context, Poll};
 
 #[cfg(feature = "schema-registry")]
 use bytes::Bytes;
+#[cfg(feature = "testing")]
+use futures::future::Either;
 use futures::{Stream, ready};
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
@@ -20,8 +22,12 @@ use tracing::{debug, warn};
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
+#[cfg(feature = "testing")]
+use crate::in_process::Member;
 use crate::message::{KafkaMessage, Lane, Settlement};
 use crate::record::{HeldRecord, SharedConsumer};
+#[cfg(feature = "schema-registry")]
+use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
 use crate::tracker::{CommitTracker, TrackingContext};
@@ -86,7 +92,8 @@ impl DeliveredTopic {
 /// friends, settable through [`KafkaTopic::config`](crate::KafkaTopic::config)) cap local
 /// buffering.
 pub struct KafkaSubscriber {
-    consumer: Arc<StreamConsumer<TrackingContext>>,
+    /// What the subscription reads through.
+    source: Source,
     topic: String,
     /// Where a delivery's topic name comes from; see [`DeliveredTopic`].
     delivered_topic: DeliveredTopic,
@@ -97,13 +104,27 @@ pub struct KafkaSubscriber {
     /// context can hand out the reposition handle for one reference-count bump.
     seeker: Arc<KafkaSeeker>,
     #[cfg(feature = "schema-registry")]
-    schema_registry: Option<crate::schema_registry::SchemaRegistry>,
+    schema_registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
-    schema_prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    schema_prefetch: Option<SchemaPrefetch>,
     /// Whether the subscriber is inside an episode of transient consume errors; the first
     /// error of an episode warns, repeats are debug, recovery closes the episode.
     in_transient_episode: bool,
 }
+
+/// What a subscription reads through: its librdkafka consumer, or, under the `testing` feature,
+/// its member of the in-process cluster.
+///
+/// Without the feature there is one variant, so the type is the consumer handle itself and every
+/// `match` on it is irrefutable.
+enum Source {
+    Kafka(SharedConsumer),
+    #[cfg(feature = "testing")]
+    InProcess(Arc<Member>),
+}
+
+#[cfg(not(feature = "testing"))]
+const _: () = assert!(size_of::<Source>() == size_of::<SharedConsumer>());
 
 impl KafkaSubscriber {
     pub(crate) fn new(
@@ -119,7 +140,34 @@ impl KafkaSubscriber {
             Arc::clone(&tracker),
         ));
         Self {
-            consumer,
+            source: Source::Kafka(consumer),
+            topic,
+            delivered_topic,
+            commit,
+            tracker,
+            lane_key,
+            seeker,
+            #[cfg(feature = "schema-registry")]
+            schema_registry: None,
+            #[cfg(feature = "schema-registry")]
+            schema_prefetch: None,
+            in_transient_episode: false,
+        }
+    }
+
+    /// A subscription reading through its member of the in-process cluster.
+    #[cfg(feature = "testing")]
+    pub(crate) fn in_process(
+        member: Arc<Member>,
+        topic: String,
+        delivered_topic: DeliveredTopic,
+        commit: Commit,
+        tracker: Arc<CommitTracker>,
+        lane_key: LaneKey,
+    ) -> Self {
+        let seeker = Arc::new(KafkaSeeker::in_process(Arc::clone(&member)));
+        Self {
+            source: Source::InProcess(member),
             topic,
             delivered_topic,
             commit,
@@ -135,19 +183,13 @@ impl KafkaSubscriber {
     }
 
     #[cfg(feature = "schema-registry")]
-    pub(crate) fn with_schema_registry(
-        mut self,
-        registry: Option<crate::schema_registry::SchemaRegistry>,
-    ) -> Self {
+    pub(crate) fn with_schema_registry(mut self, registry: Option<SchemaRegistry>) -> Self {
         self.schema_registry = registry;
         self
     }
 
     #[cfg(feature = "schema-registry")]
-    pub(crate) fn with_schema_prefetch(
-        mut self,
-        prefetch: Option<crate::schema_registry::SchemaPrefetch>,
-    ) -> Self {
+    pub(crate) fn with_schema_prefetch(mut self, prefetch: Option<SchemaPrefetch>) -> Self {
         self.schema_prefetch = prefetch;
         self
     }
@@ -292,9 +334,16 @@ impl Subscriber for KafkaSubscriber {
     fn stream(&mut self) -> impl Stream<Item = Result<Self::Message, Self::Error>> + Send + '_ {
         // Cloned once per stream and never per delivery: a wait owns the handles it needs, so
         // it borrows nothing from the stream that holds it.
-        let context = Arc::clone(self.consumer.context());
-        let consumer = Arc::clone(&self.consumer);
-        KafkaStream {
+        let consumer = match &self.source {
+            Source::Kafka(consumer) => Arc::clone(consumer),
+            #[cfg(feature = "testing")]
+            Source::InProcess(member) => {
+                let member = Arc::clone(member);
+                return Either::Right(in_process::stream(self, member));
+            }
+        };
+        let context = Arc::clone(consumer.context());
+        let stream = KafkaStream {
             #[cfg(feature = "schema-registry")]
             registry: self.schema_registry.clone(),
             #[cfg(feature = "schema-registry")]
@@ -305,7 +354,10 @@ impl Subscriber for KafkaSubscriber {
             context,
             consumer,
             waiting: None,
-        }
+        };
+        #[cfg(feature = "testing")]
+        let stream = Either::Left(stream);
+        stream
     }
 }
 
@@ -327,9 +379,9 @@ pub(crate) struct KafkaStream<'a> {
     /// The registry middleware, held here rather than reached through the subscriber, so the
     /// future below owns what it reads.
     #[cfg(feature = "schema-registry")]
-    registry: Option<crate::schema_registry::SchemaRegistry>,
+    registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
-    prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    prefetch: Option<SchemaPrefetch>,
     /// The registry's own async step, for the deliveries that have one. A subscription with no
     /// registry attached never builds it.
     #[cfg(feature = "schema-registry")]
@@ -374,8 +426,8 @@ async fn cold_turn(context: Arc<TrackingContext>, consumer: SharedConsumer) -> C
 /// JSON document. The two are alternatives anyway.
 #[cfg(feature = "schema-registry")]
 async fn finish_delivery(
-    registry: Option<crate::schema_registry::SchemaRegistry>,
-    prefetch: Option<crate::schema_registry::SchemaPrefetch>,
+    registry: Option<SchemaRegistry>,
+    prefetch: Option<SchemaPrefetch>,
     mut item: KafkaMessage,
 ) -> KafkaMessage {
     if let Some(prefetch) = &prefetch {
@@ -503,10 +555,17 @@ impl BatchSubscriber for KafkaSubscriber {
         size: NonZeroUsize,
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
-        let context = Arc::clone(self.consumer.context());
         // See `stream`: the consumer is held beside the subscriber, not through it.
-        let consumer = Arc::clone(&self.consumer);
-        futures::stream::unfold(
+        let consumer = match &self.source {
+            Source::Kafka(consumer) => Arc::clone(consumer),
+            #[cfg(feature = "testing")]
+            Source::InProcess(member) => {
+                let member = Arc::clone(member);
+                return Either::Right(in_process::batches(self, member, size));
+            }
+        };
+        let context = Arc::clone(consumer.context());
+        let batches = futures::stream::unfold(
             (self, context, consumer),
             move |(sub, context, consumer)| async move {
                 // Wait for the batch's first delivery, or for a start position the rebalance could
@@ -556,6 +615,102 @@ impl BatchSubscriber for KafkaSubscriber {
                     sub.transcode(item).await;
                 }
                 Some((Ok(batch), (sub, context, consumer)))
+            },
+        );
+        #[cfg(feature = "testing")]
+        let batches = Either::Left(batches);
+        batches
+    }
+}
+
+/// The in-process arm of the subscriber: the same deliveries, fetched from the subscription's
+/// member of the in-process cluster.
+#[cfg(feature = "testing")]
+mod in_process {
+    use std::sync::Arc;
+
+    use futures::Stream;
+
+    use super::KafkaSubscriber;
+    use crate::error::KafkaError;
+    use crate::in_process::{InProcessRecord, Member};
+    use crate::message::KafkaMessage;
+    use crate::record::HeldRecord;
+
+    /// Turns a fetched record into a delivery.
+    fn deliver(sub: &mut KafkaSubscriber, record: InProcessRecord) -> KafkaMessage {
+        sub.map_delivery(HeldRecord::InProcess(Box::new(record)))
+    }
+
+    /// Runs the registry middleware over a delivery, as the live stream does.
+    #[cfg(feature = "schema-registry")]
+    async fn finish(sub: &KafkaSubscriber, item: KafkaMessage) -> KafkaMessage {
+        super::finish_delivery(
+            sub.schema_registry.clone(),
+            sub.schema_prefetch.clone(),
+            item,
+        )
+        .await
+    }
+
+    pub(super) fn stream(
+        sub: &mut KafkaSubscriber,
+        member: Arc<Member>,
+    ) -> impl Stream<Item = Result<KafkaMessage, KafkaError>> + Send + '_ {
+        futures::stream::unfold((sub, member), async move |(sub, member)| {
+            let item = match member.next().await {
+                Ok(record) => {
+                    let item = deliver(sub, record);
+                    #[cfg(feature = "schema-registry")]
+                    let item = finish(sub, item).await;
+                    Ok(item)
+                }
+                Err(err) => Err(err),
+            };
+            Some((item, (sub, member)))
+        })
+    }
+
+    pub(super) fn batches(
+        sub: &mut KafkaSubscriber,
+        member: Arc<Member>,
+        size: usize,
+    ) -> impl Stream<Item = Result<Vec<KafkaMessage>, KafkaError>> + Send + '_ {
+        // The size rides the state: an async closure that captured it could not be called again.
+        futures::stream::unfold(
+            (sub, member, size, None::<KafkaError>),
+            async move |(sub, member, size, failed)| {
+                if let Some(err) = failed {
+                    return Some((Err(err), (sub, member, size, None)));
+                }
+                let first = match member.next().await {
+                    Ok(record) => record,
+                    Err(err) => return Some((Err(err), (sub, member, size, None))),
+                };
+                let mut batch = Vec::with_capacity(size.min(64));
+                batch.push(deliver(sub, first));
+                let mut failed = None;
+                while batch.len() < size {
+                    match member.fetch() {
+                        Some(Ok(record)) => batch.push(deliver(sub, record)),
+                        // A failure inside an open batch yields the batch first, as the live
+                        // subscriber does, and surfaces on the next poll.
+                        Some(Err(err)) => {
+                            failed = Some(err);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                #[cfg(feature = "schema-registry")]
+                let batch = {
+                    let mut finished = Vec::with_capacity(batch.len());
+                    for item in batch {
+                        finished.push(finish(sub, item).await);
+                    }
+                    finished
+                };
+                Some((Ok(batch), (sub, member, size, failed)))
             },
         )
     }

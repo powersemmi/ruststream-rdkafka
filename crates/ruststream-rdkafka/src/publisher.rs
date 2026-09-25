@@ -1,5 +1,12 @@
 //! The publish policies and the live publishers they pair into, transactions included.
 
+// Without the `testing` feature a transport enum has one variant, so a `match` on it has a single
+// arm; the matches stay so the in-process arm has its place when the feature is on.
+#![cfg_attr(
+    not(feature = "testing"),
+    allow(clippy::infallible_destructuring_match)
+)]
+
 use std::collections::HashMap;
 use std::fmt;
 use std::future::{Future, ready};
@@ -20,9 +27,14 @@ use ruststream::{
 use tokio::sync::OnceCell;
 use tokio::task;
 
+#[cfg(feature = "testing")]
+use ruststream::Str;
+
 use crate::broker::{ConnState, ConnectedKafkaBroker};
 use crate::convert;
 use crate::error::KafkaError;
+#[cfg(feature = "testing")]
+use crate::in_process::{Cluster, ProducerId};
 
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -325,8 +337,29 @@ impl Publisher for KafkaPublisher {
         options: Option<&Self::Options>,
     ) -> Result<(), Self::Error> {
         self.state.ensure_open(msg.name())?;
+        #[cfg(feature = "testing")]
+        if let Some(cluster) = self.state.in_process() {
+            return produce_in_process(cluster, &msg, options, None);
+        }
         send_via(self.state.producer()?, self.queue_timeout, msg, options).await
     }
+}
+
+/// Hands one record to the in-process cluster, as `send_via` hands it to librdkafka.
+#[cfg(feature = "testing")]
+fn produce_in_process(
+    cluster: &Cluster,
+    msg: &OutgoingMessage<'_>,
+    options: Option<&KafkaOptions>,
+    transaction: Option<&ProducerId>,
+) -> Result<(), KafkaError> {
+    cluster.produce(
+        msg.name(),
+        options.and_then(|options| options.partition_setting()),
+        msg.payload(),
+        msg.headers(),
+        transaction,
+    )
 }
 
 /// The publish policy of [`KafkaTransactionalPublisher`]: the transactional mode as its own
@@ -394,14 +427,6 @@ impl KafkaTransactionalPublish {
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
-    }
-
-    /// Consumes the policy for its transactional id, so a live publisher can take ownership of
-    /// the string instead of cloning it. Only the in-process publisher needs it; the real one
-    /// keeps the whole policy while it creates its producer.
-    #[cfg(feature = "testing")]
-    pub(crate) fn into_id(self) -> String {
-        self.id
     }
 
     pub(crate) fn with_id(&self, id: String) -> Self {
@@ -474,6 +499,17 @@ pub(crate) async fn open_transactional(
     state.ensure_open(policy.id())?;
     let mut config = state.producer_config().clone();
     config.set("transactional.id", policy.id());
+    #[cfg(feature = "testing")]
+    if let Some(cluster) = state.in_process() {
+        // The configuration is validated as the live producer's creation would validate it, and
+        // the pairing fences every earlier one with this id, as `init_transactions` does.
+        config.create_native_config().map_err(KafkaError::publish)?;
+        let producer = TxProducer::InProcess {
+            cluster: Arc::clone(cluster),
+            id: cluster.init_transactions(policy.id()),
+        };
+        return Ok(KafkaTransactionalPublisher::with(state, producer, policy));
+    }
     let producer: FutureProducer = config.create().map_err(KafkaError::publish)?;
     // init_transactions blocks (it fences earlier producers with this id), so it runs on the
     // blocking pool.
@@ -483,21 +519,32 @@ pub(crate) async fn open_transactional(
         .await
         .map_err(|err| KafkaError::Publish(Box::new(err)))?
         .map_err(KafkaError::publish)?;
-    Ok(KafkaTransactionalPublisher {
-        inner: Arc::new(TxInner {
-            state: Arc::clone(state),
-            producer,
-            queue_timeout: policy.queue_timeout,
-            timeout,
-            id: policy.id.clone(),
-            open: Mutex::new(false),
-        }),
-    })
+    Ok(KafkaTransactionalPublisher::with(
+        state,
+        TxProducer::Kafka(producer),
+        policy,
+    ))
 }
+
+/// The producer a transactional publisher runs its transactions on: a librdkafka producer, or,
+/// under the `testing` feature, a producer id paired with the in-process cluster.
+///
+/// Without the feature there is one variant, so the type is the producer itself.
+enum TxProducer {
+    Kafka(FutureProducer),
+    #[cfg(feature = "testing")]
+    InProcess {
+        cluster: Arc<Cluster>,
+        id: ProducerId,
+    },
+}
+
+#[cfg(not(feature = "testing"))]
+const _: () = assert!(size_of::<TxProducer>() == size_of::<FutureProducer>());
 
 struct TxInner {
     state: Arc<ConnState>,
-    producer: FutureProducer,
+    producer: TxProducer,
     queue_timeout: Option<Duration>,
     timeout: Duration,
     id: String,
@@ -531,6 +578,23 @@ impl fmt::Debug for KafkaTransactionalPublisher {
 }
 
 impl KafkaTransactionalPublisher {
+    fn with(
+        state: &Arc<ConnState>,
+        producer: TxProducer,
+        policy: &KafkaTransactionalPublish,
+    ) -> Self {
+        Self {
+            inner: Arc::new(TxInner {
+                state: Arc::clone(state),
+                producer,
+                queue_timeout: policy.queue_timeout,
+                timeout: policy.transaction_timeout,
+                id: policy.id.clone(),
+                open: Mutex::new(false),
+            }),
+        }
+    }
+
     /// The transactional id fencing this publisher.
     #[must_use]
     pub fn id(&self) -> &str {
@@ -579,7 +643,15 @@ impl KafkaTransactionalPublisher {
         if !self.is_open() {
             return Err(self.no_transaction());
         }
-        let producer = self.inner.producer.clone();
+        let producer = match &self.inner.producer {
+            TxProducer::Kafka(producer) => producer.clone(),
+            #[cfg(feature = "testing")]
+            TxProducer::InProcess { .. } => {
+                return Err(KafkaError::InvalidOptions(
+                    "librdkafka offsets reached an in-process transaction".to_owned(),
+                ));
+            }
+        };
         let timeout = self.inner.timeout;
         task::spawn_blocking(move || {
             producer.send_offsets_to_transaction(&offsets, &metadata, timeout)
@@ -587,6 +659,28 @@ impl KafkaTransactionalPublisher {
         .await
         .map_err(|err| KafkaError::Publish(Box::new(err)))?
         .map_err(KafkaError::publish)
+    }
+}
+
+#[cfg(feature = "testing")]
+impl KafkaTransactionalPublisher {
+    /// Adds consumed positions to the open transaction on the in-process cluster, to commit into
+    /// `group` with it: the in-process counterpart of [`send_offsets`](Self::send_offsets).
+    pub(crate) fn send_offsets_in_process(
+        &self,
+        group: &str,
+        positions: &[((Str, i32), i64)],
+    ) -> Result<(), KafkaError> {
+        self.inner.state.ensure_open(&self.inner.id)?;
+        if !self.is_open() {
+            return Err(self.no_transaction());
+        }
+        match &self.inner.producer {
+            TxProducer::InProcess { cluster, id } => cluster.send_offsets(id, group, positions),
+            TxProducer::Kafka(_) => Err(KafkaError::InvalidOptions(
+                "in-process offsets reached a librdkafka transaction".to_owned(),
+            )),
+        }
     }
 }
 
@@ -615,8 +709,16 @@ impl Publisher for KafkaTransactionalPublisher {
         options: Option<&Self::Options>,
     ) -> Result<(), Self::Error> {
         self.inner.state.ensure_open(msg.name())?;
+        let producer = match &self.inner.producer {
+            TxProducer::Kafka(producer) => producer,
+            #[cfg(feature = "testing")]
+            TxProducer::InProcess { cluster, id } => {
+                let transaction = self.is_open().then_some(id);
+                return produce_in_process(cluster, &msg, options, transaction);
+            }
+        };
         if self.is_open() {
-            return send_via(&self.inner.producer, self.inner.queue_timeout, msg, options).await;
+            return send_via(producer, self.inner.queue_timeout, msg, options).await;
         }
         send_via(
             self.inner.state.producer()?,
@@ -660,8 +762,15 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
                 }));
             }
             // A rejected begin leaves the open transaction untouched, per the trait contract.
-            if let Err(err) = self.inner.producer.begin_transaction() {
-                return ready(Err(KafkaError::publish(err)));
+            let begun = match &self.inner.producer {
+                TxProducer::Kafka(producer) => {
+                    producer.begin_transaction().map_err(KafkaError::publish)
+                }
+                #[cfg(feature = "testing")]
+                TxProducer::InProcess { cluster, id } => cluster.begin(id),
+            };
+            if let Err(err) = begun {
+                return ready(Err(err));
             }
             *open = true;
         }
@@ -682,7 +791,17 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
         if !self.is_open() {
             return Err(self.no_transaction());
         }
-        let producer = self.inner.producer.clone();
+        let producer = match &self.inner.producer {
+            TxProducer::Kafka(producer) => producer.clone(),
+            #[cfg(feature = "testing")]
+            TxProducer::InProcess { cluster, id } => {
+                // As on the live path, only a commit that succeeded closes the handle's
+                // transaction; after a failure the caller aborts.
+                cluster.commit(id)?;
+                self.set_open(false);
+                return Ok(());
+            }
+        };
         let timeout = self.inner.timeout;
         task::spawn_blocking(move || producer.commit_transaction(timeout))
             .await
@@ -704,7 +823,15 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
         if !self.is_open() {
             return Err(self.no_transaction());
         }
-        let producer = self.inner.producer.clone();
+        let producer = match &self.inner.producer {
+            TxProducer::Kafka(producer) => producer.clone(),
+            #[cfg(feature = "testing")]
+            TxProducer::InProcess { cluster, id } => {
+                let aborted = cluster.abort(id);
+                self.set_open(false);
+                return aborted;
+            }
+        };
         let timeout = self.inner.timeout;
         let aborted = task::spawn_blocking(move || producer.abort_transaction(timeout))
             .await
@@ -733,15 +860,6 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
 #[must_use]
 pub struct KafkaPartitionedPublish {
     template: KafkaTransactionalPublish,
-}
-
-impl KafkaPartitionedPublish {
-    /// The policy every lane's publisher is derived from, by substituting the per-partition id.
-    /// The live pairing reads the field directly; only the in-process one is out of module.
-    #[cfg(feature = "testing")]
-    pub(crate) const fn template(&self) -> &KafkaTransactionalPublish {
-        &self.template
-    }
 }
 
 impl PublishPolicy<ConnectedKafkaBroker> for KafkaPartitionedPublish {
@@ -879,12 +997,9 @@ impl TransactionalPartitions {
 pub trait PartitionLanes: Send + Sync {
     /// The transactional publisher a lane is handed.
     ///
-    /// An associated type rather than the concrete [`KafkaTransactionalPublisher`], because the
-    /// same capability is offered by more than one transport: the cluster-backed
-    /// [`TransactionalPartitions`] hands out a live producer, and the in-process
-    /// `KafkaTestPartitions` of the `testing` module hands out its own stand-in. A handler
-    /// bounded `Out<impl PartitionLanes>` therefore mounts against either broker unchanged,
-    /// which is the whole point of naming the capability instead of a publisher type.
+    /// An associated type rather than the concrete [`KafkaTransactionalPublisher`]: a handler
+    /// bounds its slot `Out<impl PartitionLanes>` on the capability, and the policy attached at
+    /// the mount site decides the publisher.
     type Publisher: TransactionalPublisher<Error = KafkaError>;
 
     /// The publisher owning `partition`'s transactional id.

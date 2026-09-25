@@ -1,7 +1,7 @@
 <h1 align="center">ruststream-rdkafka</h1>
 
 <p align="center">
-  <i>The Apache Kafka broker for the <a href="https://github.com/powersemmi/ruststream">RustStream</a> messaging framework: consumer groups, precise tracked commits, native record keys, and an in-process test broker.</i>
+  <i>The Apache Kafka broker for the <a href="https://github.com/powersemmi/ruststream">RustStream</a> messaging framework: consumer groups, precise tracked commits, native record keys, and an in-process mode that runs the production app in tests.</i>
 </p>
 
 <p align="center">
@@ -73,8 +73,10 @@ configuration - the runtime climbs the lifecycle ladder around it.
   the way in and frames publishes by the subject's registered flavor on the way out, as
   middleware on the async edges, so handlers and codecs stay on plain JSON. `avro` and
   `protobuf` add those two flavors.
-- **In-process test broker** - the `testing` feature ships `KafkaTestBroker` for application
-  tests with the core `TestApp` harness, no cluster required.
+- **Tests on the production app** - with the `testing` feature, the core `TestApp` harness runs
+  the app `main` runs with `KafkaBroker` connected to an in-process cluster (consumer groups,
+  offsets, transactions), no cluster required; `TestApp::start_live` runs the same test against
+  a real Kafka.
 
 ## Install
 
@@ -87,8 +89,8 @@ serde = { version = "1", features = ["derive"] }
 
 The crate builds librdkafka from source by default (a C toolchain is the only requirement).
 Cargo features: `json` (on by default), `msgpack`, and `cbor` forward the core's codecs;
-`schema-registry`, `avro`, and `protobuf` cover Confluent framing; `testing` ships the
-in-process broker; `ssl` / `ssl-vendored` for TLS and `zstd` for compression map 1:1 onto
+`schema-registry`, `avro`, and `protobuf` cover Confluent framing; `testing` adds the
+in-process mode tests connect the broker through; `ssl` / `ssl-vendored` for TLS and `zstd` for compression map 1:1 onto
 rdkafka's. SASL PLAIN/SCRAM/OAUTHBEARER need no feature - librdkafka implements them
 built-in; other backends (gssapi, dynamic linking, ...) can be enabled by depending on
 `rdkafka` directly, since cargo features are additive across the dependency graph.
@@ -99,7 +101,9 @@ built-in; other backends (gssapi, dynamic linking, ...) can be enabled by depend
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+// `Outgoing`, `PartialEq` and `Serialize` are here for the test below, which publishes an order
+// and asserts on the decoded one.
+#[derive(Debug, Deserialize, Outgoing, PartialEq, Serialize)]
 struct Order {
     id: u64,
 }
@@ -145,15 +149,14 @@ Those policy names come from this crate's prelude, which aliases `KafkaPublish` 
 transitions to the uniform ones, so mount sites read the same on every broker. A handler body
 imports `ruststream::prelude::*` instead and bounds its slot with a capability
 (`Out<impl Publisher>`, `Out<impl TransactionalPublisher>`): it names no broker type, and
-mounts unchanged against the in-process test broker.
+mounts unchanged under whichever policy the routes pair it with.
 
 Full compiling examples: `examples/kafka_quickstart.rs` and `examples/kafka_topics.rs`.
 
 ## Test it
 
-`KafkaTestBroker` stands in for the cluster in-process, and the core `TestApp` harness drives
-the service through the same dispatch path production uses. Include sites do not change: the
-real `KafkaPublish` policy pairs against the test broker too.
+The app `main` runs, handed to the harness unchanged: `TestApp::start` connects `KafkaBroker` to
+an in-process cluster, with no Kafka, and the test addresses the broker by that type.
 
 ```toml
 [dev-dependencies]
@@ -162,37 +165,33 @@ ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 
 ```rust
 use ruststream::testing::TestApp;
-use ruststream_rdkafka::testing::KafkaTestBroker;
 
-// The harness seeds one payload type and reads back the other, so both derive `Serialize`,
-// `Deserialize`, and `PartialEq` here.
-let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
-    .with_broker(KafkaTestBroker::new().default_group("orders-svc"), |b| {
-        b.include(confirm);
-    });
-let tb = TestApp::start(app).await?;
+let tb = TestApp::start(app()).await?;
 
-// `publish` returns once the handlers have settled, so the assertions read finished state.
-tb.broker::<KafkaTestBroker>()
-    .publish("orders", &Order { id: 42 })
+// `publish` returns once the handlers it woke have settled, so the assertions read finished state.
+tb.broker::<KafkaBroker>()
+    .message(&Order { id: 42 })
+    .to("orders")
+    .publish()
     .await?;
 
-tb.broker::<KafkaTestBroker>()
+tb.broker::<KafkaBroker>()
     .subscriber("orders")
     .assert_called_once()
     .with(&Order { id: 42 })
     .settled(HandlerOutcome::ack());
 
-tb.broker::<KafkaTestBroker>()
+tb.broker::<KafkaBroker>()
     .published::<Confirmation>("confirmations")
     .assert_called_once()
     .with(&Confirmation { id: 42 });
 ```
 
-The transport retains what it routes, so `Ctx<Position>`, `Ctx<SeekHandle>` and `start_at(..)`
-work here as well. Consumer groups, real partitions, committed offsets, rebalancing, and
-everything transactional are cluster behavior: exercise those against a live Kafka. Full
-example: `examples/kafka_testing.rs`.
+The in-process cluster reads its settings from the broker and the descriptors, and answers as
+Kafka does: consumer groups share a topic's partitions, offsets commit by the subscription's
+commit mode and outlive its members, a seek moves the partitions a subscription reads, and a
+`read_committed` reader sees a transaction when it commits. `TestApp::start_live(app())` runs
+the same body against a running Kafka. Full example: `examples/kafka_testing.rs`.
 
 ## Scaffold a service
 
@@ -211,7 +210,7 @@ entry point.
 - [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) - policies, record keys, transactions, exactly-once pipelines.
 - [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - Confluent framing, with
   [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it.
-- [`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) - the in-process broker and what it does not simulate.
+- [Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) - the production app under `TestApp`, in process and live.
 - Entry pages, installation and the tutorial: <https://powersemmi.github.io/ruststream/>
 
 ## Contributing

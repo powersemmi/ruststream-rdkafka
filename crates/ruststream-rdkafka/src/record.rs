@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use futures::FutureExt as _;
-use rdkafka::consumer::StreamConsumer;
+use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::error::KafkaError;
 use rdkafka::message::{
     BorrowedHeaders, BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders,
@@ -32,6 +32,8 @@ use rdkafka::message::{
 };
 use yoke::{Yoke, Yokeable};
 
+#[cfg(feature = "testing")]
+use crate::in_process::{InProcessRecord, WireHeader};
 use crate::tracker::TrackingContext;
 
 /// The consumer a subscription reads through, shared with every delivery it produced.
@@ -65,7 +67,16 @@ pub(crate) enum HeldRecord {
         consumer: SharedConsumer,
         message: Box<OwnedMessage>,
     },
+    /// A record of the in-process cluster the test harness connected, behind the `testing`
+    /// feature. Boxed like the copy, so the arm leaves the width of a delivery alone.
+    #[cfg(feature = "testing")]
+    InProcess(Box<InProcessRecord>),
 }
+
+// The in-process arm exists only under `testing`: a production build keeps the two arms it had,
+// and the delivery its width.
+#[cfg(not(feature = "testing"))]
+const _: () = assert!(size_of::<HeldRecord>() == 3 * size_of::<usize>());
 
 impl HeldRecord {
     /// A record librdkafka has already fetched, or `None` when the queue is empty.
@@ -122,20 +133,32 @@ impl HeldRecord {
         .await
     }
 
-    /// The record as librdkafka's own, for the reads that go back to it - `None` for a record
-    /// the wait copied out.
-    pub(crate) fn fetched(&self) -> Option<&BorrowedMessage<'_>> {
+    /// Stores `position` as this subscription's processed position on the record's partition,
+    /// `offset` being the record's own.
+    ///
+    /// The position is the record's own offset whenever nothing below it is still outstanding,
+    /// which is every settle of an in-order handler. There the record answers for its own topic
+    /// and librdkafka takes the position off the record's topic handle, instead of looking one
+    /// up by name (a `CString`, a topic create and a topic destroy under its own lock, per
+    /// message).
+    pub(crate) fn store(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+        position: i64,
+    ) -> Result<(), KafkaError> {
         match self {
-            Self::Fetched(yoke) => Some(&yoke.get().0),
-            Self::Copied { .. } => None,
-        }
-    }
-
-    /// The consumer that fetched this record, alive for as long as the record is.
-    pub(crate) fn consumer(&self) -> &StreamConsumer<TrackingContext> {
-        match self {
-            Self::Fetched(yoke) => yoke.backing_cart(),
-            Self::Copied { consumer, .. } => consumer,
+            Self::Fetched(yoke) if position == offset => {
+                yoke.backing_cart().store_offset_from_message(&yoke.get().0)
+            }
+            Self::Fetched(yoke) => yoke.backing_cart().store_offset(topic, partition, position),
+            Self::Copied { consumer, .. } => consumer.store_offset(topic, partition, position),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => {
+                record.store(topic, partition, position);
+                Ok(())
+            }
         }
     }
 
@@ -144,6 +167,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.topic(),
             Self::Copied { message, .. } => message.topic(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => record.topic(),
         }
     }
 
@@ -152,6 +177,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.partition(),
             Self::Copied { message, .. } => message.partition(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => record.partition(),
         }
     }
 
@@ -160,6 +187,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.offset(),
             Self::Copied { message, .. } => message.offset(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => record.offset(),
         }
     }
 
@@ -168,6 +197,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.timestamp().to_millis(),
             Self::Copied { message, .. } => message.timestamp().to_millis(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => Some(record.timestamp_millis()),
         }
     }
 
@@ -176,6 +207,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.payload().unwrap_or_default(),
             Self::Copied { message, .. } => message.payload().unwrap_or_default(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => record.payload(),
         }
     }
 
@@ -184,6 +217,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.key(),
             Self::Copied { message, .. } => message.key(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => record.key(),
         }
     }
 
@@ -194,6 +229,8 @@ impl HeldRecord {
         match self {
             Self::Fetched(yoke) => yoke.get().0.headers().map(RecordHeaders::Fetched),
             Self::Copied { message, .. } => message.headers().map(RecordHeaders::Copied),
+            #[cfg(feature = "testing")]
+            Self::InProcess(record) => Some(RecordHeaders::InProcess(record.headers())),
         }
     }
 }
@@ -215,6 +252,9 @@ pub(crate) enum RecordHeaders<'a> {
     Fetched(&'a BorrowedHeaders),
     /// Headers of a record the wait copied out.
     Copied(&'a OwnedHeaders),
+    /// Headers of a record of the in-process cluster.
+    #[cfg(feature = "testing")]
+    InProcess(&'a [WireHeader]),
 }
 
 impl RecordHeaders<'_> {
@@ -223,6 +263,8 @@ impl RecordHeaders<'_> {
         match self {
             Self::Fetched(headers) => headers.count(),
             Self::Copied(headers) => headers.count(),
+            #[cfg(feature = "testing")]
+            Self::InProcess(headers) => headers.len(),
         }
     }
 
@@ -231,6 +273,14 @@ impl RecordHeaders<'_> {
         match self {
             Self::Fetched(headers) => headers.get(index),
             Self::Copied(headers) => headers.get(index),
+            #[cfg(feature = "testing")]
+            Self::InProcess(headers) => {
+                let (key, value) = &headers[index];
+                Header {
+                    key,
+                    value: value.as_deref(),
+                }
+            }
         }
     }
 
