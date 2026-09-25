@@ -107,8 +107,10 @@
 //! starting. [`AutoRegister`](MissingSubject::AutoRegister) puts the type's own schema back and
 //! warns, [`PublishUnframed`](MissingSubject::PublishUnframed) writes the bare datum and warns.
 //! [`check_compatibility`](SchemaPrefetch::check_compatibility) is on by default: at `connect`
-//! each registered type's schema is checked against the version its subject holds, so a model
-//! that has drifted stops the app with the registry's own account of the difference.
+//! each registered type's schema is checked the way registering it would be, against the
+//! versions the subject's compatibility level names (every version under a `_TRANSITIVE`
+//! level), so a model that has drifted stops the app with the registry's own account of the
+//! difference.
 //!
 //! The transcoding layer is deliberately lenient where the codec is not. It resolves a subject
 //! for every topic the app publishes to, most of which are not registry-backed, so a subject the
@@ -544,8 +546,9 @@ impl SchemaRegistry {
         Ok(id)
     }
 
-    /// Whether `definition` is compatible with `subject`'s latest version, or `None` when the
-    /// client behind this facade cannot answer.
+    /// Whether the registry would register `definition` under `subject`, judged against the
+    /// versions the subject's compatibility level names, or `None` when the client behind this
+    /// facade cannot answer.
     ///
     /// # Errors
     ///
@@ -954,9 +957,11 @@ pub(crate) struct Registration {
 ///
 /// Two of those describe this crate's *normal* path rather than this enum. Encoding always
 /// writes with the schema the framed id names, which is `use.latest.version` semantics, and
-/// [`SchemaPrefetch::check_compatibility`] is `latest.compatibility.strict`. What is left for
-/// this enum is the one question those settings answer between them: when the subject is not
-/// there at all, does the producer create it, refuse, or go without.
+/// [`SchemaPrefetch::check_compatibility`] stands where `latest.compatibility.strict` does,
+/// judged by the subject's own compatibility level, so a `_TRANSITIVE` level checks the whole
+/// history as registration would. What is left for this enum is the one question those settings
+/// answer between them: when the subject is not there at all, does the producer create it,
+/// refuse, or go without.
 ///
 /// It is an enum rather than the three booleans Confluent uses because the booleans are not
 /// independent - `use.latest.version` means nothing while auto-registration is on - and a
@@ -1019,13 +1024,18 @@ impl SchemaPrefetch {
         }
     }
 
-    /// Whether `connect` checks each registered type's schema against the version its subject
-    /// already holds, and refuses to start when the registry says they are incompatible.
+    /// Whether `connect` checks each registered type's schema the way registering it would be
+    /// checked, and refuses to start when the registry says they are incompatible.
     ///
-    /// This is Confluent's `latest.compatibility.strict`, and on for the same reason it is on by
-    /// default there: a model that has drifted from its subject is a fact worth learning while
-    /// the app is starting rather than from a consumer that cannot read what it wrote. The
-    /// registry's own account of what differs, down to the field, travels in the error.
+    /// The subject's compatibility level decides the versions the schema is held against: the
+    /// latest one for `BACKWARD`, `FORWARD` and `FULL`, every version for their `_TRANSITIVE`
+    /// forms. A schema this check passes is one the registry would accept.
+    ///
+    /// It stands where Confluent's `latest.compatibility.strict` does, and is on for the same
+    /// reason it is on by default there: a model that has drifted from its subject is a fact
+    /// worth learning while the app is starting rather than from a consumer that cannot read what
+    /// it wrote. The registry's own account of what differs, down to the field, travels in the
+    /// error.
     ///
     /// Turn it off for a registry whose compatibility level is deliberately `NONE`, or a client
     /// that cannot answer the question - a [`RegistryClient`] that does not implement
@@ -1701,6 +1711,52 @@ mod tests {
         frame.frame(&mut out).await.expect("frame");
         let (id, _) = parse_envelope(out.payload()).expect("framed");
         assert_eq!(id, 3);
+    }
+
+    /// The startup check asks the question registration asks: the subject's whole history under
+    /// a transitive level, not only its latest version. The registry answers that at
+    /// `/versions`; `/versions/latest` compares with one version whatever the level says.
+    #[tokio::test]
+    async fn the_startup_check_asks_what_registration_would() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/subjects/orders-value/versions/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": 21,
+                "version": 3,
+                "schema": "{\"type\":\"object\"}",
+                "schemaType": "JSON",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/compatibility/subjects/orders-value/versions"))
+            .and(query_param("verbose", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "is_compatible": false,
+                "messages": ["incompatible with version 1"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let prefetch = SchemaPrefetch::new(SchemaRegistry::new(server.uri()));
+        prefetch.record(Registration {
+            subject: "orders-value".to_owned(),
+            schema_type: SchemaType::Json,
+            definition: "{\"type\":\"object\"}".to_owned(),
+        });
+        let err = prefetch
+            .warm_subjects()
+            .await
+            .expect_err("a schema the subject's history refuses must not start");
+        assert!(
+            err.to_string().contains("incompatible with version 1"),
+            "the registry's own account travels in the error: {err}",
+        );
     }
 
     #[test]
