@@ -136,9 +136,10 @@ fn app() -> RustStream {
 anything else:
 
 - [`Commit::Auto`] (the default) is librdkafka's own behaviour: a position is stored as the
-  record is handed to the application and committed on a timer, so `ack` and both `nack` forms
-  are advisory no-ops and a crash can lose the tail of processed work or skip records that
-  were stored but never handled.
+  record is handed to the application and committed on a timer, so `ack` and `nack(false)` are
+  advisory no-ops, `nack(true)` reports `AckError::Unsupported` because nothing brings the
+  record back, and a crash can lose the tail of processed work or skip records that were stored
+  but never handled.
 - [`Commit::Tracked`] is precise at-least-once. An `ack` advances the stored position to just
   below the lowest still-unsettled delivery, so acks arriving out of order from concurrent
   lanes never commit past unprocessed work, and offset gaps the consumer never sees

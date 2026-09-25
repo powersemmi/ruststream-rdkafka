@@ -32,8 +32,8 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing, OutgoingMessage,
-    Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
+    AckError, Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing,
+    OutgoingMessage, Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
     TransactionalPublisher, nonzero,
 };
 use ruststream_rdkafka::context::{KafkaContext, keys};
@@ -3063,9 +3063,12 @@ async fn under_auto_commit_a_requeue_brings_nothing_back() {
         let mut stream = Box::pin(subscriber.stream());
         let msg = next_message(&mut stream).await;
         assert_eq!(msg.payload(), b"first");
-        msg.nack(true)
-            .await
-            .expect("an advisory nack always succeeds");
+        let requeued = msg.nack(true).await;
+        assert!(
+            matches!(requeued, Err(AckError::Unsupported)),
+            "under Commit::Auto nothing brings the record back, so the requeue says so: \
+             {requeued:?}",
+        );
     }
 
     // librdkafka owns the position under `Commit::Auto`: it stored the offset as the record was
@@ -3082,7 +3085,7 @@ async fn under_auto_commit_a_requeue_brings_nothing_back() {
     assert_eq!(
         msg.payload(),
         b"second",
-        "under Commit::Auto a requeue is advisory: the record must not come back",
+        "under Commit::Auto a requeue brings nothing back: the record must not return",
     );
     msg.ack().await.expect("advisory ack");
 
