@@ -8,7 +8,11 @@ all-features = true
 [advisories]
 yanked = "deny"
 
-ignore = []
+ignore = [
+    # paste is unmaintained and feature-complete. It reaches only the publish cost test, through
+    # the jemalloc counters that test reads; nothing a user builds depends on it.
+    { id = "RUSTSEC-2024-0436", reason = "paste reaches only a test, through tikv-jemalloc-ctl" },
+]
 
 [licenses]
 # Apache-2.0/MIT-compatible permissive licenses only.
