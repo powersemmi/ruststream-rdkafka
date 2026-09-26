@@ -12,7 +12,7 @@ use bytes::Bytes;
 #[cfg(feature = "testing")]
 use futures::future::Either;
 use futures::{Stream, ready};
-use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
@@ -30,7 +30,7 @@ use crate::record::{Cart, HeldRecord, LiveShared, Shared};
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// Whether librdkafka is already retrying this error by itself, making a stream error item
 /// noise rather than signal. The set is deliberately small and explicit; when in doubt, the
@@ -138,7 +138,7 @@ const _: () = assert!(size_of::<Source>() == size_of::<Cart>());
 
 impl KafkaSubscriber {
     pub(crate) fn new(
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         topic: String,
         delivered_topic: DeliveredTopic,
         commit: Commit,
