@@ -8,7 +8,7 @@
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
-use ruststream::runtime::{App, AppInfo, Reply, RustStream};
+use ruststream::runtime::{App, AppInfo, Reply, RustStream, SubscriberSettings as _};
 use ruststream::{
     Broker, ConnectedBroker, IncomingMessage, Outgoing, OutgoingMessage, Publisher, Subscriber,
     subscriber,
@@ -440,12 +440,7 @@ struct SrOrder {
 
 // The producing side of the live test: a plain publishing handler; the app's `SchemaFrame`
 // publish layer frames its replies for the wire.
-#[subscriber(
-    KafkaTopic::new(std::env::var("SR_JSON_TRIGGER").expect("trigger env"))
-        .group(std::env::var("SR_JSON_GROUP").expect("group env"))
-        .start(StartOffset::Earliest),
-    publish("sr-json-frames-placeholder")
-)]
+#[subscriber(KafkaTopic, publish("sr-json-frames-placeholder"))]
 async fn relay(order: &SrOrder) -> SrOrder {
     order.clone()
 }
@@ -496,10 +491,7 @@ async fn live_json_frame_and_transcode_end_to_end() {
         return;
     };
     let trigger = unique("sr-json-trigger");
-    unsafe {
-        std::env::set_var("SR_JSON_TRIGGER", &trigger);
-        std::env::set_var("SR_JSON_GROUP", unique("sr-json-group"));
-    }
+    let group = unique("sr-json-group");
     let marker = i64::from(std::process::id()) * 1000 + 7;
 
     // The reply subject exists in the registry; the app's SchemaFrame resolves it lazily
@@ -532,7 +524,12 @@ async fn live_json_frame_and_transcode_end_to_end() {
     let app = RustStream::new(AppInfo::new("sr-json", "0.0.0"))
         .publish_layer(SchemaFrame::new(SchemaRegistry::new(&registry)))
         .with_broker(KafkaBroker::new([kafka.clone()]), |b| {
-            b.include(relay).out(Reply, KafkaPublish::default());
+            b.include(relay.map_source(|_| {
+                KafkaTopic::new(&trigger)
+                    .group(group)
+                    .start(StartOffset::Earliest)
+            }))
+            .out(Reply, KafkaPublish::default());
         });
 
     let registry_for_wait = registry.clone();
