@@ -17,18 +17,6 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct SubscriptionId(u64);
 
-/// The consumer group a subscription joined.
-///
-/// A subscription that names no group is [`Alone`](Self::Alone) in one of its own: nothing else
-/// can be assigned its topic away from it, which is what an anonymous consumer is. That is a
-/// variant rather than an `Option` beside a name, so "names no group" cannot be read as "shares
-/// one nameless group with every other anonymous subscriber".
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum GroupId {
-    Named(String),
-    Alone(SubscriptionId),
-}
-
 /// One in-flight test delivery.
 #[derive(Debug, Clone)]
 pub(crate) struct TestDelivery {
@@ -49,8 +37,9 @@ pub(crate) type DeliveryReceiver = mpsc::UnboundedReceiver<TestDelivery>;
 #[derive(Debug)]
 struct Subscription {
     topic: String,
-    /// Which group this entry competes in for `topic`.
-    group: GroupId,
+    /// The consumer group this entry competes in for `topic`. Every subscription has one, as on
+    /// a cluster: the broker refuses a subscription that resolves none.
+    group: String,
     sender: DeliverySender,
     /// The subscription's read-position generation, shared with its seeker. Read under the
     /// router lock so a publish racing a reposition either lands in the replay's snapshot or is
@@ -87,7 +76,7 @@ impl KeyRouter {
     pub(crate) fn subscribe_many(
         &self,
         topics: &[String],
-        group: Option<&str>,
+        group: &str,
         generation: &Arc<AtomicU64>,
     ) -> (Vec<SubscriptionId>, DeliverySender, DeliveryReceiver) {
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -100,8 +89,7 @@ impl KeyRouter {
                     id,
                     Subscription {
                         topic: topic.clone(),
-                        group: group
-                            .map_or(GroupId::Alone(id), |name| GroupId::Named(name.to_owned())),
+                        group: group.to_owned(),
                         sender: sender.clone(),
                         generation: Arc::clone(generation),
                     },
@@ -174,13 +162,13 @@ impl KeyRouter {
         subscriptions: &'a HashMap<SubscriptionId, Subscription>,
         topic: &str,
     ) -> impl Iterator<Item = &'a Subscription> {
-        let mut assigned: HashMap<&'a GroupId, (SubscriptionId, &'a Subscription)> = HashMap::new();
+        let mut assigned: HashMap<&'a str, (SubscriptionId, &'a Subscription)> = HashMap::new();
         for (id, subscription) in subscriptions
             .iter()
             .filter(|(_, subscription)| subscription.topic == topic)
         {
             assigned
-                .entry(&subscription.group)
+                .entry(subscription.group.as_str())
                 .and_modify(|owner| {
                     if *id < owner.0 {
                         *owner = (*id, subscription);
