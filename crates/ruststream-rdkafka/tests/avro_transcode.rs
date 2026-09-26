@@ -8,7 +8,9 @@ use std::convert::Infallible;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, Reply, RustStream, State};
+use ruststream::runtime::{
+    App, AppInfo, HandlerOutcome, Reply, RustStream, State, SubscriberSettings as _,
+};
 use ruststream::{
     Broker, ConnectedBroker, FromRef, Outgoing, OutgoingMessage, Publisher, subscriber,
 };
@@ -48,23 +50,14 @@ struct AvroApp {
 
 // The producing side: plain JSON through the pipeline; the SchemaFrame layer transcodes the
 // reply to an Avro datum under this run's subject.
-#[subscriber(
-    KafkaTopic::new(std::env::var("AVRO_MW_TRIGGER").expect("trigger env"))
-        .group(std::env::var("AVRO_MW_TRIGGER_GROUP").expect("trigger group env"))
-        .start(StartOffset::Earliest),
-    publish("avro-mw-frames-placeholder")
-)]
+#[subscriber(KafkaTopic, publish("avro-mw-frames-placeholder"))]
 async fn avro_relay(order: &Order) -> Order {
     order.clone()
 }
 
 // The consuming side: a plain handler on the default JSON codec; the subscription already
 // converted the Avro datum back to JSON.
-#[subscriber(
-    KafkaTopic::new("avro-mw-frames-placeholder")
-        .group(std::env::var("AVRO_MW_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaTopic)]
 async fn avro_mw(order: &Order, State(probe): State<AvroProbe>) -> HandlerOutcome {
     let marker_range = probe.base..probe.base + i64::try_from(probe.expected).expect("small");
     if !marker_range.contains(&order.id) {
@@ -77,8 +70,15 @@ async fn avro_mw(order: &Order, State(probe): State<AvroProbe>) -> HandlerOutcom
             return HandlerOutcome::ack();
         }
     }
-    probe.done.notify_waiters();
+    probe.done.notify_one();
     HandlerOutcome::ack()
+}
+
+/// A subscription on this run's `topic` in `group`, from the start of the log.
+fn from_earliest(topic: &str, group: String) -> KafkaTopic {
+    KafkaTopic::new(topic)
+        .group(group)
+        .start(StartOffset::Earliest)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -99,11 +99,6 @@ async fn live_avro_middleware_end_to_end() {
     );
     let base = i64::from(std::process::id()) * 100_000;
     let trigger = format!("avro-mw-trigger-{run}");
-    unsafe {
-        std::env::set_var("AVRO_MW_TRIGGER", &trigger);
-        std::env::set_var("AVRO_MW_TRIGGER_GROUP", format!("trigger-group-{run}"));
-        std::env::set_var("AVRO_MW_GROUP", format!("group-{run}"));
-    }
 
     // A run-unique subject with a run-unique record name: its schema id belongs to this run
     // alone, so seeing it back proves the layer framed (a fresh subject also sidesteps the
@@ -152,8 +147,11 @@ async fn live_avro_middleware_end_to_end() {
         )
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker(broker, |b| {
-            b.include(avro_mw);
-            b.include(avro_relay).out(Reply, KafkaPublish::default());
+            b.include(avro_mw.map_source(|_| from_earliest(FRAMED_TOPIC, format!("group-{run}"))));
+            b.include(
+                avro_relay.map_source(|_| from_earliest(&trigger, format!("trigger-group-{run}"))),
+            )
+            .out(Reply, KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);
