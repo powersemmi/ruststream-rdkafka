@@ -17,6 +17,7 @@ use ruststream::subscriber;
 use ruststream::testing::{Outcome, TestApp};
 use ruststream::{OutSlot, Outgoing, Publisher};
 use ruststream_rdkafka::context::KafkaContext;
+use ruststream_rdkafka::context::keys::Topic;
 use ruststream_rdkafka::{
     Commit, KafkaBroker, KafkaOptions, KafkaPublish, KafkaPublishSteps as _, KafkaTopic,
     KafkaTopics, PARTITION_KEY_HEADER, RoundRobin, ToSourceTopic,
@@ -154,6 +155,63 @@ async fn a_pattern_subscription_reads_every_topic_it_matches() {
         [1, 2],
         "the pattern matches the regional topics and not `orders`"
     );
+    tb.shutdown().await.expect("shutdown");
+}
+
+/// Where a handler says its record came from.
+#[derive(Debug, Serialize, Deserialize, Outgoing)]
+struct Origin {
+    topic: String,
+}
+
+#[subscriber(KafkaTopics::new(["origin-eu", "origin-us"]).group("origins"), publish("origins"))]
+async fn name_a_listed_topic(order: &Order, ctx: &mut Context<'_, KafkaContext>) -> Origin {
+    let _ = order;
+    Origin {
+        topic: ctx.context(Topic).to_string(),
+    }
+}
+
+#[subscriber(KafkaTopic::new("origin-one").group("origins"), publish("origins"))]
+async fn name_the_one_topic(order: &Order, ctx: &mut Context<'_, KafkaContext>) -> Origin {
+    let _ = order;
+    Origin {
+        topic: ctx.context(Topic).to_string(),
+    }
+}
+
+/// A context names the topic its record came from, whether the subscription reads one topic or
+/// several.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_context_names_the_topic_of_its_record() {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
+        // A topic set addresses no retry copy of its own, so the mount site says where one goes.
+        b.include(name_a_listed_topic)
+            .out_retry(KafkaPublish::default())
+            .transform(ToSourceTopic);
+        b.include(name_the_one_topic);
+    });
+    let tb = TestApp::start(app).await.expect("start");
+
+    for (id, topic) in [(1, "origin-eu"), (2, "origin-us"), (3, "origin-one")] {
+        tb.broker::<KafkaBroker>()
+            .message(&Order { id })
+            .to(topic)
+            .publish()
+            .await
+            .expect("publish");
+    }
+
+    let mut named: Vec<String> = tb
+        .broker::<KafkaBroker>()
+        .published::<Origin>("origins")
+        .assert_called(3)
+        .decoded()
+        .into_iter()
+        .map(|origin| origin.topic)
+        .collect();
+    named.sort();
+    assert_eq!(named, ["origin-eu", "origin-one", "origin-us"]);
     tb.shutdown().await.expect("shutdown");
 }
 
