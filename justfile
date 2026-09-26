@@ -55,6 +55,26 @@ bench *ARGS: brokers-up
         cargo bench -p ruststream-rdkafka-bench --bench paired {{ ARGS }}
     python3 scripts/bench_results.py target/bench-paired.json docs/benchmarks/results.json
 
+# What a message costs in this crate's code and the framework above it, counted under valgrind:
+# instructions through callgrind and allocations through DHAT, each scenario a service on
+# `KafkaBroker` against the stand the tests use. What librdkafka does on its own threads is not
+# counted. It takes a minute or two; the counts move a little between runs because the broker is
+# real, which the floors and the instruction limit in benches/common allow for. The page it feeds is the code table of
+# docs/benchmarks.md. RUSTFLAGS is cleared because valgrind aborts on the instructions a recent
+# CPU advertises. Needs valgrind and the runner the benches pin:
+# cargo install --locked gungraun-runner --version =0.19.4
+# Extra arguments reach the runner: `just bench-code --save-baseline=main` records a baseline,
+# `just bench-code --baseline=main` compares against it.
+bench-code *ARGS: brokers-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'just brokers-down' EXIT
+    mkdir -p target
+    RUSTFLAGS="" KAFKA_TEST_URL=127.0.0.1:9092 \
+        cargo bench -p ruststream-rdkafka-bench --bench consume --bench reply --bench batch \
+        -- --output-format=json {{ ARGS }} > target/bench-code.json
+    python3 scripts/bench_results.py --code target/bench-code.json docs/benchmarks/results.json
+
 fmt:
     cargo fmt --all
 

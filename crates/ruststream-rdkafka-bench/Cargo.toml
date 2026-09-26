@@ -1,6 +1,6 @@
 [package]
 name = "ruststream-rdkafka-bench"
-description = "The paired raw-versus-framework benchmark for ruststream-rdkafka. Never published."
+description = "The benchmarks of ruststream-rdkafka: the paired raw-versus-framework comparison and the code cost per message. Never published."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,13 +17,15 @@ default = []
 # A benchmark measures what ships, and the framework's harness feature changes the dispatch path:
 # every delivery records what the handler saw and every handler call runs inside a task-local
 # scope. Nothing here enables this; it exists so that asking for it is the compile error in
-# `benches/paired.rs` rather than a number nobody can trust.
+# `benches/paired.rs` and `benches/common` rather than a number nobody can trust.
 testing = ["ruststream-rdkafka/testing"]
 
-# The benchmark lives in its own package so that the measured binary links the framework the way a
+# The benchmarks live in their own package so that a measured binary links the framework the way a
 # service does. `ruststream-rdkafka`'s own dev-dependencies pull `ruststream/conformance`, which
 # enables `ruststream/testing`, and a benchmark inside that package would be built against it.
 [dev-dependencies]
+# The code-cost benchmarks: callgrind and DHAT through the runner the core pins.
+gungraun = "=0.19.4"
 ruststream-rdkafka.workspace = true
 ruststream = { workspace = true, features = ["macros", "json"] }
 rdkafka.workspace = true
@@ -34,4 +36,18 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "ti
 
 [[bench]]
 name = "paired"
+harness = false
+
+# The code-cost benchmarks: one scenario per binary, each a service on `KafkaBroker` against the
+# stand. `just bench-code` runs them under valgrind; `benches/common` is the shared setup.
+[[bench]]
+name = "consume"
+harness = false
+
+[[bench]]
+name = "reply"
+harness = false
+
+[[bench]]
+name = "batch"
 harness = false
