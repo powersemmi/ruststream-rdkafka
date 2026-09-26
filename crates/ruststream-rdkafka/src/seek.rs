@@ -18,7 +18,7 @@ use tokio::task;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// How long a reposition waits for librdkafka (the seek itself, and the timestamp lookup).
 const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -119,7 +119,7 @@ enum Repositioner {
     /// A librdkafka consumer: the reposition is a real seek over the partitions this member
     /// holds, plus the offset bookkeeping the new read position invalidates.
     Live {
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         tracker: Arc<CommitTracker>,
     },
     /// A member of the in-process cluster.
@@ -171,10 +171,7 @@ impl std::fmt::Debug for KafkaSeeker {
 }
 
 impl KafkaSeeker {
-    pub(crate) const fn new(
-        consumer: Arc<StreamConsumer<TrackingContext>>,
-        tracker: Arc<CommitTracker>,
-    ) -> Self {
+    pub(crate) const fn new(consumer: Arc<TrackedConsumer>, tracker: Arc<CommitTracker>) -> Self {
         Self {
             inner: Repositioner::Live { consumer, tracker },
         }

@@ -209,6 +209,10 @@ there until that offset comes back, so the acked elements behind it replay with 
 not loss. A cap and a dead-letter topic are what stop one poison element from holding a
 partition back. How much librdkafka keeps queued locally is a consumer property
 (`queued.max.messages.kbytes` and friends) and stays in the descriptor's `config` passthrough.
+Whenever that queue fills, librdkafka pauses fetching the partition for `fetch.queue.backoff.ms`
+(1000 ms by default), which caps the throughput of large bodies behind a slow handler; a shorter
+pause is set the same way, `.config("fetch.queue.backoff.ms", "10")` on the descriptor or on
+[`KafkaBroker`] for every consumer.
 
 ## Positions and seeking
 

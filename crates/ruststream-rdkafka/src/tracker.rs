@@ -10,12 +10,14 @@
 //! position correct under concurrent handler lanes. librdkafka's auto-commit flushes the
 //! stored position in the background and once more when the consumer closes.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, VecDeque};
+use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rdkafka::consumer::{BaseConsumer, ConsumerContext, Rebalance};
-use rdkafka::{ClientContext, TopicPartitionList};
+use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext, Rebalance, StreamConsumer};
+use rdkafka::error::KafkaError as RdKafkaError;
+use rdkafka::{ClientContext, Offset, TopicPartitionList};
 use ruststream::Str;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
@@ -72,64 +74,93 @@ impl Assigned {
     }
 }
 
-/// The delivered offsets of one partition that have not settled yet.
+/// The delivered offsets of one partition that have not settled yet, lowest first.
 ///
-/// A handler that settles in order leaves one open at a time, which is the shape of almost every
-/// subscription, so that case holds the offset inline and touches no allocation. The ordered set
-/// is what a handler settling out of order needs - concurrent worker lanes, a `nack(true)` that
-/// holds an offset back - and the state returns to the inline form as soon as the burst is over.
+/// Offsets are delivered in increasing order within a read position, so a new one always goes
+/// at the back and the lowest is always at the front. A handler that settles in order takes the
+/// front every time; one settling out of order (concurrent worker lanes, a `nack(true)` that
+/// holds an offset back) finds its offset by a binary search and closes the hole in place. The
+/// ring keeps its capacity across settles and repositions, so after the first burst reaches its
+/// size nothing is allocated per delivery: the queue is as long as the deliveries in flight,
+/// which the runtime's buffers bound.
 #[derive(Debug, Default)]
-enum Outstanding {
-    /// Everything delivered so far has settled.
-    #[default]
-    Settled,
-    /// Exactly one delivery is open.
-    One(i64),
-    /// Several are open, lowest first.
-    Several(BTreeSet<i64>),
-}
+struct Outstanding(VecDeque<i64>);
 
 impl Outstanding {
-    /// Records a delivered offset as open.
+    /// Records a delivered offset as open. The caller guarantees it is above every offset open
+    /// so far (a regressing offset starts the partition over instead).
     fn insert(&mut self, offset: i64) {
-        match self {
-            Self::Settled => *self = Self::One(offset),
-            Self::One(open) if *open == offset => {}
-            Self::One(open) => *self = Self::Several(BTreeSet::from([*open, offset])),
-            Self::Several(open) => {
-                open.insert(offset);
-            }
-        }
+        debug_assert!(self.0.back().is_none_or(|last| *last < offset));
+        self.0.push_back(offset);
     }
 
     /// Settles an offset, answering whether it was open. A settle of an offset that is not is a
     /// duplicate, or a leftover from before a replay reset.
     fn remove(&mut self, offset: i64) -> bool {
-        match self {
-            Self::One(open) if *open == offset => {
-                *self = Self::Settled;
+        if self.0.front() == Some(&offset) {
+            self.0.pop_front();
+            return true;
+        }
+        match self.0.binary_search(&offset) {
+            Ok(index) => {
+                self.0.remove(index);
                 true
             }
-            Self::Settled | Self::One(_) => false,
-            Self::Several(open) => {
-                let settled = open.remove(&offset);
-                match open.len() {
-                    0 => *self = Self::Settled,
-                    1 => *self = Self::One(*open.first().expect("one offset is left")),
-                    _ => {}
-                }
-                settled
-            }
+            Err(_) => false,
         }
     }
 
     /// The lowest offset still open, which is what bounds the position that may be stored.
     fn lowest(&self) -> Option<i64> {
-        match self {
-            Self::Settled => None,
-            Self::One(open) => Some(*open),
-            Self::Several(open) => open.first().copied(),
+        self.0.front().copied()
+    }
+
+    /// Forgets every open offset, keeping the ring's capacity.
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
+/// The one-partition list a settled position is handed to librdkafka through, when the position
+/// is not the settling record's own offset.
+///
+/// Built on the first such store of a read position and reused from then on: a store by name
+/// would copy the topic into a C string and look the topic up on every settle, while the list
+/// only has its offset rewritten, and librdkafka keeps the partition it resolved on the list's
+/// element, so the lookup happens once. That cached partition is a reference into the client,
+/// which is why the list is dropped on every reposition and before the consumer goes (see
+/// [`TrackedConsumer`]).
+#[derive(Debug)]
+pub(crate) struct StoreTarget<'a> {
+    topic: &'a Str,
+    partition: i32,
+    list: &'a mut Option<TopicPartitionList>,
+}
+
+impl StoreTarget<'_> {
+    /// The partition's topic.
+    #[cfg(feature = "testing")]
+    pub(crate) fn topic(&self) -> &str {
+        self.topic
+    }
+
+    /// The partition.
+    #[cfg(feature = "testing")]
+    pub(crate) const fn partition(&self) -> i32 {
+        self.partition
+    }
+
+    /// The list naming `position` as this partition's processed position (librdkafka resumes
+    /// at the offset after it).
+    pub(crate) fn list(&mut self, position: i64) -> Result<&TopicPartitionList, RdKafkaError> {
+        let next = Offset::Offset(position + 1);
+        if let Some(list) = self.list {
+            list.set_all_offsets(next)?;
+            return Ok(list);
         }
+        let mut list = TopicPartitionList::with_capacity(1);
+        list.add_partition_offset(self.topic, self.partition, next)?;
+        Ok(self.list.insert(list))
     }
 }
 
@@ -140,6 +171,9 @@ struct PartitionState {
     partition: i32,
     /// Delivered offsets that have not settled yet.
     outstanding: Outstanding,
+    /// The list positions are stored through (see [`StoreTarget`]), `None` until the first store
+    /// that needs it.
+    store_list: Option<TopicPartitionList>,
     /// The highest delivered offset, `None` before the first delivery of this generation.
     highest: Option<i64>,
     /// The last position handed to the offset store; kept monotonic within a generation.
@@ -154,7 +188,8 @@ impl PartitionState {
         Self {
             topic,
             partition,
-            outstanding: Outstanding::Settled,
+            outstanding: Outstanding::default(),
+            store_list: None,
             highest: None,
             stored: None,
             generation: 0,
@@ -164,7 +199,8 @@ impl PartitionState {
     /// Starts the offset bookkeeping over at `offset` without touching the generation: a
     /// replayed delivery is the same read position continuing, not a new one.
     fn replay_from(&mut self, offset: i64) {
-        self.outstanding = Outstanding::One(offset);
+        self.outstanding.clear();
+        self.outstanding.insert(offset);
         self.highest = Some(offset);
         self.stored = None;
     }
@@ -237,7 +273,10 @@ impl CommitTracker {
         let index = partitions.slot(topic, partition);
         let state = &mut partitions.states[index];
         state.generation += 1;
-        state.outstanding = Outstanding::Settled;
+        state.outstanding.clear();
+        // The partition librdkafka resolved for the old assignment may not be the one a new
+        // assignment reads, so the list resolves it again on the next store.
+        state.store_list = None;
         state.highest = None;
         state.stored = None;
         drop(partitions);
@@ -267,7 +306,7 @@ impl CommitTracker {
     }
 
     /// Marks `offset` settled and, when the stored position advances, hands the new position
-    /// to `store` (librdkafka commits it + 1).
+    /// to `store` together with the partition's [`StoreTarget`] (librdkafka commits it + 1).
     ///
     /// `store` runs while the tracker lock is held - it is a cheap in-memory librdkafka call,
     /// and ordering it under the lock is what keeps concurrent settles from ever handing the
@@ -278,7 +317,7 @@ impl CommitTracker {
         &self,
         slot: PartitionSlot,
         offset: i64,
-        store: impl FnOnce(i64) -> Result<(), E>,
+        store: impl FnOnce(i64, StoreTarget<'_>) -> Result<(), E>,
     ) -> Result<(), E> {
         let mut partitions = self
             .partitions
@@ -306,7 +345,14 @@ impl CommitTracker {
             // Nothing committable yet (an unsettled delivery still bounds the position).
             return Ok(());
         }
-        store(position)?;
+        store(
+            position,
+            StoreTarget {
+                topic: &state.topic,
+                partition: state.partition,
+                list: &mut state.store_list,
+            },
+        )?;
         state.stored = Some(position);
         // Read while the partitions are still locked, which is what makes the gate safe: a
         // waiter registers itself before it reads the position it is waiting for, and that read
@@ -366,6 +412,18 @@ impl CommitTracker {
     pub(crate) fn advance_waiter(&self) -> Notified<'_> {
         self.watched.store(true, Ordering::Release);
         self.advanced.notified()
+    }
+
+    /// Drops every partition's store list, and with it the partitions librdkafka resolved on
+    /// them: the client requires those released before it is destroyed.
+    fn release_store_lists(&self) {
+        let mut partitions = self
+            .partitions
+            .lock()
+            .expect("commit tracker mutex poisoned");
+        for state in &mut partitions.states {
+            state.store_list = None;
+        }
     }
 
     /// Resets the state of revoked partitions so a later re-assignment starts fresh.
@@ -504,6 +562,34 @@ impl ConsumerContext for TrackingContext {
     }
 }
 
+/// The consumer a tracked subscription reads through.
+///
+/// It exists for the order of teardown: the tracker's store lists hold partitions librdkafka
+/// resolved, the client has to see them released before it is destroyed, and the tracker lives
+/// in the consumer's context, which the client drops only after destroying itself. Releasing
+/// them here, ahead of the consumer, keeps that order whichever handle drops last.
+pub(crate) struct TrackedConsumer(StreamConsumer<TrackingContext>);
+
+impl TrackedConsumer {
+    pub(crate) const fn new(consumer: StreamConsumer<TrackingContext>) -> Self {
+        Self(consumer)
+    }
+}
+
+impl Deref for TrackedConsumer {
+    type Target = StreamConsumer<TrackingContext>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TrackedConsumer {
+    fn drop(&mut self) {
+        self.0.context().tracker.release_store_lists();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -527,7 +613,7 @@ mod tests {
     fn settle_in(tracker: &CommitTracker, offset: i64, slot: PartitionSlot) -> Option<i64> {
         let mut stored = None;
         tracker
-            .settle_with(slot, offset, |position| {
+            .settle_with(slot, offset, |position, _target| {
                 stored = Some(position);
                 Ok::<(), Infallible>(())
             })
@@ -743,6 +829,130 @@ mod tests {
     }
 
     #[test]
+    fn holes_settled_in_any_order_keep_the_lowest_open_offset_as_the_bound() {
+        // Offsets 0..8 with a gap at 4, settled from the middle out: every settle but the one
+        // that closes the prefix leaves an open offset below it, and the position may only
+        // move up to just below the lowest one still open.
+        let tracker = CommitTracker::default();
+        for offset in [0, 1, 2, 3, 5, 6, 7, 8] {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        assert_eq!(settle(&tracker, 5), None, "0 is still open");
+        assert_eq!(settle(&tracker, 2), None);
+        assert_eq!(settle(&tracker, 8), None);
+        assert_eq!(settle(&tracker, 0), Some(0), "1 bounds the position now");
+        assert_eq!(settle(&tracker, 3), None, "1 is still open");
+        assert_eq!(settle(&tracker, 1), Some(5), "6 is the lowest open offset");
+        assert_eq!(settle(&tracker, 7), None, "6 is still open");
+        assert_eq!(
+            settle(&tracker, 7),
+            None,
+            "a duplicate in the middle moves nothing"
+        );
+        assert_eq!(
+            settle(&tracker, 6),
+            Some(8),
+            "the whole partition is settled"
+        );
+    }
+
+    #[test]
+    fn the_open_offsets_keep_their_storage_across_settles_and_repositions() {
+        // A settle allocating once per burst instead of once per delivery is the point of the
+        // ring: its capacity survives the burst draining and the partition being repositioned.
+        let tracker = CommitTracker::default();
+        for offset in 0..64 {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        let capacity = |tracker: &CommitTracker| {
+            let partitions = tracker.partitions.lock().expect("not poisoned");
+            partitions.states[0].outstanding.0.capacity()
+        };
+        let grown = capacity(&tracker);
+        for offset in (0..64).rev() {
+            settle(&tracker, offset);
+        }
+        assert_eq!(
+            capacity(&tracker),
+            grown,
+            "the drained burst keeps its storage"
+        );
+        tracker.reposition(&topic(), 0);
+        assert_eq!(capacity(&tracker), grown, "a reposition keeps it too");
+        for offset in 100..164 {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        assert_eq!(
+            capacity(&tracker),
+            grown,
+            "the next burst fits without growing"
+        );
+        tracker.delivered(&topic(), 0, 50);
+        assert_eq!(
+            capacity(&tracker),
+            grown,
+            "and so does a replay from an earlier offset"
+        );
+    }
+
+    /// Runs a settle carrying the partition's current slot and returns what its target's list
+    /// names: the topic, the partition and the offset librdkafka would resume at.
+    fn store_through_list(tracker: &CommitTracker, offset: i64) -> Option<(String, i32, Offset)> {
+        let mut named = None;
+        tracker
+            .settle_with(slot(tracker, "t", 0), offset, |position, mut target| {
+                let list = target.list(position)?;
+                let element = &list.elements()[0];
+                named = Some((
+                    element.topic().to_owned(),
+                    element.partition(),
+                    element.offset(),
+                ));
+                Ok::<(), RdKafkaError>(())
+            })
+            .expect("a valid offset");
+        named
+    }
+
+    fn has_store_list(tracker: &CommitTracker) -> bool {
+        let partitions = tracker.partitions.lock().expect("not poisoned");
+        partitions.states[0].store_list.is_some()
+    }
+
+    #[test]
+    fn the_store_list_names_the_next_offset_and_is_rebuilt_after_a_reposition() {
+        let tracker = CommitTracker::default();
+        for offset in 0..3 {
+            tracker.delivered(&topic(), 0, offset);
+        }
+        assert_eq!(store_through_list(&tracker, 1), None);
+        assert_eq!(
+            store_through_list(&tracker, 0),
+            Some(("t".to_owned(), 0, Offset::Offset(2))),
+            "position 1 is stored as the offset to resume at",
+        );
+        assert_eq!(
+            store_through_list(&tracker, 2),
+            Some(("t".to_owned(), 0, Offset::Offset(3))),
+            "the reused list carries the new position",
+        );
+
+        // A reposition drops the list, with the partition librdkafka resolved on it.
+        tracker.reposition(&topic(), 0);
+        assert!(!has_store_list(&tracker));
+        tracker.delivered(&topic(), 0, 10);
+        assert_eq!(
+            store_through_list(&tracker, 10),
+            Some(("t".to_owned(), 0, Offset::Offset(11))),
+        );
+        assert!(has_store_list(&tracker));
+
+        // And so does the teardown ahead of the consumer.
+        tracker.release_store_lists();
+        assert!(!has_store_list(&tracker));
+    }
+
+    #[test]
     fn duplicate_settles_are_ignored() {
         let tracker = CommitTracker::default();
         tracker.delivered(&topic(), 0, 0);
@@ -758,7 +968,7 @@ mod tests {
         tracker.delivered(&topic(), 0, 0);
         tracker.delivered(&topic(), 0, 1);
         let failed: Result<(), &str> =
-            tracker.settle_with(slot(&tracker, "t", 0), 0, |_| Err("store failed"));
+            tracker.settle_with(slot(&tracker, "t", 0), 0, |_, _| Err("store failed"));
         assert!(failed.is_err());
         // The failed settle consumed offset 0; the next settle advances past both.
         assert_eq!(settle(&tracker, 1), Some(1));

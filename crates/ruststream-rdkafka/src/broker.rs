@@ -41,7 +41,7 @@ use crate::subscription::{
 };
 #[cfg(feature = "testing")]
 use crate::testable::Routes;
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// The live client state behind [`ConnectedKafkaBroker`]: the shared producer every publisher
 /// clones from, the resolved configurations subscriptions and transactional producers derive
@@ -675,7 +675,7 @@ impl ConnectedKafkaBroker {
             }
         };
 
-        let consumer = Arc::new(consumer);
+        let consumer = Arc::new(TrackedConsumer::new(consumer));
         if let Commit::Transactional(pipeline) = &plan.settings.commit {
             self.state
                 .register_eos(pipeline, EosSource::new(&tracker, &consumer));
