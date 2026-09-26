@@ -15,12 +15,16 @@ use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rdkafka::consumer::{BaseConsumer, Consumer as _, ConsumerContext, Rebalance, StreamConsumer};
-use rdkafka::error::KafkaError as RdKafkaError;
+use rdkafka::consumer::{
+    BaseConsumer, Consumer as _, ConsumerContext, RebalanceProtocol, StreamConsumer,
+};
+use rdkafka::error::{KafkaError as RdKafkaError, RDKafkaErrorCode};
+use rdkafka::types::RDKafkaRespErr;
 use rdkafka::{ClientContext, Offset, TopicPartitionList};
 use ruststream::Str;
 use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
+use tracing::warn;
 
 use crate::error::KafkaError;
 use crate::seek::{self, KafkaPosition};
@@ -489,6 +493,23 @@ impl TrackingContext {
             .take()
     }
 
+    /// Writes the held start position, if any, into the assignment the group just handed over.
+    fn open_at_start(&self, consumer: &BaseConsumer<Self>, partitions: &mut TopicPartitionList) {
+        let Some(position) = self.take_start() else {
+            return;
+        };
+        if let Err(err) = seek::position_assignment(consumer, &self.tracker, partitions, &position)
+        {
+            // A callback can return nothing, so the failure travels to the subscriber instead:
+            // reading from the group's committed position when the mount site named another one
+            // is exactly what must not pass for a working subscription.
+            self.record_start_failure(KafkaError::InvalidOptions(format!(
+                "subscription {:?} could not be opened at its start position: {err}",
+                self.subscription,
+            )));
+        }
+    }
+
     /// Records a start position the rebalance could not apply, keeping the first one: it names
     /// what went wrong, and the ones behind it are the same assignment failing again.
     fn record_start_failure(&self, err: KafkaError) {
@@ -530,34 +551,54 @@ impl TrackingContext {
 impl ClientContext for TrackingContext {}
 
 impl ConsumerContext for TrackingContext {
-    fn pre_rebalance(&self, _consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
-        if let Rebalance::Revoke(revoked) = rebalance {
-            self.tracker.revoke(revoked);
-        }
-    }
-
-    /// Opens the subscription at its start position, on the partitions the group just handed
-    /// over.
+    /// Applies a rebalance the way librdkafka's default handling does, with two steps of this
+    /// crate's own: a revoke resets the tracker, and an assignment carries the subscription's
+    /// start position.
     ///
-    /// This runs inside the poll that carried the assignment, so it is ahead of the first record
-    /// those partitions deliver. It is the only point at which a `start_at(..)` on a group
-    /// subscription can take effect: the position is named before anything polls the consumer,
-    /// and until something does, the group has assigned nothing to seek.
-    fn post_rebalance(&self, consumer: &BaseConsumer<Self>, rebalance: &Rebalance<'_>) {
-        let Rebalance::Assign(assigned) = rebalance else {
-            return;
+    /// The start position is written into the assignment before librdkafka takes it (see
+    /// [`seek::position_assignment`]), which is the one point at which a `start_at(..)` on a
+    /// group subscription can take effect: it is named before anything polls the consumer, and
+    /// until something does, the group has assigned nothing to position.
+    fn rebalance(
+        &self,
+        consumer: &BaseConsumer<Self>,
+        err: RDKafkaRespErr,
+        partitions: &mut TopicPartitionList,
+    ) {
+        let assigning = match err {
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS => {
+                self.open_at_start(consumer, partitions);
+                true
+            }
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS => {
+                self.tracker.revoke(partitions);
+                false
+            }
+            other => {
+                warn!(
+                    subscription = %self.subscription,
+                    error = %RDKafkaErrorCode::from(other),
+                    "the group reported a rebalance error; this member releases its assignment",
+                );
+                false
+            }
         };
-        let Some(position) = self.take_start() else {
-            return;
+        let cooperative = matches!(
+            consumer.rebalance_protocol(),
+            RebalanceProtocol::Cooperative
+        );
+        let applied = match (assigning, cooperative) {
+            (true, true) => consumer.incremental_assign(partitions),
+            (true, false) => consumer.assign(partitions),
+            (false, true) => consumer.incremental_unassign(partitions),
+            (false, false) => consumer.unassign(),
         };
-        if let Err(err) = seek::apply_position(consumer, &self.tracker, assigned, &position) {
-            // A callback can return nothing, so the failure travels to the subscriber instead:
-            // reading from the group's committed position when the mount site named another one
-            // is exactly what must not pass for a working subscription.
-            self.record_start_failure(KafkaError::InvalidOptions(format!(
-                "subscription {:?} could not be opened at its start position: {err}",
-                self.subscription,
-            )));
+        if let Err(err) = applied {
+            warn!(
+                subscription = %self.subscription,
+                error = %err,
+                "librdkafka did not apply the rebalance",
+            );
         }
     }
 }

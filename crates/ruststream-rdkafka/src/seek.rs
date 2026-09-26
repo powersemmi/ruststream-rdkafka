@@ -247,11 +247,9 @@ fn reposition(
     apply_position(consumer, tracker, &assignment, to)
 }
 
-/// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first.
-///
-/// Both entry points end here: a reposition of a running subscription, and the start position a
-/// rebalance carries to the partitions the group has just handed over.
-pub(crate) fn apply_position<C>(
+/// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first:
+/// the reposition of a running subscription.
+fn apply_position<C>(
     consumer: &C,
     tracker: &CommitTracker,
     assignment: &TopicPartitionList,
@@ -260,14 +258,7 @@ pub(crate) fn apply_position<C>(
 where
     C: Consumer<TrackingContext>,
 {
-    let targets = resolve(consumer, assignment, to)?;
-    if targets.count() == 0 {
-        return Err(KafkaError::InvalidOptions(format!(
-            "{to:?} names no partition assigned to this consumer; a seek moves the partitions \
-             this instance holds, and its assignment is {}",
-            describe(assignment),
-        )));
-    }
+    let targets = targets_in(consumer, assignment, to)?;
 
     // The bookkeeping is reset before the consumer moves: between the two, a delivery pulled
     // from the old position could otherwise settle into the new one and commit past records the
@@ -284,6 +275,52 @@ where
         element.error().map_err(KafkaError::consume)?;
     }
     Ok(())
+}
+
+/// Writes `to` into an assignment the group has just handed over, before librdkafka takes it, so
+/// fetching begins there; the offset bookkeeping of each partition it names is reset first.
+///
+/// This is how a start position reaches a group subscription. Seeking the new partitions instead
+/// would race librdkafka: it refuses a seek (`Local: Erroneous state`) until it has fetched the
+/// group's committed offset for the partition, and that fetch is still in flight when the
+/// rebalance callback runs. An offset carried by the assignment itself needs no committed offset.
+pub(crate) fn position_assignment<C>(
+    consumer: &C,
+    tracker: &CommitTracker,
+    assignment: &mut TopicPartitionList,
+    to: &KafkaPosition,
+) -> Result<(), KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
+    let targets = targets_in(consumer, assignment, to)?;
+    for element in targets.elements() {
+        tracker.reposition(&Str::from(element.topic()), element.partition());
+        assignment
+            .set_partition_offset(element.topic(), element.partition(), element.offset())
+            .map_err(KafkaError::consume)?;
+    }
+    Ok(())
+}
+
+/// Resolves `to` against `assignment`, refusing a position that names none of its partitions.
+fn targets_in<C>(
+    consumer: &C,
+    assignment: &TopicPartitionList,
+    to: &KafkaPosition,
+) -> Result<TopicPartitionList, KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
+    let targets = resolve(consumer, assignment, to)?;
+    if targets.count() == 0 {
+        return Err(KafkaError::InvalidOptions(format!(
+            "{to:?} names no partition assigned to this consumer; a seek moves the partitions \
+             this instance holds, and its assignment is {}",
+            describe(assignment),
+        )));
+    }
+    Ok(targets)
 }
 
 /// Clears librdkafka's own stored offsets for the repositioned partitions.
