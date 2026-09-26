@@ -4,9 +4,9 @@
 //! every read is on the delivery path, as often as the handler names one. A field whose value is
 //! already on the delivery is handed over rather than copied, and this holds that still.
 //!
-//! The in-process transport carries the same context type as the live consumer, which is what
-//! makes this measurable without a cluster: what a read costs is a property of the context, not
-//! of the broker underneath it.
+//! The broker's in-process mode builds the same context from the same delivery type as the live
+//! consumer, which is what makes this measurable without a cluster: what a read costs is a
+//! property of the context, not of the transport underneath it.
 
 #![cfg(feature = "testing")]
 
@@ -16,14 +16,14 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use futures::StreamExt;
+use ruststream::testing::InProcess as _;
 use ruststream::{
-    Broker, BuildContext as _, ContextField as _, Field as _, HeaderMap, OutgoingMessage,
-    Publisher, Str, Subscriber,
+    BuildContext as _, ContextField as _, Field as _, HeaderMap, OutgoingMessage, Publisher, Str,
+    Subscribe as _, Subscriber,
 };
 use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::context::keys::{Key, Source, Topic};
-use ruststream_rdkafka::testing::KafkaTestBroker;
-use ruststream_rdkafka::{KafkaPublish, PARTITION_KEY_HEADER};
+use ruststream_rdkafka::{KafkaBroker, KafkaPublish, PARTITION_KEY_HEADER};
 
 /// Counts this thread's allocations. The reads under test run on it and nothing else does.
 struct Counting;
@@ -58,15 +58,15 @@ const READS: usize = 1_000;
 
 const WAIT: Duration = Duration::from_secs(1);
 
-/// One delivery's context, off the in-process transport: a keyed record, so the key field has
+/// One delivery's context, off the in-process mode: a keyed record, so the key field has
 /// something to answer.
 async fn context() -> KafkaContext {
-    let broker = KafkaTestBroker::new()
+    let broker = KafkaBroker::new(["kafka:9092"])
         .default_group("tests")
-        .connect()
+        .connect_in_process()
         .await
-        .expect("connect");
-    let mut subscriber = broker.subscribe_with("orders").await.expect("subscribe");
+        .expect("connect in process");
+    let mut subscriber = broker.subscribe("orders").await.expect("subscribe");
     let mut headers = HeaderMap::new();
     headers.insert(Str::from_static(PARTITION_KEY_HEADER), "order-1");
     broker

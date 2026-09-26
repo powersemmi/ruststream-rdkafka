@@ -26,6 +26,8 @@ use tracing::{debug, error};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
+#[cfg(feature = "testing")]
+use crate::in_process::Member;
 use crate::publisher::{
     KafkaOptions, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
 };
@@ -43,7 +45,24 @@ const DEFAULT_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
 #[derive(Clone)]
 pub(crate) struct EosSource {
     tracker: Weak<CommitTracker>,
-    consumer: Weak<StreamConsumer<TrackingContext>>,
+    consumer: WeakConsumer,
+}
+
+/// The consumer behind a registered source, held weakly: a librdkafka consumer, or, under the
+/// `testing` feature, a member of the in-process cluster. Without the feature there is one
+/// variant.
+#[derive(Clone)]
+enum WeakConsumer {
+    Kafka(Weak<StreamConsumer<TrackingContext>>),
+    #[cfg(feature = "testing")]
+    InProcess(Weak<Member>),
+}
+
+/// The consumer behind a source pinned for one window commit.
+enum LiveConsumer {
+    Kafka(Arc<StreamConsumer<TrackingContext>>),
+    #[cfg(feature = "testing")]
+    InProcess(Arc<Member>),
 }
 
 impl EosSource {
@@ -53,18 +72,36 @@ impl EosSource {
     ) -> Self {
         Self {
             tracker: Arc::downgrade(tracker),
-            consumer: Arc::downgrade(consumer),
+            consumer: WeakConsumer::Kafka(Arc::downgrade(consumer)),
+        }
+    }
+
+    /// A source reading through a member of the in-process cluster.
+    #[cfg(feature = "testing")]
+    pub(crate) fn in_process(tracker: &Arc<CommitTracker>, member: &Arc<Member>) -> Self {
+        Self {
+            tracker: Arc::downgrade(tracker),
+            consumer: WeakConsumer::InProcess(Arc::downgrade(member)),
         }
     }
 
     pub(crate) fn alive(&self) -> bool {
-        self.tracker.strong_count() > 0 && self.consumer.strong_count() > 0
+        self.tracker.strong_count() > 0
+            && match &self.consumer {
+                WeakConsumer::Kafka(consumer) => consumer.strong_count() > 0,
+                #[cfg(feature = "testing")]
+                WeakConsumer::InProcess(member) => member.strong_count() > 0,
+            }
     }
 
     fn upgrade(&self) -> Option<LiveSource> {
         Some(LiveSource {
             tracker: self.tracker.upgrade()?,
-            consumer: self.consumer.upgrade()?,
+            consumer: match &self.consumer {
+                WeakConsumer::Kafka(consumer) => LiveConsumer::Kafka(consumer.upgrade()?),
+                #[cfg(feature = "testing")]
+                WeakConsumer::InProcess(member) => LiveConsumer::InProcess(member.upgrade()?),
+            },
         })
     }
 }
@@ -72,7 +109,52 @@ impl EosSource {
 /// An upgraded [`EosSource`] pinned for the duration of one window commit.
 struct LiveSource {
     tracker: Arc<CommitTracker>,
-    consumer: Arc<StreamConsumer<TrackingContext>>,
+    consumer: LiveConsumer,
+}
+
+impl LiveSource {
+    /// Adds this source's settled positions to the pipeline's open transaction, fenced by the
+    /// source's group.
+    async fn send_offsets(
+        &self,
+        publisher: &KafkaTransactionalPublisher,
+        positions: &[((Str, i32), i64)],
+    ) -> Result<(), KafkaError> {
+        match &self.consumer {
+            LiveConsumer::Kafka(consumer) => {
+                let mut offsets = TopicPartitionList::new();
+                for ((topic, partition), next) in positions {
+                    offsets
+                        .add_partition_offset(topic, *partition, Offset::Offset(*next))
+                        .map_err(KafkaError::publish)?;
+                }
+                publisher
+                    .send_offsets(offsets, group_metadata(consumer)?)
+                    .await
+            }
+            #[cfg(feature = "testing")]
+            LiveConsumer::InProcess(member) => {
+                let group = member.group().ok_or_else(no_group_metadata)?;
+                publisher.send_offsets_in_process(&group, positions)
+            }
+        }
+    }
+
+    /// Moves one partition of this source back to `offset`, after an aborted window.
+    fn seek_back(&self, topic: &str, partition: i32, offset: i64) -> Result<(), KafkaError> {
+        match &self.consumer {
+            LiveConsumer::Kafka(consumer) => consumer
+                .seek(
+                    topic,
+                    partition,
+                    Offset::Offset(offset),
+                    Duration::from_secs(5),
+                )
+                .map_err(KafkaError::consume),
+            #[cfg(feature = "testing")]
+            LiveConsumer::InProcess(member) => member.seek_partition(topic, partition, offset),
+        }
+    }
 }
 
 /// The source coordinates of one delivery, as [`EosPipeline::publish`] needs them.
@@ -655,19 +737,17 @@ async fn wait_settled(
 async fn try_commit(inner: &Arc<PipelineInner>, sources: &[LiveSource]) -> Result<(), KafkaError> {
     let mut sent: Vec<((Str, i32), i64)> = Vec::new();
     for source in sources {
-        let positions = source.tracker.stored_positions();
+        let positions: Vec<((Str, i32), i64)> = source
+            .tracker
+            .stored_positions()
+            .into_iter()
+            .map(|(key, stored)| (key, stored + 1))
+            .collect();
         if positions.is_empty() {
             continue;
         }
-        let mut offsets = TopicPartitionList::new();
-        for ((topic, partition), stored) in &positions {
-            offsets
-                .add_partition_offset(topic, *partition, Offset::Offset(stored + 1))
-                .map_err(KafkaError::publish)?;
-        }
-        let metadata = group_metadata(source)?;
-        inner.publisher.send_offsets(offsets, metadata).await?;
-        sent.extend(positions.into_iter().map(|(key, stored)| (key, stored + 1)));
+        source.send_offsets(&inner.publisher, &positions).await?;
+        sent.extend(positions);
     }
     inner.publisher.commit().await?;
     {
@@ -679,15 +759,19 @@ async fn try_commit(inner: &Arc<PipelineInner>, sources: &[LiveSource]) -> Resul
     Ok(())
 }
 
-fn group_metadata(source: &LiveSource) -> Result<ConsumerGroupMetadata, KafkaError> {
-    source.consumer.group_metadata().ok_or_else(|| {
-        KafkaError::Publish(
-            "the source consumer has no group metadata (not a group member yet or already \
-             closed); cannot commit its offsets transactionally"
-                .to_owned()
-                .into(),
-        )
-    })
+fn group_metadata(
+    consumer: &StreamConsumer<TrackingContext>,
+) -> Result<ConsumerGroupMetadata, KafkaError> {
+    consumer.group_metadata().ok_or_else(no_group_metadata)
+}
+
+fn no_group_metadata() -> KafkaError {
+    KafkaError::Publish(
+        "the source consumer has no group metadata (not a group member yet or already closed); \
+         cannot commit its offsets transactionally"
+            .to_owned()
+            .into(),
+    )
 }
 
 /// The abort path: abort the transaction and seek every enrolled partition back to the last
@@ -753,12 +837,7 @@ async fn abort_window(
         else {
             continue;
         };
-        if let Err(err) = source.consumer.seek(
-            topic,
-            *partition,
-            Offset::Offset(target),
-            Duration::from_secs(5),
-        ) {
+        if let Err(err) = source.seek_back(topic, *partition, target) {
             // A revoked partition cannot seek; its new owner resumes from the committed
             // offset on its own.
             debug!(

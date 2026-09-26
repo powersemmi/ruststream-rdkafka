@@ -1,6 +1,7 @@
-//! Conformance: the in-process transport passes `run_suite` unconditionally; the lifecycle
-//! and capability suites run against a real Kafka when `KAFKA_TEST_URL` is set (see
-//! `docker-compose.test.yml` and `just test-brokers`).
+//! Conformance: the production broker's in-process mode passes `run_suite` and every suite that
+//! takes a `Broker`, wrapped in `InProcessBroker`; the same lifecycle and capability suites run
+//! against a real Kafka when `KAFKA_TEST_URL` is set (see `docker-compose.test.yml` and
+//! `just test-brokers`).
 
 #![cfg(feature = "testing")]
 
@@ -8,8 +9,8 @@ use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+use ruststream::conformance::harness::InProcessBroker;
 use ruststream::conformance::{capabilities, harness};
-use ruststream_rdkafka::testing::KafkaTestBroker;
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPublish, KafkaTopic, StartOffset};
 use tokio::runtime::Handle;
 use tokio::task;
@@ -39,17 +40,31 @@ async fn create_topic(url: &str, topic: &str) {
     }
 }
 
+/// The production broker as a service configures it; in process its address is never dialled.
+fn in_process() -> InProcessBroker<KafkaBroker> {
+    InProcessBroker::new(KafkaBroker::new(["kafka:9092"]).default_group("tests"))
+}
+
+/// The in-process suites' descriptor: a group of their own, reading from the start of the log
+/// and settling by the tracked commit, as the live suites' descriptor does.
+fn in_process_topic(name: &str) -> KafkaTopic {
+    KafkaTopic::new(name)
+        .group("conformance")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kafka_test_broker_passes_conformance_suite() {
-    harness::run_suite(|| KafkaTestBroker::new().default_group("tests")).await;
+async fn the_in_process_broker_passes_the_routing_suite() {
+    harness::run_suite(|| KafkaBroker::new(["kafka:9092"]).default_group("tests")).await;
 }
 
 // The harness takes higher-ranked closures that method paths cannot satisfy.
 #[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kafka_test_broker_passes_lifecycle() {
+async fn the_in_process_broker_passes_lifecycle() {
     harness::lifecycle(
-        || KafkaTestBroker::new().default_group("tests"),
+        in_process,
         |name| KafkaTopic::new(name).group("conformance"),
         |connected| connected.publisher(KafkaPublish::default()),
     )
@@ -59,12 +74,46 @@ async fn kafka_test_broker_passes_lifecycle() {
 // The harness takes higher-ranked closures that method paths cannot satisfy.
 #[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kafka_test_broker_reports_a_reachable_redelivery_address() {
+async fn the_in_process_broker_reports_a_reachable_redelivery_address() {
     harness::redelivery_address(
-        || KafkaTestBroker::new().default_group("tests"),
+        in_process,
         |name| KafkaTopic::new(name).group("conformance"),
         |connected| connected.publisher(KafkaPublish::default()),
     )
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_passes_batches() {
+    capabilities::batches(in_process, in_process_topic, |connected| {
+        connected.publisher(KafkaPublish::default())
+    })
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_passes_transactions() {
+    capabilities::transactions(in_process, in_process_topic, |connected| {
+        let policy = KafkaPublish::default().transactional_id("conformance-tx");
+        task::block_in_place(|| {
+            Handle::current().block_on(connected.transactional_publisher(policy))
+        })
+        .expect("transactional publisher must pair")
+    })
+    .await;
+}
+
+// The harness takes higher-ranked closures that method paths cannot satisfy.
+#[allow(clippy::redundant_closure, clippy::redundant_closure_for_method_calls)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_passes_seeking() {
+    capabilities::seeking(in_process, in_process_topic, |connected| {
+        connected.publisher(KafkaPublish::default())
+    })
     .await;
 }
 

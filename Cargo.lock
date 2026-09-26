@@ -1961,6 +1961,7 @@ dependencies = [
  "prost-reflect",
  "protox",
  "rdkafka",
+ "regex",
  "reqwest 0.12.28",
  "ruststream",
  "schema_registry_converter",

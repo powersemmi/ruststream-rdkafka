@@ -1,5 +1,5 @@
-//! A Protobuf handler under test, in process: the same generated types and the same mount, no
-//! cluster and no registry.
+//! A Protobuf handler under test, in process: the production app, the same generated types and
+//! the same mount, no cluster and no registry.
 //!
 //! Reading is what makes that possible. A delivery decodes against the reader's own generated
 //! type, so the envelope a registry-backed producer wrote in front of the message costs one
@@ -19,10 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ruststream::prelude::*;
-use ruststream::runtime::{AppInfo, RustStream};
+use ruststream::runtime::{App, AppInfo, RustStream};
 use ruststream::testing::TestApp;
-use ruststream_rdkafka::protobuf;
-use ruststream_rdkafka::testing::KafkaTestBroker;
+use ruststream_rdkafka::{KafkaBroker, protobuf};
 
 /// What `prost-build` emits, plus the two lane derives. `prost` owns the bytes on the way out;
 /// reading steps over the Confluent envelope first, which is the only asymmetry.
@@ -94,26 +93,33 @@ impl Handle<Order, Confirmation, (), (), Orders> for Confirm {
 }
 // --8<-- [end:manual]
 
+/// The app `main` runs in production, and the one the test below hands the harness.
+fn app(seen: Seen) -> impl App<State = Orders> {
+    // --8<-- [start:mount]
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .on_startup(async move |()| Ok::<_, std::io::Error>(Orders { seen }))
+        .with_broker(
+            KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+            |b| {
+                // The mount names the subscription and the reply's destination, and nothing else.
+                // A Kafka descriptor (`KafkaTopic::new("orders").group(..)`) goes here the same way
+                // when the subscription needs settings a bare name cannot carry.
+                b.include(
+                    subscriber("orders", Confirm)
+                        .reply()
+                        .to("confirmations")
+                        .build(),
+                );
+            },
+        )
+    // --8<-- [end:mount]
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let seen = Seen::default();
-    let app_seen = seen.clone();
-    // --8<-- [start:mount]
-    let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
-        .on_startup(async move |()| Ok::<_, std::io::Error>(Orders { seen: app_seen }))
-        .with_broker(KafkaTestBroker::new().default_group("orders-svc"), |b| {
-            // The mount names the subscription and the reply's destination, and nothing else.
-            // A Kafka descriptor (`KafkaTopic::new("orders").group(..)`) goes here the same way
-            // when the subscription needs settings a bare name cannot carry.
-            b.include(
-                subscriber("orders", Confirm)
-                    .reply()
-                    .to("confirmations")
-                    .build(),
-            );
-        });
-    // --8<-- [end:mount]
-    let tb = TestApp::start(app).await?;
+    // In process: the broker's address is never dialled.
+    let tb = TestApp::start(app(seen.clone())).await?;
 
     // --8<-- [start:testapp]
     // The seeded record carries the Confluent envelope a registry-backed producer writes: the
@@ -131,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The reply is a publish value like any other, and its own bytes go on the topic untouched.
     let published = tb
-        .broker::<KafkaTestBroker>()
+        .broker::<KafkaBroker>()
         .published::<()>("confirmations")
         .assert_called_once();
     assert_eq!(
@@ -143,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // --8<-- [end:testapp]
 
-    tb.broker::<KafkaTestBroker>()
+    tb.broker::<KafkaBroker>()
         .subscriber("orders")
         .assert_called_once()
         .settled(HandlerOutcome::ack());

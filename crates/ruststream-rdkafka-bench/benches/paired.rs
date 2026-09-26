@@ -92,8 +92,8 @@ use tokio::task;
 use tokio::time::timeout;
 
 // A benchmark measures what ships. With the framework's harness feature compiled in, this crate
-// ships an in-process test broker beside the real one and every delivery records what the handler
-// saw, so a number taken with it on is not the production path. The benchmark lives in a package
+// carries its in-process mode beside the live transport and every delivery records what the
+// handler saw, so a number taken with it on is not the production path. The benchmark lives in a package
 // of its own for the same reason: `ruststream-rdkafka`'s dev-dependencies enable that feature
 // through the conformance harness, and a benchmark inside that package would link it.
 #[cfg(feature = "testing")]

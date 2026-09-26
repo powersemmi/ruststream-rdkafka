@@ -143,7 +143,8 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 транзакции и конвейеры exactly-once.
 [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - конверт Confluent, рядом с ним
 [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) и [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html), а
-[`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) - внутрипроцессный брокер.
+[Тестирование](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) - само приложение сервиса под `TestApp`, внутри процесса и на
+работающей Kafka.
 
 Установка, учебник и список брокеров - на собственном сайте фреймворка:
 <https://powersemmi.github.io/ruststream/>.
