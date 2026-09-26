@@ -264,16 +264,15 @@ impl KafkaMessage {
                 .record
                 .shared()
                 .tracker
-                .settle_with(*slot, self.offset, |position| {
-                    self.record
-                        .store(self.topic_name(), self.partition, self.offset, position)
+                .settle_with(*slot, self.offset, |position, target| {
+                    self.record.store(self.offset, position, target)
                 })
                 .map_err(|err| AckError::Broker(Box::new(err))),
             Settlement::Transactional { slot } => {
                 let infallible: Result<(), Infallible> = self.record.shared().tracker.settle_with(
                     *slot,
                     self.offset,
-                    |_position| Ok(()),
+                    |_position, _target| Ok(()),
                 );
                 infallible.expect("no-op store cannot fail");
                 Ok(())
