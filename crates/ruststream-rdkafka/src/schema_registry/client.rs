@@ -137,10 +137,11 @@ pub trait RegistryClient: Send + Sync + 'static {
         definition: String,
     ) -> BoxFuture<'_, Result<u32, KafkaError>>;
 
-    /// Whether `definition` is compatible with `subject`'s latest version, under whatever
+    /// Whether the registry would register `definition` under `subject`, judged by the
     /// compatibility level the subject is configured with.
     ///
-    /// This is what Confluent's `latest.compatibility.strict` checks. The default answers `None`,
+    /// The level decides which versions take part: the latest one for `BACKWARD`, `FORWARD` and
+    /// `FULL`, every version for their `_TRANSITIVE` forms. The default answers `None`,
     /// meaning "this client cannot tell", and the caller then skips the check rather than reading
     /// silence as either answer - so a client written before this method existed keeps working.
     ///
@@ -375,7 +376,10 @@ impl RegistryClient for HttpRegistryClient {
         schema_type: SchemaType,
         definition: String,
     ) -> BoxFuture<'_, Result<Option<bool>, KafkaError>> {
-        let path = format!("/compatibility/subjects/{subject}/versions/latest?verbose=true");
+        // `/versions` runs the check registration runs, against every version the subject's
+        // level names; `/versions/latest` compares with the latest alone even under a
+        // `_TRANSITIVE` level, and passes a schema the registry then refuses to register.
+        let path = format!("/compatibility/subjects/{subject}/versions?verbose=true");
         let subject = subject.to_owned();
         Box::pin(async move {
             let body = serde_json::json!({
@@ -389,7 +393,9 @@ impl RegistryClient for HttpRegistryClient {
                 .await
                 .map_err(|err| self.failed(&path, err))?;
             // A subject with no versions cannot be checked against one; that is the missing
-            // subject case, which the caller has already settled by its own policy.
+            // subject case, which the caller has already settled by its own policy. The API
+            // documents a 404 for it; Confluent 7.7.1 answers "compatible" instead, which reads
+            // the same way here because nothing stands against the schema.
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
@@ -406,7 +412,8 @@ impl RegistryClient for HttpRegistryClient {
                 return Err(KafkaError::SchemaRegistry(
                     format!(
                         "the schema a codec publishes under subject {subject:?} is not \
-                         compatible with the version the registry holds: {}",
+                         compatible with the versions the subject's compatibility level \
+                         checks it against: {}",
                         verdict.messages.join(" "),
                     )
                     .into(),

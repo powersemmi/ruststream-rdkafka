@@ -27,7 +27,7 @@ use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Subs
 use ruststream_rdkafka::avro::AvroCodec;
 use ruststream_rdkafka::{
     ConnectedKafkaBroker, KafkaBroker, KafkaPublish, KafkaTopic, MissingSubject, SchemaFramed,
-    SchemaPrefetch, SchemaRegistry, StartOffset,
+    SchemaPrefetch, SchemaRegistry, SchemaType, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -480,4 +480,75 @@ async fn live_a_drifted_model_is_caught_at_connect() {
         .shutdown()
         .await
         .expect("shutdown");
+}
+
+/// Sets `subject`'s compatibility level, which the registry facade has no call for because a
+/// service never needs one.
+async fn set_level(registry: &str, subject: &str, level: &str) {
+    reqwest::Client::new()
+        .put(format!("{registry}/config/{subject}"))
+        .json(&serde_json::json!({ "compatibility": level }))
+        .send()
+        .await
+        .expect("reach the registry")
+        .error_for_status()
+        .expect("the registry takes the level");
+}
+
+/// Under a transitive level the startup check asks what registration would: every version the
+/// level names, not only the latest. The model is compatible with version 3 and not with
+/// version 1, so the registry refuses to register it, and connect must refuse too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_a_transitive_level_checks_the_whole_history_at_connect() {
+    let Some((registry, kafka)) = live_urls() else {
+        return;
+    };
+    let subject = unique("codec-transitive");
+    // The history is written under NONE: version 2 changes the type of `id`, which no level
+    // but NONE lets through. Versions 2 and 3 agree with each other in both directions.
+    set_level(&registry, &subject, "NONE").await;
+    let client = SchemaRegistry::new(&registry);
+    for fields in [
+        r#"{"name":"id","type":"long"},{"name":"item","type":"string"}"#,
+        r#"{"name":"id","type":"string"},{"name":"item","type":"string"},
+           {"name":"note","type":"string","default":"none"}"#,
+        r#"{"name":"id","type":"string"},{"name":"item","type":"string"},
+           {"name":"note","type":"string","default":"none"},
+           {"name":"tag","type":"string","default":""}"#,
+    ] {
+        let schema = format!(r#"{{"type":"record","name":"CodecOrder","fields":[{fields}]}}"#);
+        client
+            .register(&subject, SchemaType::Avro, schema)
+            .await
+            .expect("register a version of the history");
+    }
+    set_level(&registry, &subject, "FULL_TRANSITIVE").await;
+
+    // The registry itself refuses the model: this is the answer the check must agree with.
+    let refused = client
+        .register(
+            &subject,
+            SchemaType::Avro,
+            Drifted::get_schema().canonical_form(),
+        )
+        .await
+        .expect_err("version 1 makes the model incompatible under FULL_TRANSITIVE");
+    assert!(refused.to_string().contains("409"), "{refused}");
+
+    let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    let _codec = AvroCodec::registry(&prefetch).register::<Drifted>(&subject);
+    let err = KafkaBroker::new([kafka])
+        .schema_prefetch(prefetch)
+        .connect()
+        .await
+        .expect_err("a model the registry would not register must not reach a topic");
+    assert!(err.to_string().contains(&subject), "{err}");
+    assert!(
+        err.to_string().contains("not compatible"),
+        "the registry's own account travels in the error: {err}",
+    );
+    assert!(
+        err.to_string().contains("oldSchemaVersion: 1"),
+        "the version that refused is the first one, not the latest: {err}",
+    );
 }
