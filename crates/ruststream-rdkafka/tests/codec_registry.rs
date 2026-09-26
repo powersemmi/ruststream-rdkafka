@@ -74,7 +74,8 @@ impl<T> Probe<T> {
 
     fn record(&self, value: T) {
         self.seen.lock().expect("probe mutex poisoned").push(value);
-        self.done.notify_waiters();
+        // A stored permit: the record may arrive before the test starts waiting for it.
+        self.done.notify_one();
     }
 }
 
@@ -90,24 +91,24 @@ struct JsonApp {
 
 // The handler is an ordinary handler over an ordinary struct: the codec put the schema in the
 // pipeline, so nothing about Avro reaches this signature.
-#[subscriber(
-    KafkaTopic::new(std::env::var("CODEC_AVRO_TOPIC").expect("topic env"))
-        .group(std::env::var("CODEC_AVRO_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaTopic)]
 async fn take_order(order: &OrderV2, State(probe): State<Probe<OrderV2>>) -> HandlerOutcome {
     probe.record(order.clone());
     HandlerOutcome::ack()
 }
 
-#[subscriber(
-    KafkaTopic::new(std::env::var("CODEC_JSON_TOPIC").expect("topic env"))
-        .group(std::env::var("CODEC_JSON_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaTopic)]
 async fn take_json(order: &JsonOrder, State(probe): State<Probe<JsonOrder>>) -> HandlerOutcome {
     probe.record(order.clone());
     HandlerOutcome::ack()
+}
+
+/// The subscription every live test here reads through: the run's own topic and group, from the
+/// start of the log.
+fn from_earliest(topic: &str, group: &str) -> KafkaTopic {
+    KafkaTopic::new(topic)
+        .group(group)
+        .start(StartOffset::Earliest)
 }
 
 fn unique(base: &str) -> String {
@@ -180,10 +181,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
         return;
     };
     let topic = unique("codec-avro");
-    unsafe {
-        std::env::set_var("CODEC_AVRO_TOPIC", &topic);
-        std::env::set_var("CODEC_AVRO_GROUP", unique("codec-avro-group"));
-    }
+    let group = unique("codec-avro-group");
     let marker = i64::from(std::process::id()) * 1000 + 11;
 
     // One subject, two versions. The second is accepted because adding a field with a default is
@@ -229,7 +227,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
     let app = RustStream::new(AppInfo::new("codec-avro", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_order);
+            b.include(take_order.map_source(|_| from_earliest(&topic, &group)));
         });
 
     let done = Arc::clone(&probe.done);
@@ -289,10 +287,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
         return;
     };
     let topic = unique("codec-json");
-    unsafe {
-        std::env::set_var("CODEC_JSON_TOPIC", &topic);
-        std::env::set_var("CODEC_JSON_GROUP", unique("codec-json-group"));
-    }
+    let group = unique("codec-json-group");
     let marker = i64::from(std::process::id()) * 1000 + 13;
 
     let subject = unique("codec-json-orders");
@@ -342,7 +337,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
     let app = RustStream::new(AppInfo::new("codec-json", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(JsonApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_json);
+            b.include(take_json.map_source(|_| from_earliest(&topic, &group)));
         });
 
     let done = Arc::clone(&probe.done);
