@@ -462,9 +462,6 @@ fn resume_from_starts(
 
 /// Polls a kept consumer until its stream takes over, serving the group's events. Runs on the
 /// blocking pool: the rebalance callbacks it serves ask the cluster for start positions.
-///
-/// It reads through the consume loop's own functions, so the client's code keeps one caller and
-/// is inlined into that loop as before.
 pub(crate) fn keep(cart: &Cart) {
     let client: &StreamConsumer<TrackingContext> = &cart.consumer;
     let startup = &client.context().startup;
