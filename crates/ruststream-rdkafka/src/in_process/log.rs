@@ -169,6 +169,36 @@ impl Topic {
     }
 }
 
+/// The most framing librdkafka reserves for one record of the v2 message format: its length,
+/// attributes, timestamp and offset deltas, the key and value lengths and the header count, each
+/// counted at the widest its varint can be (`RD_KAFKAP_MESSAGE_V2_MAX_OVERHEAD`).
+const RECORD_OVERHEAD: usize = 5 + 1 + 10 + 5 + 5 + 5 + 5;
+
+/// The size librdkafka holds a record to against `message.max.bytes` before it takes it: the
+/// record's framing, its key and value, and each header as it is serialized, a varint length
+/// before its name and before its value.
+pub(crate) fn record_size(payload: &[u8], key: Option<&[u8]>, headers: &[WireHeader]) -> usize {
+    let headers: usize = headers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.as_ref().map_or(0, Bytes::len);
+            name.len() + value + length_varint(name.len()) + length_varint(value)
+        })
+        .sum();
+    RECORD_OVERHEAD + key.map_or(0, <[u8]>::len) + payload.len() + headers
+}
+
+/// How many bytes the varint librdkafka writes a length as takes: the length is zigzag encoded,
+/// which doubles it, then written seven bits to a byte.
+fn length_varint(len: usize) -> usize {
+    // Doubling a non-zero length adds one bit to it.
+    let bits = match len {
+        0 => 0,
+        _ => (usize::BITS - len.leading_zeros() + 1) as usize,
+    };
+    bits.div_ceil(7).max(1)
+}
+
 /// The wire headers a publish's header map becomes: every header except the ones this crate maps
 /// onto the record itself (the key) or strips (the exactly-once source coordinates).
 pub(crate) fn wire_headers(headers: &ruststream::HeaderMap) -> Vec<WireHeader> {
@@ -242,6 +272,23 @@ mod tests {
         let uncommitted = Isolation::ReadUncommitted;
         assert_eq!(uncommitted.next(&entries, 1).map(|(at, _)| at), Some(1));
         assert_eq!(uncommitted.backlog(&entries, 0), 5);
+    }
+
+    #[test]
+    fn a_record_counts_as_librdkafka_counts_it() {
+        assert_eq!(record_size(b"", None, &[]), 36);
+        assert_eq!(record_size(&vec![0; 999_964], None, &[]), 1_000_000);
+        // A 63-byte length doubles into one varint byte, a 64-byte one into two.
+        let header =
+            |name: usize, value: usize| ("n".repeat(name), Some(Bytes::from(vec![0; value])));
+        assert_eq!(
+            record_size(b"", Some(b"key"), &[header(1, 63)]),
+            36 + 3 + 1 + 63 + 1 + 1
+        );
+        assert_eq!(
+            record_size(b"", None, &[header(1, 64)]),
+            36 + 1 + 64 + 1 + 2
+        );
     }
 
     #[test]

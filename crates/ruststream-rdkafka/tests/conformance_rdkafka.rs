@@ -412,15 +412,27 @@ async fn auto_commit_settlements_match_in_process() {
     .await;
 }
 
-/// What the cluster refuses: a topic name outside its grammar, to publish to and to subscribe to.
+/// What the cluster refuses: a topic name outside its grammar, to publish to and to subscribe
+/// to, and a record one byte over what the producer hands the cluster (`message.max.bytes`, less
+/// the 36 bytes librdkafka reserves for a record's framing).
+///
+/// The size probe reads its record back through a subscription opened by name, which joins the
+/// group before it reads, so the broker reads a partition the group has not committed from its
+/// start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_in_process_transport_refuses_what_the_server_refuses() {
     let Some(url) = live_cluster().await else {
         return;
     };
     let group = group("refusals");
+    let sized = unique_subject("conformance.refusals.size");
+    create_topic(&url, &sized).await;
     in_process::refuses_like_the_server(
-        || KafkaBroker::new([url.clone()]).default_group(group.clone()),
+        || {
+            KafkaBroker::new([url.clone()])
+                .default_group(group.clone())
+                .config("auto.offset.reset", "earliest")
+        },
         |connected| connected.publisher(KafkaPublish::default()),
         [
             Refusal::Publish {
@@ -428,6 +440,10 @@ async fn the_in_process_transport_refuses_what_the_server_refuses() {
             },
             Refusal::Subscription {
                 source: KafkaTopic::new("conformance refused topic").group(group.clone()),
+            },
+            Refusal::PayloadOver {
+                name: sized,
+                limit: 999_964,
             },
         ],
     )

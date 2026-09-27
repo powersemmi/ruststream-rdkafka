@@ -232,12 +232,7 @@ impl Cluster {
             .get(PARTITION_KEY_HEADER)
             .map(Bytes::copy_from_slice);
         let wire = log::wire_headers(headers);
-        let size = payload.len()
-            + key.as_ref().map_or(0, Bytes::len)
-            + wire
-                .iter()
-                .map(|(name, value)| name.len() + value.as_ref().map_or(0, Bytes::len))
-                .sum::<usize>();
+        let size = log::record_size(payload, key.as_deref(), &wire);
         if size > self.settings.max_message_bytes {
             return Err(produce_error(RDKafkaErrorCode::MessageSizeTooLarge));
         }

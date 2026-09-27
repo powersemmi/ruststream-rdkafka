@@ -362,6 +362,37 @@ async fn nack_requeue_redelivers_on_the_subscription() {
     broker.shutdown().await.expect("shutdown");
 }
 
+/// librdkafka holds a record to `message.max.bytes` with its framing and its headers counted: 36
+/// bytes of framing, and a varint length before each header name and value. The in-process
+/// cluster counts a record the same way, which its own unit tests pin to these numbers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_record_size_limit_counts_framing_and_headers() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("record-size");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+    let publisher = broker.publisher(KafkaPublish::default());
+    let mut headers = HeaderMap::new();
+    headers.insert("n", vec![0u8; 64]);
+    // 36 of framing, then the header: its name, its value, and one and two varint bytes.
+    let fits = 1_000_000 - 36 - (1 + 64 + 1 + 2);
+    for (payload, accepted) in [(fits, true), (fits + 1, false)] {
+        let body = vec![0u8; payload];
+        let sent = publisher
+            .publish(
+                OutgoingMessage::new(&topic, body.as_slice()).with_headers(headers.clone()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            sent.is_ok(),
+            accepted,
+            "a {payload}-byte payload with a 64-byte header: {sent:?}",
+        );
+    }
+    broker.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn nack_drop_settles_the_offset() {
     let Some(url) = kafka_url() else { return };
