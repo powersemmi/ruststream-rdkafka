@@ -15,8 +15,11 @@ use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
 use ruststream::conformance::harness::InProcessBroker;
 use ruststream::conformance::helpers::unique_subject;
+use ruststream::conformance::in_process::Refusal;
 use ruststream::conformance::message_shape::OptionCases;
-use ruststream::conformance::{capabilities, harness, lifecycle, message_shape, retry, settlement};
+use ruststream::conformance::{
+    capabilities, harness, in_process, lifecycle, message_shape, retry, settlement,
+};
 use ruststream::testing::Backlog;
 use ruststream::{Bytes, HeaderMap, Name};
 use ruststream_rdkafka::{
@@ -405,6 +408,28 @@ async fn auto_commit_settlements_match_in_process() {
         },
         |connected| connected.publisher(KafkaPublish::default()),
         Duration::ZERO,
+    )
+    .await;
+}
+
+/// What the cluster refuses: a topic name outside its grammar, to publish to and to subscribe to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_transport_refuses_what_the_server_refuses() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("refusals");
+    in_process::refuses_like_the_server(
+        || KafkaBroker::new([url.clone()]).default_group(group.clone()),
+        |connected| connected.publisher(KafkaPublish::default()),
+        [
+            Refusal::Publish {
+                name: "conformance refused topic".to_owned(),
+            },
+            Refusal::Subscription {
+                source: KafkaTopic::new("conformance refused topic").group(group.clone()),
+            },
+        ],
     )
     .await;
 }

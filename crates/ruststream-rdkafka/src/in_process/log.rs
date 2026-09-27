@@ -169,18 +169,6 @@ impl Topic {
     }
 }
 
-/// Whether Kafka accepts `name` as a topic: 1 to 249 characters from `[a-zA-Z0-9._-]`, and not
-/// `.` or `..`.
-pub(crate) fn legal_topic(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 249
-        && name != "."
-        && name != ".."
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
 /// The wire headers a publish's header map becomes: every header except the ones this crate maps
 /// onto the record itself (the key) or strips (the exactly-once source coordinates).
 pub(crate) fn wire_headers(headers: &ruststream::HeaderMap) -> Vec<WireHeader> {
@@ -266,13 +254,5 @@ mod tests {
         assert_eq!(topic.place(Some(-1), None), None);
         let keyless: Vec<_> = (0..4).map(|_| topic.place(None, None)).collect();
         assert_eq!(keyless, [Some(0), Some(1), Some(2), Some(3)]);
-    }
-
-    #[test]
-    fn topic_names_follow_kafkas_rule() {
-        assert!(legal_topic("orders.eu-1_v2"));
-        for bad in ["", ".", "..", "orders eu", "orders/eu", &"x".repeat(250)] {
-            assert!(!legal_topic(bad), "{bad:?} must be refused");
-        }
     }
 }

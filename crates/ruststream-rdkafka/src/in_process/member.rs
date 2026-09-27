@@ -117,22 +117,6 @@ impl MemberSpec {
         })
     }
 
-    /// Refuses a topic name the cluster would refuse.
-    pub(crate) fn validate(&self) -> Result<(), KafkaError> {
-        let topics: Vec<&String> = match &self.reader {
-            Reader::Subscribed { topics, .. } => topics.iter().collect(),
-            Reader::Assigned { topic, .. } => vec![topic],
-        };
-        for topic in topics {
-            if !super::log::legal_topic(topic) {
-                return Err(KafkaError::subscribe(RdKafkaError::Subscription(format!(
-                    "{topic:?} is not a legal Kafka topic name"
-                ))));
-            }
-        }
-        Ok(())
-    }
-
     /// Whether this member reads `topic`.
     pub(crate) fn reads(&self, topic: &str) -> bool {
         match &self.reader {

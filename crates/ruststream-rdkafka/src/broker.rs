@@ -37,7 +37,7 @@ use crate::publisher::{KafkaPublish, KafkaPublisher};
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
 use crate::subscriber::{DeliveredTopic, KafkaSubscriber};
 use crate::subscription::{
-    Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan,
+    Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan, refuse_illegal_topics,
 };
 #[cfg(feature = "testing")]
 use crate::testable::Routes;
@@ -587,8 +587,8 @@ impl ConnectedKafkaBroker {
     /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
     /// down, [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
     /// consumer group (or the descriptor's own options do not hold together), and
-    /// [`KafkaError::Subscribe`] when the consumer cannot be created or the subscription is
-    /// rejected.
+    /// [`KafkaError::Subscribe`] when a topic name is not one Kafka accepts, the consumer cannot
+    /// be created or the subscription is rejected.
     ///
     /// # Examples
     ///
@@ -620,6 +620,7 @@ impl ConnectedKafkaBroker {
     /// base config, and the combinations manual assignment cannot honor.
     pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaSubscriber, KafkaError> {
         self.state.ensure_open(&plan.name)?;
+        refuse_illegal_topics(&plan.reader)?;
         let manual = matches!(plan.reader, Reader::Assigned { .. });
         let group = plan
             .settings
@@ -779,7 +780,7 @@ impl ConnectedKafkaBroker {
             config,
             Arc::clone(&tracker),
         )?;
-        let member = cluster.join(spec)?;
+        let member = cluster.join(spec);
         if let Commit::Transactional(pipeline) = &plan.settings.commit {
             self.state
                 .register_eos(pipeline, EosSource::in_process(&tracker, &member));

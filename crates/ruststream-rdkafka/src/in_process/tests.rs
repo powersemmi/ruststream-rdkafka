@@ -51,7 +51,7 @@ fn member(
         Arc::new(CommitTracker::default()),
     )
     .expect("a valid consumer configuration");
-    cluster.join(spec).expect("join")
+    cluster.join(spec)
 }
 
 fn produce(cluster: &Cluster, topic: &str, payload: &str, key: Option<&str>) {
