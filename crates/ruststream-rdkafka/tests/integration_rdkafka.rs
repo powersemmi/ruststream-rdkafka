@@ -294,7 +294,7 @@ async fn tracked_commit_survives_subscriber_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nack_requeue_leaves_offset_for_redelivery() {
+async fn nack_requeue_redelivers_on_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("requeue");
     let group = unique("group");
@@ -302,6 +302,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let broker = connected_broker(&url).await;
 
     publish(&broker, &topic, b"poison").await;
+    publish(&broker, &topic, b"next").await;
 
     {
         let mut subscriber = broker
@@ -312,6 +313,35 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
         let msg = next_message(&mut stream).await;
         assert_eq!(msg.payload(), b"poison");
         msg.nack(true).await.expect("nack requeue");
+        let again = next_message(&mut stream).await;
+        assert_eq!(
+            again.payload(),
+            b"poison",
+            "nack(true) must deliver the record again on its subscription",
+        );
+        again.ack().await.expect("ack");
+        let next = next_message(&mut stream).await;
+        assert_eq!(next.payload(), b"next");
+        next.ack().await.expect("ack");
+    }
+
+    // A requeue that was never delivered again leaves its offset uncommitted: the next member
+    // of the group reads the record from there.
+    publish(&broker, &topic, b"held").await;
+    {
+        let mut subscriber = broker
+            .subscribe_with(tracked(&topic, &group))
+            .await
+            .expect("re-subscribe");
+        let msg = {
+            let mut stream = Box::pin(subscriber.stream());
+            next_message(&mut stream).await
+        };
+        assert_eq!(msg.payload(), b"held");
+        drop(subscriber);
+        msg.nack(true)
+            .await
+            .expect("nack requeue after the subscription closed");
     }
 
     let mut subscriber = broker
@@ -322,8 +352,8 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let msg = next_message(&mut stream).await;
     assert_eq!(
         msg.payload(),
-        b"poison",
-        "nack(true) must leave the offset uncommitted for redelivery",
+        b"held",
+        "a requeue with no subscription left must leave the offset uncommitted for redelivery",
     );
     msg.ack().await.expect("ack");
 

@@ -26,6 +26,7 @@ use tokio::sync::Notify;
 use tokio::sync::futures::Notified;
 use tracing::warn;
 
+use crate::attention::Attention;
 use crate::error::KafkaError;
 use crate::seek::{self, KafkaPosition};
 
@@ -228,6 +229,10 @@ pub(crate) struct CommitTracker {
     /// Woken by every reposition, so an open window closes at once instead of holding the
     /// replayed deliveries behind an interval it can no longer commit.
     repositions: Notify,
+    /// What the subscription's stream serves ahead of the fetch queue. It lives here because the
+    /// tracker is the one block the consumer's context, the stream and every delivery already
+    /// share.
+    pub(crate) attention: Attention,
 }
 
 impl CommitTracker {
@@ -286,6 +291,16 @@ impl CommitTracker {
         drop(partitions);
         self.repositioned.store(true, Ordering::Release);
         self.repositions.notify_waiters();
+    }
+
+    /// Whether a delivery pulled under `slot` still belongs to the partition's read position: a
+    /// seek or a revoke since then hands its record to the replay or to the next owner instead.
+    pub(crate) fn is_current(&self, slot: PartitionSlot) -> bool {
+        let partitions = self
+            .partitions
+            .lock()
+            .expect("commit tracker mutex poisoned");
+        partitions.states[slot.index].generation == slot.generation
     }
 
     /// Whether this subscription was repositioned since the last check, clearing the flag.
@@ -453,18 +468,6 @@ pub(crate) struct TrackingContext {
     /// assigns nothing until something polls the consumer, and the runtime polls only after the
     /// subscription is open, so the position outlives the seek call that carried it.
     start: Mutex<Option<KafkaPosition>>,
-    /// A start position the rebalance could not apply. Nothing can be returned from a
-    /// librdkafka callback, and a subscription silently reading from somewhere other than the
-    /// position it was opened at is what this wave exists to catch, so the failure waits here
-    /// for the subscriber's stream to yield it.
-    start_failure: Mutex<Option<KafkaError>>,
-    /// Whether `start_failure` holds anything. The consume loop asks once per delivery, and a
-    /// rebalance that could not open the subscription is a once-per-lifetime event, so the
-    /// answer is read from here instead of by taking the mutex on every record.
-    start_failed: AtomicBool,
-    /// Woken when a start failure is recorded, so a stream waiting on a topic that may never
-    /// deliver anything still reports it.
-    start_failures: Notify,
 }
 
 impl TrackingContext {
@@ -473,9 +476,6 @@ impl TrackingContext {
             tracker,
             subscription: subscription.into(),
             start: Mutex::new(None),
-            start_failure: Mutex::new(None),
-            start_failed: AtomicBool::new(false),
-            start_failures: Notify::new(),
         }
     }
 
@@ -503,48 +503,13 @@ impl TrackingContext {
             // A callback can return nothing, so the failure travels to the subscriber instead:
             // reading from the group's committed position when the mount site named another one
             // is exactly what must not pass for a working subscription.
-            self.record_start_failure(KafkaError::InvalidOptions(format!(
-                "subscription {:?} could not be opened at its start position: {err}",
-                self.subscription,
-            )));
+            self.tracker
+                .attention
+                .record_start_failure(KafkaError::InvalidOptions(format!(
+                    "subscription {:?} could not be opened at its start position: {err}",
+                    self.subscription,
+                )));
         }
-    }
-
-    /// Records a start position the rebalance could not apply, keeping the first one: it names
-    /// what went wrong, and the ones behind it are the same assignment failing again.
-    fn record_start_failure(&self, err: KafkaError) {
-        let mut slot = self
-            .start_failure
-            .lock()
-            .expect("start failure mutex poisoned");
-        if slot.is_none() {
-            *slot = Some(err);
-        }
-        drop(slot);
-        // Released after the slot is filled, so a reader that sees the flag sees the failure.
-        self.start_failed.store(true, Ordering::Release);
-        self.start_failures.notify_waiters();
-    }
-
-    /// Takes the recorded start failure, for the subscriber to yield on its stream.
-    pub(crate) fn take_start_failure(&self) -> Option<KafkaError> {
-        if !self.start_failed.load(Ordering::Acquire) {
-            return None;
-        }
-        let taken = self
-            .start_failure
-            .lock()
-            .expect("start failure mutex poisoned")
-            .take();
-        self.start_failed.store(taken.is_none(), Ordering::Release);
-        taken
-    }
-
-    /// A waiter for the next start failure. Create it BEFORE calling
-    /// [`take_start_failure`](Self::take_start_failure), so one landing between the two is not
-    /// missed.
-    pub(crate) fn start_failure_waiter(&self) -> Notified<'_> {
-        self.start_failures.notified()
     }
 }
 

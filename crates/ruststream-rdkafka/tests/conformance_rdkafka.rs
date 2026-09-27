@@ -141,6 +141,17 @@ async fn the_in_process_broker_reports_a_reachable_redelivery_address_for_a_name
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_holds_tracked_settlements_to_their_meaning() {
+    settlement::suite(
+        in_process,
+        in_process_topic,
+        |connected| connected.publisher(KafkaPublish::default()),
+        Duration::ZERO,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_in_process_broker_holds_auto_commit_settlements_to_their_meaning() {
     settlement::suite(
         in_process,
@@ -148,6 +159,14 @@ async fn the_in_process_broker_holds_auto_commit_settlements_to_their_meaning() 
         |connected| connected.publisher(KafkaPublish::default()),
         Duration::ZERO,
     )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_passes_batches() {
+    capabilities::batches(in_process, in_process_topic, |connected| {
+        connected.publisher(KafkaPublish::default())
+    })
     .await;
 }
 
@@ -309,6 +328,38 @@ async fn live_cluster() -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_lifecycle() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("lifecycle");
+    let servers = url.clone();
+    harness::lifecycle(
+        move || KafkaBroker::new([servers.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+/// `KafkaTopic` is the crate's one addressed descriptor, and this is the promise it makes: the
+/// topic it reports is a topic a publish on this broker reaches it through, which is exactly
+/// what the runtime does with a deferred `retry_after` copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_redelivery_address() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("redelivery");
+    retry::redelivery_address(
+        || KafkaBroker::new([url.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_flushes_acknowledgements_and_publishes() {
     let Some(url) = live_cluster().await else {
         return;
@@ -319,6 +370,21 @@ async fn shutdown_flushes_acknowledgements_and_publishes() {
         |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),
         Backlog::Delivered,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tracked_settlements_match_in_process() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("settlement-tracked");
+    settlement::matches_in_process(
+        || KafkaBroker::new([url.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
+        Duration::ZERO,
     )
     .await;
 }
@@ -339,6 +405,20 @@ async fn auto_commit_settlements_match_in_process() {
         },
         |connected| connected.publisher(KafkaPublish::default()),
         Duration::ZERO,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_batches_capability() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("batches");
+    capabilities::batches(
+        || KafkaBroker::new([url.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
 }

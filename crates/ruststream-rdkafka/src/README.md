@@ -145,8 +145,9 @@ anything else:
   below the lowest still-unsettled delivery, so acks arriving out of order from concurrent
   lanes never commit past unprocessed work, and offset gaps the consumer never sees
   (transaction markers, compacted records) cannot block it. `nack(false)` settles the offset;
-  `nack(true)` leaves it unsettled, so the partition redelivers from the committed position on
-  its next fetch and every later ack stays uncommitted until that offset settles.
+  `nack(true)` hands the delivery back to its subscription, which delivers it again ahead of
+  what it fetches next. Its offset stays unsettled until then, so every later ack stays
+  uncommitted, and a process that stops first gets the record back from Kafka on restart.
 - [`Commit::Transactional`] is exactly-once: the subscription commits nothing of its own and
   registers its watermark with the [`EosPipeline`](crate::EosPipeline) of the same id.
 
@@ -203,9 +204,9 @@ fn app() -> RustStream {
 # fn main() {}
 ```
 
-Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` the
-committed position still stops in front of the first element asking for a redelivery and stays
-there until that offset comes back, so the acked elements behind it replay with it: duplicates,
+Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` an element
+asking for a redelivery comes back alone, and the committed position stops in front of it until
+it settles; a process that stops first replays the acked elements behind it too: duplicates,
 not loss. A cap and a dead-letter topic are what stop one poison element from holding a
 partition back. How much librdkafka keeps queued locally is a consumer property
 (`queued.max.messages.kbytes` and friends) and stays in the descriptor's `config` passthrough.

@@ -112,11 +112,17 @@ impl PartitionText {
 ///   everything settled below it.
 /// - [`nack(false)`](IncomingMessage::nack) drops the message: the offset settles so the
 ///   position can move past it.
-/// - [`nack(true)`](IncomingMessage::nack) leaves the offset unsettled: the committed position
-///   stays below it, so Kafka redelivers from there when the partition is next re-fetched (a
-///   rebalance or a restart). Until then the unsettled offset also blocks the position,
-///   keeping every later ack uncommitted - precise, but worth knowing when a handler nacks in
-///   a loop.
+/// - [`nack(true)`](IncomingMessage::nack) hands the delivery back to its subscription, which
+///   delivers it again ahead of what it fetches next. Its offset stays unsettled meanwhile, so
+///   the committed position stays below it: were the process to stop first, Kafka redelivers
+///   the record from there to whoever reads the partition next. A rebalance or a seek that
+///   moves the partition before the delivery comes back drops it for the same reason. Until it
+///   settles, the unsettled offset also blocks the position, keeping every later ack
+///   uncommitted.
+///
+/// Under `Commit::Transactional` the settlements report to the exactly-once pipeline instead,
+/// and `nack(true)` keeps the open window from committing: it aborts, and its replay delivers
+/// the record again with the rest of the window.
 ///
 /// Wire headers map name for name; a null-valued Kafka header arrives with an empty value
 /// (presence preserved).
@@ -257,6 +263,18 @@ impl KafkaMessage {
         self.transcoded = Some(payload);
     }
 
+    /// Whether this delivery still belongs to its partition's read position. One handed back
+    /// with `nack(true)` is delivered again only while it does: after a seek or a revoke the
+    /// replay or the partition's next owner delivers its record instead.
+    pub(crate) fn is_current(&self) -> bool {
+        match &self.settlement {
+            Settlement::Advisory => true,
+            Settlement::Tracked { slot } | Settlement::Transactional { slot } => {
+                self.record.shared().tracker.is_current(*slot)
+            }
+        }
+    }
+
     fn settle(self) -> Result<(), AckError> {
         match &self.settlement {
             Settlement::Advisory => Ok(()),
@@ -316,11 +334,11 @@ impl IncomingMessage for KafkaMessage {
     }
 
     /// Settles negatively. `requeue = false` drops the delivery: the offset settles so the
-    /// committed position can move past it. `requeue = true` leaves the offset unsettled, which
-    /// is Kafka's own redelivery - the committed position stays below it and the partition is
-    /// re-consumed from there on its next fetch. Under `Commit::Auto` `requeue = false` is an
-    /// advisory no-op and `requeue = true` is unsupported (see the type-level settlement
-    /// mapping).
+    /// committed position can move past it. `requeue = true` hands the delivery back to its
+    /// subscription, which delivers it again; its offset stays unsettled until then. Under
+    /// `Commit::Transactional` it aborts the open window, whose replay delivers it again. Under
+    /// `Commit::Auto` `requeue = false` is an advisory no-op and `requeue = true` is unsupported
+    /// (see the type-level settlement mapping).
     ///
     /// Kafka counts no deliveries of its own, so a registration that caps its attempts with
     /// `max_attempts(..)` gets the framework's count instead: the runtime republishes the
@@ -341,9 +359,18 @@ impl IncomingMessage for KafkaMessage {
             // Auto-commit stored the position as the record was handed over, so no requeue is
             // left to perform: a success here would promise a redelivery that never comes.
             (true, Settlement::Advisory) => Err(AckError::Unsupported),
-            // Leaving the offset unsettled is the whole mechanism: the committed position stays
-            // below it, so Kafka redelivers from there on the next fetch of this partition.
-            (true, _) => Ok(()),
+            // The subscription delivers it again. Its offset stays unsettled meanwhile, which is
+            // what brings the record back from Kafka should the process stop first.
+            (true, Settlement::Tracked { .. }) => {
+                let tracker = Arc::clone(&self.record.shared().tracker);
+                tracker.attention.requeue(self);
+                Ok(())
+            }
+            // Under an exactly-once pipeline the unsettled offset keeps the open window from
+            // committing: it aborts, and its seek back delivers the whole window again, this
+            // record included. Delivering it again inside the window would publish its output
+            // twice in one transaction.
+            (true, Settlement::Transactional { .. }) => Ok(()),
             (false, _) => self.settle(),
         })
     }
