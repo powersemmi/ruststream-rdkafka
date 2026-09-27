@@ -3374,7 +3374,7 @@ async fn a_transactional_publisher_errors_after_the_connection_closes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
+async fn mixing_rebalance_protocols_in_one_group_fails_the_second_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("protocol-clash");
     let group = unique("protocol-clash-group");
@@ -3391,32 +3391,21 @@ async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
     let msg = next_message(&mut first_stream).await;
     msg.ack().await.expect("ack");
 
-    // A second member asking for the cooperative family has no protocol in common with it.
-    let mut second = broker
+    // A second member asking for the cooperative family has no protocol in common with it, so
+    // the group never assigns it anything and opening it fails, naming the clash.
+    let err = broker
         .subscribe_with(tracked(&topic, &group).assignment(Assignment::CooperativeSticky))
         .await
-        .expect("subscribe the second member");
-    let mut second_stream = Box::pin(second.stream());
-    let err = loop {
-        let next = tokio::time::timeout(WAIT, second_stream.next())
-            .await
-            .expect("the rejected join must surface on the subscription");
-        match next {
-            Some(Err(err)) => break err,
-            Some(Ok(delivered)) => delivered.ack().await.expect("ack"),
-            None => panic!("the stream ended instead of reporting the clash"),
-        }
-    };
+        .expect_err("a member the group refuses must not open");
+    assert!(matches!(err, KafkaError::Subscribe(_)), "got {err:?}");
     let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("protocol"),
-        "the error must name the protocol clash, got: {err}",
+        message.contains("protocol") && message.contains(&group),
+        "the error must name the protocol clash and the group, got: {err}",
     );
 
     drop(first_stream);
     drop(first);
-    drop(second_stream);
-    drop(second);
     broker.shutdown().await.expect("shutdown");
 }
 
@@ -3467,46 +3456,28 @@ async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_start_position_the_assignment_cannot_carry_surfaces_on_the_stream() {
+async fn a_start_position_the_assignment_cannot_carry_fails_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("bad-start");
     create_topic(&url, &topic, 1).await;
     let broker = connected_broker(&url).await;
 
-    publish(&broker, &topic, b"unreachable").await;
-
-    // Partition 7 of a one-partition topic: the subscription opens, because a group has nothing
-    // assigned yet and the position is held for the assignment, and the rebalance then finds
-    // nothing to move. A callback can return no error, so the stream is where it must appear.
-    let mut subscriber = broker
+    // Partition 7 of a one-partition topic: the subscription opens with partition 0 assigned,
+    // so the position names nothing it holds, and opening it fails rather than reading from
+    // somewhere the mount site did not name.
+    let err = broker
         .subscribe_with(StartAt::new(
             tracked(&topic, &unique("group")),
             KafkaPosition::offset(7, 0),
         ))
         .await
-        .expect("the position is held until the group assigns something");
-    let mut stream = Box::pin(subscriber.stream());
-
-    let next = tokio::time::timeout(WAIT, stream.next())
-        .await
-        .expect("the failed start position must reach the stream");
-    let err = match next {
-        Some(Err(err)) => err,
-        Some(Ok(msg)) => panic!(
-            "a subscription that could not be opened at its position must not pass for a working \
-             one, got {:?}",
-            String::from_utf8_lossy(msg.payload()),
-        ),
-        None => panic!("the stream ended instead of reporting the position"),
-    };
+        .expect_err("a subscription that cannot open at its position must not open");
     let message = err.to_string();
     assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err:?}");
     assert!(
-        message.contains("start position") && message.contains('7'),
-        "the error must name the position that could not be applied, got: {message}",
+        message.contains("partition: 7") && message.contains(&topic),
+        "the error must name the position and what the subscription holds, got: {message}",
     );
 
-    drop(stream);
-    drop(subscriber);
     broker.shutdown().await.expect("shutdown");
 }
