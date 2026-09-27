@@ -15,6 +15,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::{Seeker, Str};
 use tokio::task;
 
+use crate::broker::ConnState;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
@@ -155,6 +156,12 @@ const _: () = assert!(size_of::<Repositioner>() == 2 * size_of::<usize>());
 #[derive(Clone)]
 pub struct KafkaSeeker {
     inner: Repositioner,
+    /// The connection the subscription was opened on. A seeker outlives the shutdown in a
+    /// handler's hands, and a seek through it must then error rather than move a consumer the
+    /// service no longer runs.
+    connection: Arc<ConnState>,
+    /// The subscription's name, for the error a seek after shutdown reports.
+    subscription: Str,
 }
 
 impl std::fmt::Debug for KafkaSeeker {
@@ -171,16 +178,29 @@ impl std::fmt::Debug for KafkaSeeker {
 }
 
 impl KafkaSeeker {
-    pub(crate) const fn new(consumer: Arc<TrackedConsumer>, tracker: Arc<CommitTracker>) -> Self {
+    pub(crate) const fn new(
+        consumer: Arc<TrackedConsumer>,
+        tracker: Arc<CommitTracker>,
+        connection: Arc<ConnState>,
+        subscription: Str,
+    ) -> Self {
         Self {
             inner: Repositioner::Live { consumer, tracker },
+            connection,
+            subscription,
         }
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) const fn in_process(member: Arc<Member>) -> Self {
+    pub(crate) const fn in_process(
+        member: Arc<Member>,
+        connection: Arc<ConnState>,
+        subscription: Str,
+    ) -> Self {
         Self {
             inner: Repositioner::InProcess(member),
+            connection,
+            subscription,
         }
     }
 }
@@ -203,15 +223,17 @@ impl Seeker for KafkaSeeker {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the position names no partition among the
-    /// ones this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the
-    /// reposition or the timestamp lookup fails.
+    /// Returns [`KafkaError::Closed`] once the broker the subscription was opened on has shut
+    /// down, [`KafkaError::InvalidOptions`] when the position names no partition among the ones
+    /// this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the reposition or
+    /// the timestamp lookup fails.
     ///
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the consumer repositioned, its bookkeeping
     /// already reset.
     async fn seek(&self, to: Self::Position) -> Result<(), Self::Error> {
+        self.connection.ensure_open(&self.subscription)?;
         match &self.inner {
             Repositioner::Live { consumer, tracker } => {
                 let consumer = Arc::clone(consumer);

@@ -171,6 +171,14 @@ async fn the_in_process_broker_passes_transactions() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_passes_seeking() {
+    capabilities::seeking(in_process, in_process_topic, |connected| {
+        connected.publisher(KafkaPublish::default())
+    })
+    .await;
+}
+
 /// A partition the topic does not have is a position its log cannot hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_in_process_broker_refuses_a_seek_to_an_unknown_position() {
@@ -369,6 +377,20 @@ async fn passes_transactions_capability() {
             })
             .expect("transactional publisher must pair")
         },
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_seeking_capability() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("seeking");
+    capabilities::seeking(
+        || KafkaBroker::new([url.clone()]),
+        |name| topic_created(&url, &group, name),
+        |connected| connected.publisher(KafkaPublish::default()),
     )
     .await;
 }

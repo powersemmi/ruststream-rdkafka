@@ -688,6 +688,7 @@ impl ConnectedKafkaBroker {
             settings.commit,
             tracker,
             settings.lane_key,
+            Arc::clone(&self.state),
         );
         #[cfg(feature = "schema-registry")]
         let subscriber = subscriber
@@ -791,6 +792,7 @@ impl ConnectedKafkaBroker {
             settings.commit,
             tracker,
             settings.lane_key,
+            Arc::clone(&self.state),
         );
         #[cfg(feature = "schema-registry")]
         let subscriber = subscriber

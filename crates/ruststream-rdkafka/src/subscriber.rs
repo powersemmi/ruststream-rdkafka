@@ -19,6 +19,7 @@ use ruststream::IncomingMessage;
 use ruststream::{BatchSubscriber, Seekable, Str, Subscriber};
 use tracing::{debug, warn};
 
+use crate::broker::ConnState;
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
@@ -144,10 +145,13 @@ impl KafkaSubscriber {
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
+        connection: Arc<ConnState>,
     ) -> Self {
         let seeker = Arc::new(KafkaSeeker::new(
             Arc::clone(&consumer),
             Arc::clone(&tracker),
+            connection,
+            Str::from(topic.as_str()),
         ));
         let cart = Arc::new(LiveShared {
             consumer,
@@ -182,8 +186,13 @@ impl KafkaSubscriber {
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
+        connection: Arc<ConnState>,
     ) -> Self {
-        let seeker = Arc::new(KafkaSeeker::in_process(Arc::clone(&member)));
+        let seeker = Arc::new(KafkaSeeker::in_process(
+            Arc::clone(&member),
+            connection,
+            Str::from(topic.as_str()),
+        ));
         let shared = Arc::new(Shared::new(
             Arc::clone(&tracker),
             Arc::clone(&seeker),
