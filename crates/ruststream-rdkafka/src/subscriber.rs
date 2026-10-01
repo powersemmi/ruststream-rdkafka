@@ -12,6 +12,7 @@ use bytes::Bytes;
 #[cfg(feature = "testing")]
 use futures::future::Either;
 use futures::{Stream, ready};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
@@ -258,6 +259,16 @@ impl KafkaSubscriber {
         }
     }
 
+    /// The cart a subscription over librdkafka reads through, for the keeper that polls it
+    /// before its stream starts (see `startup`).
+    pub(crate) fn cart(&self) -> Cart {
+        match &self.source {
+            Source::Kafka(cart) => Arc::clone(cart),
+            #[cfg(feature = "testing")]
+            Source::InProcess(..) => unreachable!("an in-process subscription is never kept"),
+        }
+    }
+
     /// The topic this subscriber consumes.
     #[must_use]
     pub fn topic(&self) -> &str {
@@ -330,6 +341,13 @@ impl Drop for KafkaSubscriber {
     /// holds the consumer open, and the group hands their records to the partition's next owner.
     fn drop(&mut self) {
         self.tracker.attention.close();
+        // A subscription closed before its stream started leaves the group rather than being
+        // kept in it.
+        match &self.source {
+            Source::Kafka(cart) => cart.consumer.context().startup.release(),
+            #[cfg(feature = "testing")]
+            Source::InProcess(..) => {}
+        }
     }
 }
 
@@ -373,6 +391,10 @@ impl Subscriber for KafkaSubscriber {
                 return Either::Right(in_process::stream(self, member, shared));
             }
         };
+        cart.consumer
+            .context()
+            .startup
+            .hand_over(&cart.consumer, &self.tracker);
         let stream = KafkaStream {
             #[cfg(feature = "schema-registry")]
             registry: self.schema_registry.clone(),
@@ -613,6 +635,10 @@ impl BatchSubscriber for KafkaSubscriber {
                 return Either::Right(in_process::batches(self, member, shared, size));
             }
         };
+        cart.consumer
+            .context()
+            .startup
+            .hand_over(&cart.consumer, &self.tracker);
         let tracker = Arc::clone(&self.tracker);
         let batches = futures::stream::unfold(
             (self, tracker, cart),

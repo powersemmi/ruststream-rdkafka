@@ -16,6 +16,7 @@ mod publisher;
 mod record;
 mod redelivery;
 mod seek;
+mod startup;
 mod subscriber;
 mod subscription;
 #[cfg(feature = "testing")]

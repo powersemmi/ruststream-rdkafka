@@ -362,6 +362,42 @@ async fn passes_redelivery_address() {
     .await;
 }
 
+/// A bare name is the address of the attribute form's retry copies, and its subscription reads
+/// with the broker's default group and librdkafka's default `latest` reset: the copy and the
+/// control message are published once both subscriptions of the group are open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn passes_redelivery_address_for_a_name() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("redelivery-name");
+    retry::redelivery_address(
+        || KafkaBroker::new([url.clone()]).default_group(group.clone()),
+        |name| {
+            create_topic_now(&url, name, 1);
+            Name::new(name.to_owned())
+        },
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+/// The in-process cluster's backlog declaration is what the server does with a subscription
+/// opened by name in a fresh group, under librdkafka's default `latest` reset: what was published
+/// before it opened is missed, what is published after reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_backlog_matches_the_server() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    let group = group("backlog");
+    in_process::backlog_matches_server(
+        || KafkaBroker::new([url.clone()]).default_group(group.clone()),
+        |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_flushes_acknowledgements_and_publishes() {
     let Some(url) = live_cluster().await else {
@@ -412,15 +448,27 @@ async fn auto_commit_settlements_match_in_process() {
     .await;
 }
 
-/// What the cluster refuses: a topic name outside its grammar, to publish to and to subscribe to.
+/// What the cluster refuses: a topic name outside its grammar, to publish to and to subscribe
+/// to, and a record one byte over what the producer hands the cluster (`message.max.bytes`, less
+/// the 36 bytes librdkafka reserves for a record's framing).
+///
+/// The size probe reads its record back through a subscription opened by name, which joins the
+/// group before it reads, so the broker reads a partition the group has not committed from its
+/// start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_in_process_transport_refuses_what_the_server_refuses() {
     let Some(url) = live_cluster().await else {
         return;
     };
     let group = group("refusals");
+    let sized = unique_subject("conformance.refusals.size");
+    create_topic(&url, &sized).await;
     in_process::refuses_like_the_server(
-        || KafkaBroker::new([url.clone()]).default_group(group.clone()),
+        || {
+            KafkaBroker::new([url.clone()])
+                .default_group(group.clone())
+                .config("auto.offset.reset", "earliest")
+        },
         |connected| connected.publisher(KafkaPublish::default()),
         [
             Refusal::Publish {
@@ -428,6 +476,10 @@ async fn the_in_process_transport_refuses_what_the_server_refuses() {
             },
             Refusal::Subscription {
                 source: KafkaTopic::new("conformance refused topic").group(group.clone()),
+            },
+            Refusal::PayloadOver {
+                name: sized,
+                limit: 999_964,
             },
         ],
     )

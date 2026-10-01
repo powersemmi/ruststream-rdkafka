@@ -159,13 +159,11 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopic {
         &self.topic
     }
 
-    // librdkafka joins the group in the background, so opening a subscription never awaits; the
-    // trait is what shapes the signature.
-    fn subscribe(
+    async fn subscribe(
         self,
         connected: &ConnectedKafkaBroker,
-    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
-        ready(self.into_plan().and_then(|plan| connected.open(plan)))
+    ) -> Result<Self::Subscriber, KafkaError> {
+        connected.open(self.into_plan()?).await
     }
 
     #[cfg(feature = "asyncapi")]

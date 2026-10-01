@@ -265,9 +265,12 @@ async fn a_transaction_open_past_its_timeout_is_aborted() {
 #[test]
 fn a_record_over_the_size_limit_and_a_missing_partition_are_refused() {
     let cluster = cluster();
-    let big = vec![0u8; 1_000_001];
+    // librdkafka counts a record's framing too: 36 bytes of it under the default limit.
     cluster
-        .produce("orders", None, &big, &HeaderMap::new(), None)
+        .produce("orders", None, &vec![0u8; 999_964], &HeaderMap::new(), None)
+        .expect("a record of exactly message.max.bytes");
+    cluster
+        .produce("orders", None, &vec![0u8; 999_965], &HeaderMap::new(), None)
         .expect_err("over message.max.bytes");
     cluster
         .produce("orders", Some(1), b"x", &HeaderMap::new(), None)
