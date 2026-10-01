@@ -13,31 +13,41 @@
 //! being separate types is what keeps a batch body from naming a position that belongs to one
 //! record.
 
+use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use ruststream::{BuildBatchContext, BuildContext, Field, Str};
 
 use crate::message::KafkaMessage;
+use crate::record::Shared;
 use crate::seek::{KafkaPosition, KafkaSeeker};
 
 /// Native Kafka delivery metadata plus this subscription's reposition handle, built once per
 /// delivery.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KafkaContext {
-    topic: Str,
+    /// What the subscription shares, the seeker and the topic name among it, behind one
+    /// reference count.
+    shared: Arc<Shared>,
+    /// The record's own topic, when the subscription reads several.
+    topic: Option<Str>,
     partition: i32,
     offset: i64,
     timestamp_millis: Option<i64>,
     key: Option<Bytes>,
-    seeker: Arc<KafkaSeeker>,
 }
 
 impl KafkaContext {
     /// The topic the record was consumed from.
     #[must_use]
     pub fn topic(&self) -> &str {
-        &self.topic
+        self.topic_name()
+    }
+
+    /// The topic as the shared string: the record's own, or the subscription's.
+    fn topic_name(&self) -> &Str {
+        self.shared.topic(self.topic.as_ref())
     }
 
     /// The partition the record was consumed from.
@@ -67,7 +77,7 @@ impl KafkaContext {
     /// The topic name in the form the subscription minted it: a field key reading it hands it
     /// over for a reference count instead of copying it.
     pub(crate) fn shared_topic(&self) -> Str {
-        self.topic.clone()
+        self.topic_name().clone()
     }
 
     /// The record key in the form the delivery carries it, handed over the same way.
@@ -85,21 +95,32 @@ impl KafkaContext {
     /// The handle repositioning the subscription this delivery came from.
     #[must_use]
     pub fn seeker(&self) -> &KafkaSeeker {
-        &self.seeker
+        &self.shared.seeker
+    }
+}
+
+impl fmt::Debug for KafkaContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaContext")
+            .field("topic", self.topic_name())
+            .field("partition", &self.partition)
+            .field("offset", &self.offset)
+            .field("timestamp_millis", &self.timestamp_millis)
+            .field("key", &self.key)
+            .field("seeker", &self.shared.seeker)
+            .finish()
     }
 }
 
 impl BuildContext<KafkaMessage> for KafkaContext {
     fn build(msg: &KafkaMessage) -> Self {
         Self {
-            topic: msg.shared_topic(),
+            shared: msg.shared_handle(),
+            topic: msg.own_topic(),
             partition: msg.partition(),
             offset: msg.offset(),
             timestamp_millis: msg.timestamp_millis(),
             key: msg.key().map(Bytes::copy_from_slice),
-            // The subscription minted the handle when it opened, so carrying it costs one
-            // reference-count bump per delivery, not a producer or consumer setup.
-            seeker: msg.seeker_handle(),
         }
     }
 }
@@ -192,7 +213,7 @@ pub mod keys {
         type Value<'a> = &'a Str;
 
         fn get(self, src: &KafkaContext) -> &Str {
-            &src.topic
+            src.topic_name()
         }
     }
 

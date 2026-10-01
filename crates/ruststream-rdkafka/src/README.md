@@ -87,6 +87,15 @@ partition, which is the case before its first commit and again after retention d
 starts at the oldest retained record, `Latest` at the end of the log. [`Assignment`] picks the
 group's rebalance strategy, and [`LaneKey`] what a worker lane is keyed by.
 
+A subscription is open once it knows where each of its partitions starts, so everything
+published after it opens reaches it, under librdkafka's default `latest` reset too. For a group
+that means the group has assigned this member its partitions: startup waits for that, up to
+[`KafkaBroker::assignment_timeout`] (60 seconds by default), and fails naming the subscription
+and its group when the group does not answer. Until the runtime starts reading the
+subscription, its consumer keeps answering the group, so the next member to join does not wait
+for it. A subscription to topics the cluster does not have yet opens without partitions; a topic
+created later is read from where `auto.offset.reset` puts it when the group assigns it.
+
 ```
 # #[cfg(feature = "json")]
 # mod demo {
@@ -145,8 +154,9 @@ anything else:
   below the lowest still-unsettled delivery, so acks arriving out of order from concurrent
   lanes never commit past unprocessed work, and offset gaps the consumer never sees
   (transaction markers, compacted records) cannot block it. `nack(false)` settles the offset;
-  `nack(true)` leaves it unsettled, so the partition redelivers from the committed position on
-  its next fetch and every later ack stays uncommitted until that offset settles.
+  `nack(true)` hands the delivery back to its subscription, which delivers it again ahead of
+  what it fetches next. Its offset stays unsettled until then, so every later ack stays
+  uncommitted, and a process that stops first gets the record back from Kafka on restart.
 - [`Commit::Transactional`] is exactly-once: the subscription commits nothing of its own and
   registers its watermark with the [`EosPipeline`](crate::EosPipeline) of the same id.
 
@@ -203,12 +213,16 @@ fn app() -> RustStream {
 # fn main() {}
 ```
 
-Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` the
-committed position still stops in front of the first element asking for a redelivery and stays
-there until that offset comes back, so the acked elements behind it replay with it: duplicates,
+Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` an element
+asking for a redelivery comes back alone, and the committed position stops in front of it until
+it settles; a process that stops first replays the acked elements behind it too: duplicates,
 not loss. A cap and a dead-letter topic are what stop one poison element from holding a
 partition back. How much librdkafka keeps queued locally is a consumer property
 (`queued.max.messages.kbytes` and friends) and stays in the descriptor's `config` passthrough.
+Whenever that queue fills, librdkafka pauses fetching the partition for `fetch.queue.backoff.ms`
+(1000 ms by default), which caps the throughput of large bodies behind a slow handler; a shorter
+pause is set the same way, `.config("fetch.queue.backoff.ms", "10")` on the descriptor or on
+[`KafkaBroker`] for every consumer.
 
 ## Positions and seeking
 
@@ -217,8 +231,10 @@ Kafka keeps the log, so a subscription can be moved through it. [`KafkaPosition:
 [`topic_offset`](KafkaPosition::topic_offset) (one partition of one named topic) and
 [`timestamp`](KafkaPosition::timestamp) (epoch milliseconds, resolved per partition) are the
 positions. `start_at(position)` at the mount site opens the subscription there on every
-startup, whatever the group committed before: the position lands on the first assignment the
-group hands over, ahead of its first record. Under [`Assignment::CooperativeSticky`] that first
+startup, whatever the group committed before: the position lands on the partitions the
+subscription opened with, ahead of their first record, or on the first assignment the group
+hands over when it opened with none. A position that names none of the partitions it opened with
+fails startup. Under [`Assignment::CooperativeSticky`] that first
 assignment may be a part of the group's share, and partitions arriving in a later increment are
 not repositioned. A handler repositions the running subscription
 through the [`SeekHandle`](context::keys::SeekHandle) context key, reading where it currently

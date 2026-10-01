@@ -1,7 +1,5 @@
 //! Named partitions of one topic, assigned without joining a consumer group.
 
-use std::future::{Future, ready};
-
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
 use ruststream::{NamedCopies, SubscriptionSource};
@@ -152,11 +150,11 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaPartitions {
         &self.topic
     }
 
-    fn subscribe(
+    async fn subscribe(
         self,
         connected: &ConnectedKafkaBroker,
-    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
-        ready(self.into_plan().and_then(|plan| connected.open(plan)))
+    ) -> Result<Self::Subscriber, KafkaError> {
+        connected.open(self.into_plan()?).await
     }
 
     #[cfg(feature = "asyncapi")]
