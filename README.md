@@ -45,8 +45,8 @@ configuration - the runtime climbs the lifecycle ladder around it.
   the core's `BatchSubscriber` directly rather than buffering client-side: a batch is one
   delivery plus everything librdkafka has already fetched, cut off at the `batch(nonzero!(n))`
   the mount site names, with no added waiting.
-- **Retries and dead-lettering** - `nack(true)` keeps Kafka's native meaning (the offset stays
-  unsettled and redelivers on the next fetch), and the mount site declares the rest:
+- **Retries and dead-lettering** - under the tracked commit `nack(true)` delivers the record
+  again on its subscription, its offset unsettled until then, and the mount site declares the rest:
   `max_attempts(n).dead_letter("orders.dlq")` reads the same on every broker. Kafka holds no
   record back, so the framework publishes each retry copy itself and counts them in a header;
   `KafkaTopic` says where a copy reaches its subscription again, and a subscription over a set
