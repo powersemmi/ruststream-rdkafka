@@ -8,13 +8,12 @@ use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "schema-registry")]
 use bytes::Bytes;
-use rdkafka::consumer::Consumer as _;
 use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
 
 use crate::convert;
-use crate::record::HeldRecord;
+use crate::record::{HeldRecord, Shared};
 use crate::seek::{KafkaPosition, KafkaSeeker};
-use crate::tracker::{CommitTracker, PartitionSlot};
+use crate::tracker::PartitionSlot;
 
 /// Header carrying a message's partition key, mapped onto Kafka's native record key.
 ///
@@ -35,17 +34,11 @@ pub(crate) enum Settlement {
     /// `Commit::Auto`: librdkafka owns the committed position; `ack`/`nack` are advisory.
     Advisory,
     /// `Commit::Tracked`: an ack advances the shared watermark and stores the new position,
-    /// through the consumer the delivery's own record keeps alive.
-    Tracked {
-        tracker: Arc<CommitTracker>,
-        slot: PartitionSlot,
-    },
+    /// through the tracker and the consumer the delivery's own record keeps alive.
+    Tracked { slot: PartitionSlot },
     /// `Commit::Transactional`: an ack advances the shared watermark only - the EOS pipeline
     /// commits positions through the producer transaction, so nothing is stored here.
-    Transactional {
-        tracker: Arc<CommitTracker>,
-        slot: PartitionSlot,
-    },
+    Transactional { slot: PartitionSlot },
 }
 
 /// How a delivery answers [`IncomingMessage::partition_key`], which most deliveries are never
@@ -110,8 +103,8 @@ impl PartitionText {
 /// Settlement mapping depends on the [`Commit`](crate::Commit) mode of the subscription:
 ///
 /// Under `Commit::Auto` (the default) librdkafka owns the committed position - it is stored
-/// the moment a message is handed to the application - so `ack` and both `nack` forms are
-/// advisory no-ops; in particular `nack(true)` does NOT cause a redelivery.
+/// the moment a message is handed to the application - so `ack` and `nack(false)` are advisory
+/// no-ops, and `nack(true)` reports [`AckError::Unsupported`]: nothing brings the record back.
 ///
 /// Under `Commit::Tracked`:
 ///
@@ -119,15 +112,20 @@ impl PartitionText {
 ///   everything settled below it.
 /// - [`nack(false)`](IncomingMessage::nack) drops the message: the offset settles so the
 ///   position can move past it.
-/// - [`nack(true)`](IncomingMessage::nack) leaves the offset unsettled: the committed position
-///   stays below it, so Kafka redelivers from there when the partition is next re-fetched (a
-///   rebalance or a restart). Until then the unsettled offset also blocks the position,
-///   keeping every later ack uncommitted - precise, but worth knowing when a handler nacks in
-///   a loop.
+/// - [`nack(true)`](IncomingMessage::nack) hands the delivery back to its subscription, which
+///   delivers it again ahead of what it fetches next. Its offset stays unsettled meanwhile, so
+///   the committed position stays below it: were the process to stop first, Kafka redelivers
+///   the record from there to whoever reads the partition next. A rebalance or a seek that
+///   moves the partition before the delivery comes back drops it for the same reason. Until it
+///   settles, the unsettled offset also blocks the position, keeping every later ack
+///   uncommitted.
+///
+/// Under `Commit::Transactional` the settlements report to the exactly-once pipeline instead,
+/// and `nack(true)` keeps the open window from committing: it aborts, and its replay delivers
+/// the record again with the rest of the window.
 ///
 /// Wire headers map name for name; a null-valued Kafka header arrives with an empty value
 /// (presence preserved).
-#[derive(Debug)]
 pub struct KafkaMessage {
     /// The record librdkafka fetched, kept where it put it: the body, the key and the wire
     /// headers are read out of the fetch buffer, and the consumer that owns that buffer stays
@@ -140,18 +138,32 @@ pub struct KafkaMessage {
     /// The `RustStream` view of the record's headers, built on the first read: a delivery
     /// nothing asks headers of never pays for them.
     headers: OnceLock<HeaderMap>,
-    /// The topic, shared with the subscription that read it: a Kafka consumer reads a handful of
-    /// topics and delivers millions of records, so the name is minted once per topic and every
-    /// delivery of it takes a reference count.
-    topic: Str,
+    /// The record's topic, when the subscription reads several: a Kafka consumer reads a handful
+    /// of topics and delivers millions of records, so the name is minted once per topic and
+    /// every delivery of it takes a reference count. A subscription over one topic leaves it
+    /// empty, and the delivery reads the name its shared block holds, for no count of its own.
+    topic: Option<Str>,
     partition: i32,
     offset: i64,
     settlement: Settlement,
     /// How this delivery answers `partition_key()`.
     lane: Lane,
-    /// The subscription's own reposition handle, minted when it opened: this is what lets a
-    /// per-delivery context be built from the delivery alone.
-    seeker: Arc<KafkaSeeker>,
+}
+
+impl fmt::Debug for KafkaMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut out = f.debug_struct("KafkaMessage");
+        out.field("record", &self.record);
+        #[cfg(feature = "schema-registry")]
+        out.field("transcoded", &self.transcoded);
+        out.field("headers", &self.headers)
+            .field("topic", self.topic_name())
+            .field("partition", &self.partition)
+            .field("offset", &self.offset)
+            .field("settlement", &self.settlement)
+            .field("lane", &self.lane)
+            .finish()
+    }
 }
 
 impl fmt::Debug for Settlement {
@@ -171,12 +183,11 @@ impl KafkaMessage {
     pub(crate) fn new(
         record: HeldRecord,
         headers: OnceLock<HeaderMap>,
-        topic: Str,
+        topic: Option<Str>,
         partition: i32,
         offset: i64,
         settlement: Settlement,
         lane: Lane,
-        seeker: Arc<KafkaSeeker>,
     ) -> Self {
         Self {
             record,
@@ -188,25 +199,34 @@ impl KafkaMessage {
             offset,
             settlement,
             lane,
-            seeker,
         }
     }
 
-    /// The subscription's reposition handle, for the context built off this delivery.
+    /// The topic as the shared string: the record's own, or the subscription's.
+    fn topic_name(&self) -> &Str {
+        self.record.shared().topic(self.topic.as_ref())
+    }
+
+    /// The subscription's reposition handle, for the context built off a batch.
     pub(crate) fn seeker_handle(&self) -> Arc<KafkaSeeker> {
-        Arc::clone(&self.seeker)
+        Arc::clone(&self.record.shared().seeker)
+    }
+
+    /// What the subscription shares, for the context built off this delivery: one count holds
+    /// the seeker and the topic name alike.
+    pub(crate) fn shared_handle(&self) -> Arc<Shared> {
+        Arc::clone(self.record.shared())
+    }
+
+    /// The topic name this delivery carries itself, when its subscription reads several.
+    pub(crate) fn own_topic(&self) -> Option<Str> {
+        self.topic.clone()
     }
 
     /// The topic this record was consumed from.
     #[must_use]
     pub fn topic(&self) -> &str {
-        &self.topic
-    }
-
-    /// The same name, as the subscription minted it: taking it costs a reference count, so
-    /// anything built per delivery carries the name instead of copying it.
-    pub(crate) fn shared_topic(&self) -> Str {
-        self.topic.clone()
+        self.topic_name()
     }
 
     /// The partition this record was consumed from.
@@ -243,31 +263,35 @@ impl KafkaMessage {
         self.transcoded = Some(payload);
     }
 
+    /// Whether this delivery still belongs to its partition's read position. One handed back
+    /// with `nack(true)` is delivered again only while it does: after a seek or a revoke the
+    /// replay or the partition's next owner delivers its record instead.
+    pub(crate) fn is_current(&self) -> bool {
+        match &self.settlement {
+            Settlement::Advisory => true,
+            Settlement::Tracked { slot } | Settlement::Transactional { slot } => {
+                self.record.shared().tracker.is_current(*slot)
+            }
+        }
+    }
+
     fn settle(self) -> Result<(), AckError> {
         match &self.settlement {
             Settlement::Advisory => Ok(()),
-            Settlement::Tracked { tracker, slot } => tracker
-                .settle_with(*slot, self.offset, |position| {
-                    // The watermark is this delivery's own offset whenever nothing below it
-                    // is still outstanding, which is every settle of an in-order handler.
-                    // There the record answers for its own topic and librdkafka takes the
-                    // position off the record's topic handle, instead of looking one up by
-                    // name (a `CString`, a topic create and a topic destroy under its own
-                    // lock, per message).
-                    if let Some(record) = self.record.fetched()
-                        && position == self.offset
-                    {
-                        self.record.consumer().store_offset_from_message(record)
-                    } else {
-                        self.record
-                            .consumer()
-                            .store_offset(&self.topic, self.partition, position)
-                    }
+            Settlement::Tracked { slot } => self
+                .record
+                .shared()
+                .tracker
+                .settle_with(*slot, self.offset, |position, target| {
+                    self.record.store(self.offset, position, target)
                 })
                 .map_err(|err| AckError::Broker(Box::new(err))),
-            Settlement::Transactional { tracker, slot } => {
-                let infallible: Result<(), Infallible> =
-                    tracker.settle_with(*slot, self.offset, |_position| Ok(()));
+            Settlement::Transactional { slot } => {
+                let infallible: Result<(), Infallible> = self.record.shared().tracker.settle_with(
+                    *slot,
+                    self.offset,
+                    |_position, _target| Ok(()),
+                );
                 infallible.expect("no-op store cannot fail");
                 Ok(())
             }
@@ -310,10 +334,11 @@ impl IncomingMessage for KafkaMessage {
     }
 
     /// Settles negatively. `requeue = false` drops the delivery: the offset settles so the
-    /// committed position can move past it. `requeue = true` leaves the offset unsettled, which
-    /// is Kafka's own redelivery - the committed position stays below it and the partition is
-    /// re-consumed from there on its next fetch. Under `Commit::Auto` both forms are advisory
-    /// no-ops (see the type-level settlement mapping).
+    /// committed position can move past it. `requeue = true` hands the delivery back to its
+    /// subscription, which delivers it again; its offset stays unsettled until then. Under
+    /// `Commit::Transactional` it aborts the open window, whose replay delivers it again. Under
+    /// `Commit::Auto` `requeue = false` is an advisory no-op and `requeue = true` is unsupported
+    /// (see the type-level settlement mapping).
     ///
     /// Kafka counts no deliveries of its own, so a registration that caps its attempts with
     /// `max_attempts(..)` gets the framework's count instead: the runtime republishes the
@@ -321,17 +346,33 @@ impl IncomingMessage for KafkaMessage {
     ///
     /// # Errors
     ///
-    /// Returns [`AckError::Broker`] under the same conditions as [`ack`](Self::ack).
+    /// Returns [`AckError::Unsupported`] for `requeue = true` under `Commit::Auto`, where the
+    /// position was stored when the record was handed over, and [`AckError::Broker`] under the
+    /// same conditions as [`ack`](Self::ack).
     ///
     /// # Cancel safety
     ///
     /// Cancel safe: the watermark update is synchronous, so the future either completed or did
     /// nothing.
     fn nack(self, requeue: bool) -> impl Future<Output = Result<(), AckError>> {
-        // Leaving the offset unsettled is the whole mechanism: under Tracked the committed
-        // position stays below it, so Kafka redelivers from there on the next fetch of this
-        // partition.
-        ready(if requeue { Ok(()) } else { self.settle() })
+        ready(match (requeue, &self.settlement) {
+            // Auto-commit stored the position as the record was handed over, so no requeue is
+            // left to perform: a success here would promise a redelivery that never comes.
+            (true, Settlement::Advisory) => Err(AckError::Unsupported),
+            // The subscription delivers it again. Its offset stays unsettled meanwhile, which is
+            // what brings the record back from Kafka should the process stop first.
+            (true, Settlement::Tracked { .. }) => {
+                let tracker = Arc::clone(&self.record.shared().tracker);
+                tracker.attention.requeue(self);
+                Ok(())
+            }
+            // Under an exactly-once pipeline the unsettled offset keeps the open window from
+            // committing: it aborts, and its seek back delivers the whole window again, this
+            // record included. Delivering it again inside the window would publish its output
+            // twice in one transaction.
+            (true, Settlement::Transactional { .. }) => Ok(()),
+            (false, _) => self.settle(),
+        })
     }
 
     /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the
@@ -348,7 +389,7 @@ impl Positioned for KafkaMessage {
     /// This delivery's own coordinates: seeking to them redelivers exactly this record (and the
     /// ordered suffix behind it on the partition).
     fn position(&self) -> Self::Position {
-        KafkaPosition::topic_offset(&*self.topic, self.partition, self.offset)
+        KafkaPosition::topic_offset(&**self.topic_name(), self.partition, self.offset)
     }
 }
 

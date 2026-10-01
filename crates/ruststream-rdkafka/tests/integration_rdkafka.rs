@@ -7,9 +7,9 @@
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features -- --test-threads=1
 //! ```
 //!
-//! These cover exactly what the in-process test broker does not simulate: consumer groups,
-//! committed positions across subscriber restarts, the two commit modes, start offsets, and
-//! native-key partitioning.
+//! These run the transport against the cluster itself: consumer groups, committed positions
+//! across subscriber restarts, the commit modes, start offsets, native-key partitioning over
+//! topics with several partitions, and transactions.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -32,8 +32,8 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing, OutgoingMessage,
-    Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
+    AckError, Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing,
+    OutgoingMessage, Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
     TransactionalPublisher, nonzero,
 };
 use ruststream_rdkafka::context::{KafkaContext, keys};
@@ -176,6 +176,14 @@ fn tracked(topic: &str, group: &str) -> KafkaTopic {
         .commit(Commit::Tracked)
 }
 
+/// The two-topic counterpart of [`tracked`], for the subscriptions that read a set.
+fn regions(eu: &str, us: &str, group: &str) -> KafkaTopics {
+    KafkaTopics::new([eu, us])
+        .group(group)
+        .start(StartOffset::Earliest)
+        .commit(Commit::Tracked)
+}
+
 async fn next_message<S>(stream: &mut S) -> KafkaMessage
 where
     S: Stream<Item = Result<KafkaMessage, KafkaError>> + Unpin,
@@ -286,7 +294,7 @@ async fn tracked_commit_survives_subscriber_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nack_requeue_leaves_offset_for_redelivery() {
+async fn nack_requeue_redelivers_on_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("requeue");
     let group = unique("group");
@@ -294,6 +302,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let broker = connected_broker(&url).await;
 
     publish(&broker, &topic, b"poison").await;
+    publish(&broker, &topic, b"next").await;
 
     {
         let mut subscriber = broker
@@ -304,6 +313,35 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
         let msg = next_message(&mut stream).await;
         assert_eq!(msg.payload(), b"poison");
         msg.nack(true).await.expect("nack requeue");
+        let again = next_message(&mut stream).await;
+        assert_eq!(
+            again.payload(),
+            b"poison",
+            "nack(true) must deliver the record again on its subscription",
+        );
+        again.ack().await.expect("ack");
+        let next = next_message(&mut stream).await;
+        assert_eq!(next.payload(), b"next");
+        next.ack().await.expect("ack");
+    }
+
+    // A requeue that was never delivered again leaves its offset uncommitted: the next member
+    // of the group reads the record from there.
+    publish(&broker, &topic, b"held").await;
+    {
+        let mut subscriber = broker
+            .subscribe_with(tracked(&topic, &group))
+            .await
+            .expect("re-subscribe");
+        let msg = {
+            let mut stream = Box::pin(subscriber.stream());
+            next_message(&mut stream).await
+        };
+        assert_eq!(msg.payload(), b"held");
+        drop(subscriber);
+        msg.nack(true)
+            .await
+            .expect("nack requeue after the subscription closed");
     }
 
     let mut subscriber = broker
@@ -314,13 +352,44 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let msg = next_message(&mut stream).await;
     assert_eq!(
         msg.payload(),
-        b"poison",
-        "nack(true) must leave the offset uncommitted for redelivery",
+        b"held",
+        "a requeue with no subscription left must leave the offset uncommitted for redelivery",
     );
     msg.ack().await.expect("ack");
 
     drop(stream);
     drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// librdkafka holds a record to `message.max.bytes` with its framing and its headers counted: 36
+/// bytes of framing, and a varint length before each header name and value. The in-process
+/// cluster counts a record the same way, which its own unit tests pin to these numbers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_record_size_limit_counts_framing_and_headers() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("record-size");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+    let publisher = broker.publisher(KafkaPublish::default());
+    let mut headers = HeaderMap::new();
+    headers.insert("n", vec![0u8; 64]);
+    // 36 of framing, then the header: its name, its value, and one and two varint bytes.
+    let fits = 1_000_000 - 36 - (1 + 64 + 1 + 2);
+    for (payload, accepted) in [(fits, true), (fits + 1, false)] {
+        let body = vec![0u8; payload];
+        let sent = publisher
+            .publish(
+                OutgoingMessage::new(&topic, body.as_slice()).with_headers(headers.clone()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            sent.is_ok(),
+            accepted,
+            "a {payload}-byte payload with a 64-byte header: {sent:?}",
+        );
+    }
     broker.shutdown().await.expect("shutdown");
 }
 
@@ -1498,11 +1567,7 @@ struct AssignedLaneState {
     done: Arc<Notify>,
 }
 
-#[subscriber(
-    KafkaPartitions::new(std::env::var("ASSIGNED_LANES_TOPIC").expect("topic env"), [0, 1])
-        .start(StartOffset::Earliest),
-    workers(2, by_key)
-)]
+#[subscriber(KafkaPartitions, workers(2, by_key))]
 async fn assigned_lane(
     payload: &OrderPayload,
     ctx: &mut ruststream::runtime::Context<'_, (), AssignedLaneState>,
@@ -1515,7 +1580,7 @@ async fn assigned_lane(
             return HandlerOutcome::ack();
         }
     }
-    state.done.notify_waiters();
+    state.done.notify_one();
     HandlerOutcome::ack()
 }
 
@@ -1534,8 +1599,6 @@ async fn manual_assignment_composes_with_partition_lanes() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("assign-lanes");
     create_topic(&url, &topic, 2).await;
-    // The macro source expression cannot capture locals; the topic travels via the env.
-    unsafe { std::env::set_var("ASSIGNED_LANES_TOPIC", &topic) };
 
     let broker = connected_broker(&url).await;
     for seq in 0..PER_PARTITION {
@@ -1564,9 +1627,11 @@ async fn manual_assignment_composes_with_partition_lanes() {
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             // A partition reader addresses no retry copies, so every registration over one names
             // where they would go, even a handler that never retries.
-            b.include(assigned_lane)
-                .out_retry(KafkaPublish::default())
-                .to(topic.clone());
+            b.include(assigned_lane.map_source(|_| {
+                KafkaPartitions::new(topic.clone(), [0, 1]).start(StartOffset::Earliest)
+            }))
+            .out_retry(KafkaPublish::default())
+            .to(topic.clone());
         });
 
     let done = Arc::clone(&state.done);
@@ -1875,12 +1940,7 @@ struct DeferredRetryProbe {
 // Kafka has no native delayed redelivery, so `retry_after` runs through the runtime's
 // deferred-republish fallback: the original settles, and a copy comes back through the
 // scope's retry publisher after the delay with the retry count incremented.
-#[subscriber(
-    KafkaTopic::new(std::env::var("DEFERRED_RETRY_TOPIC").expect("topic env"))
-        .group("deferred-retry-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
+#[subscriber(KafkaTopic)]
 async fn deferred_retry(
     _order: &OrderPayload,
     ctx: &mut Context<'_, (), DeferredRetryProbe>,
@@ -1907,7 +1967,6 @@ async fn retry_after_republishes_through_the_retry_position() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("deferred-retry");
     create_topic(&url, &topic, 1).await;
-    unsafe { std::env::set_var("DEFERRED_RETRY_TOPIC", &topic) };
 
     let broker = connected_broker(&url).await;
     publish(&broker, &topic, br#"{"partition":0,"seq":1}"#).await;
@@ -1923,7 +1982,8 @@ async fn retry_after_republishes_through_the_retry_position() {
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             // Kafka defers the copy itself, so the registration names the publisher it
             // leaves through; the policy pairs at startup like every other one.
-            b.include(deferred_retry).out_retry(KafkaPublish::default());
+            b.include(deferred_retry.map_source(|_| tracked(&topic, "deferred-retry-svc")))
+                .out_retry(KafkaPublish::default());
         });
 
     let done = Arc::clone(&probe.done);
@@ -1954,9 +2014,7 @@ struct CtxDiApp {
     probe: CtxDiProbe,
 }
 
-#[subscriber(
-    KafkaTopic::new(std::env::var("CTX_DI_TOPIC").expect("topic env")).group("ctx-di-svc")
-)]
+#[subscriber(KafkaTopic)]
 async fn ctx_di(
     _order: &OrderPayload,
     Ctx(partition): Ctx<keys::Partition>,
@@ -1970,7 +2028,7 @@ async fn ctx_di(
             return HandlerOutcome::ack();
         }
     }
-    probe.done.notify_waiters();
+    probe.done.notify_one();
     HandlerOutcome::ack()
 }
 
@@ -1981,7 +2039,6 @@ async fn ctx_extractors_inject_delivery_fields() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("ctx-di");
     create_topic(&url, &topic, 1).await;
-    unsafe { std::env::set_var("CTX_DI_TOPIC", &topic) };
 
     let broker = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2005,7 +2062,9 @@ async fn ctx_extractors_inject_delivery_fields() {
         .with_broker(
             KafkaBroker::new([url.clone()]).config("auto.offset.reset", "earliest"),
             |b| {
-                b.include(ctx_di);
+                b.include(
+                    ctx_di.map_source(|_| KafkaTopic::new(topic.clone()).group("ctx-di-svc")),
+                );
             },
         );
 
@@ -2025,20 +2084,30 @@ async fn ctx_extractors_inject_delivery_fields() {
     );
 }
 
+/// The topic a lane forwards to, created per run and handed to the handler through the app's
+/// state.
+#[derive(Clone)]
+struct LanesOut(String);
+
+#[derive(FromRef)]
+struct LanesApp {
+    out: LanesOut,
+}
+
 /// Publishes one record inside the lane's own transaction. Generic over the capability rather
 /// than over a publisher type: an `Out` slot entry has to satisfy the bound, not merely resolve
 /// the method, which is what the arena wiring must keep true.
 async fn forward_through_lane<L: PartitionLanes>(
     lanes: &L,
+    topic: &str,
     partition: i32,
     order: &OrderPayload,
 ) -> Result<(), KafkaError> {
     let publisher = lanes.for_partition(partition).await?;
     publisher.begin_transaction().await?;
-    let topic = std::env::var("LANES_OUT_TOPIC").expect("out topic env");
     let payload = format!(r#"{{"partition":{},"seq":{}}}"#, order.partition, order.seq);
     if let Err(err) = publisher
-        .publish(OutgoingMessage::new(&topic, payload.as_bytes()), None)
+        .publish(OutgoingMessage::new(topic, payload.as_bytes()), None)
         .await
     {
         publisher.abort().await.ok();
@@ -2049,18 +2118,17 @@ async fn forward_through_lane<L: PartitionLanes>(
 
 // A broker-defined capability through the `Out` arena: the handler names `PartitionLanes` and
 // never the concrete `TransactionalPartitions` the `per_partition()` policy pairs into.
-#[subscriber(
-    KafkaTopic::new(std::env::var("LANES_IN_TOPIC").expect("topic env"))
-        .group("lanes-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
+#[subscriber(KafkaTopic)]
 async fn lane_forward(
     order: &OrderPayload,
     Ctx(partition): Ctx<keys::Partition>,
+    State(LanesOut(topic)): State<LanesOut>,
     Out(lanes): Out<impl PartitionLanes>,
 ) -> HandlerOutcome {
-    if forward_through_lane(lanes, partition, order).await.is_err() {
+    if forward_through_lane(lanes, &topic, partition, order)
+        .await
+        .is_err()
+    {
         return HandlerOutcome::retry();
     }
     HandlerOutcome::ack()
@@ -2075,10 +2143,6 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
     let output = unique("lanes-out");
     create_topic(&url, &input, 1).await;
     create_topic(&url, &output, 1).await;
-    unsafe {
-        std::env::set_var("LANES_IN_TOPIC", &input);
-        std::env::set_var("LANES_OUT_TOPIC", &output);
-    }
 
     let broker = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2090,10 +2154,13 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
             .expect("publish input");
     }
 
-    let app = RustStream::new(AppInfo::new("lanes", "0.0.0")).with_broker(
-        KafkaBroker::new([url.clone()]),
-        |b| {
-            b.include(lane_forward)
+    let lanes_out = LanesApp {
+        out: LanesOut(output.clone()),
+    };
+    let app = RustStream::new(AppInfo::new("lanes", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(lanes_out))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(lane_forward.map_source(|_| tracked(&input, "lanes-svc")))
                 .out(
                     DefaultSlot,
                     KafkaPublish::default()
@@ -2101,8 +2168,7 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
                         .per_partition(),
                 )
                 .build();
-        },
-    );
+        });
 
     // The lane's transaction commits before a `read_committed` reader sees anything, so the
     // output stream is both the signal and the assertion: the run ends when it has delivered
@@ -2129,23 +2195,15 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
 }
 
 // The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
-// batch-scoped context - is application-level behaviour, so it is exercised over the in-process
-// transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
+// batch-scoped context - is application-level behaviour, so it is exercised on the production
+// app with `TestApp` in `tests/harness.rs`. What lives here is the transport itself:
 // that a real consumer moves, and that the offset bookkeeping follows it (see
 // `a_seek_moves_the_tracked_watermark_with_the_read_position` and
 // `positions_reach_every_assigned_partition_and_report_bad_targets` above).
 
 // The EOS publishing-handler sugar: a bare handler returns the reply, and the pipeline's
 // reply publisher pairs it with the consumed offset - no Ctx, no manual publish.
-#[subscriber(
-    KafkaTopic::new(std::env::var("EOS_SUGAR_TOPIC").expect("topic env"))
-        .group(std::env::var("EOS_SUGAR_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-        .commit(Commit::Transactional(
-            std::env::var("EOS_SUGAR_PIPELINE").expect("pipeline env"),
-        )),
-    publish("eos-sugar-replies-placeholder")
-)]
+#[subscriber(KafkaTopic, publish("eos-sugar-replies-placeholder"))]
 async fn eos_sugar(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
@@ -2162,11 +2220,6 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     // The reply topic is a macro literal, so it is fixed across runs: recreate it, or a dead
     // previous run's open transaction pins the LSO and hides this run's replies.
     recreate_topic(&url, "eos-sugar-replies-placeholder", 1).await;
-    unsafe {
-        std::env::set_var("EOS_SUGAR_TOPIC", &input);
-        std::env::set_var("EOS_SUGAR_GROUP", &group);
-        std::env::set_var("EOS_SUGAR_PIPELINE", &pipeline_id);
-    }
 
     let producer = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2187,9 +2240,14 @@ async fn eos_publishing_handler_replies_ride_the_window() {
     let app = RustStream::new(AppInfo::new("eos-sugar", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(eos_sugar)
-                .out(Reply, pipeline)
-                .transform(EosReplies);
+            b.include(eos_sugar.map_source(|_| {
+                KafkaTopic::new(input.clone())
+                    .group(group.clone())
+                    .start(StartOffset::Earliest)
+                    .commit(Commit::Transactional(pipeline_id.clone()))
+            }))
+            .out(Reply, pipeline)
+            .transform(EosReplies);
         },
     );
 
@@ -2266,16 +2324,9 @@ impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
     }
 }
 
-// The round-robin cycle is a producer-side placement, and only a topic with real partitions can
-// show where a record went: the in-process transport gives every topic one partition and records
-// the setting instead of honouring it.
-#[subscriber(
-    KafkaTopic::new(std::env::var("SPREAD_IN_TOPIC").expect("topic env"))
-        .group("spread-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked),
-    publish("round-robin-replies-placeholder")
-)]
+// The round-robin cycle is a producer-side placement, and only a topic created with several
+// partitions can show where a record went, so the test creates one on the cluster.
+#[subscriber(KafkaTopic, publish("round-robin-replies-placeholder"))]
 async fn spread(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
@@ -2292,7 +2343,6 @@ async fn round_robin_walks_the_partitions_of_the_reply_topic() {
     // run an empty log with the partition count the cycle is asserted against.
     recreate_topic(&url, "round-robin-replies-placeholder", PARTITIONS).await;
     assert_partition_count(&url, "round-robin-replies-placeholder", PARTITIONS);
-    unsafe { std::env::set_var("SPREAD_IN_TOPIC", &input) };
 
     let seeder = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2308,7 +2358,7 @@ async fn round_robin_walks_the_partitions_of_the_reply_topic() {
     let app = RustStream::new(AppInfo::new("spread", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(spread)
+            b.include(spread.map_source(|_| tracked(&input, "spread-svc")))
                 .out_reply(KafkaPublish::default())
                 .transform(RoundRobin::partitions(PARTITIONS));
         },
@@ -2352,13 +2402,7 @@ async fn round_robin_walks_the_partitions_of_the_reply_topic() {
 
 // The same cycle over replies that already carry a record key: keys exist for ordering, so the
 // cycle must leave the placement Kafka derives from the key alone.
-#[subscriber(
-    KafkaTopic::new(std::env::var("KEYED_SPREAD_IN_TOPIC").expect("topic env"))
-        .group("keyed-spread-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked),
-    publish("round-robin-keyed-replies-placeholder")
-)]
+#[subscriber(KafkaTopic, publish("round-robin-keyed-replies-placeholder"))]
 async fn spread_keyed(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
@@ -2373,7 +2417,6 @@ async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
     create_topic(&url, &input, 1).await;
     recreate_topic(&url, "round-robin-keyed-replies-placeholder", PARTITIONS).await;
     assert_partition_count(&url, "round-robin-keyed-replies-placeholder", PARTITIONS);
-    unsafe { std::env::set_var("KEYED_SPREAD_IN_TOPIC", &input) };
 
     let seeder = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2390,7 +2433,7 @@ async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
         KafkaBroker::new([url.clone()]),
         |b| {
             // KeyStamp runs first, so every reply carries a key by the time the cycle sees it.
-            b.include(spread_keyed)
+            b.include(spread_keyed.map_source(|_| tracked(&input, "keyed-spread-svc")))
                 .out_reply(KafkaPublish::default())
                 .transform(KeyStamp)
                 .transform(RoundRobin::partitions(PARTITIONS));
@@ -2443,12 +2486,7 @@ struct CapProbe {
 // Kafka holds no record back and counts no deliveries, so a cap is the framework's: each retry is
 // a fresh copy carrying an incremented count, and the delivery that spends the cap is republished
 // to the dead-letter topic instead of coming back once more.
-#[subscriber(
-    KafkaTopic::new(std::env::var("CAP_IN_TOPIC").expect("topic env"))
-        .group("cap-svc")
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
+#[subscriber(KafkaTopic)]
 async fn spend_the_cap(
     _order: &OrderPayload,
     ctx: &mut Context<'_, (), CapProbe>,
@@ -2472,7 +2510,6 @@ async fn a_spent_delivery_lands_on_the_dead_letter_topic() {
     let dead_letters = unique("cap-dlq");
     create_topic(&url, &input, 1).await;
     create_topic(&url, &dead_letters, 1).await;
-    unsafe { std::env::set_var("CAP_IN_TOPIC", &input) };
 
     let seeder = connected_broker(&url).await;
     publish(&seeder, &input, br#"{"partition":0,"seq":7}"#).await;
@@ -2485,7 +2522,7 @@ async fn a_spent_delivery_lands_on_the_dead_letter_topic() {
     let app = RustStream::new(AppInfo::new("cap", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(spend_the_cap)
+            b.include(spend_the_cap.map_source(|_| tracked(&input, "cap-svc")))
                 .max_attempts(nonzero!(3u32))
                 .dead_letter(dead_letters.clone());
         });
@@ -2536,15 +2573,7 @@ struct SourceTopicProbe {
 // A `KafkaTopics` subscription reads a set no single publish addresses, so the registration says
 // where a retry copy goes. `ToSourceTopic` answers it per delivery: back to the topic this one
 // arrived on.
-#[subscriber(
-    KafkaTopics::new([
-        std::env::var("SRC_EU_TOPIC").expect("topic env"),
-        std::env::var("SRC_US_TOPIC").expect("topic env"),
-    ])
-    .group("src-topic-svc")
-    .start(StartOffset::Earliest)
-    .commit(Commit::Tracked)
-)]
+#[subscriber(KafkaTopics)]
 async fn regional(
     _order: &OrderPayload,
     ctx: &mut Context<'_, KafkaContext, SourceTopicProbe>,
@@ -2573,10 +2602,6 @@ async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
     let us = unique("orders-us");
     create_topic(&url, &eu, 1).await;
     create_topic(&url, &us, 1).await;
-    unsafe {
-        std::env::set_var("SRC_EU_TOPIC", &eu);
-        std::env::set_var("SRC_US_TOPIC", &us);
-    }
 
     let seeder = connected_broker(&url).await;
     publish(&seeder, &eu, br#"{"partition":0,"seq":4}"#).await;
@@ -2590,7 +2615,7 @@ async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
     let app = RustStream::new(AppInfo::new("regional", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_probe))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(regional)
+            b.include(regional.map_source(|_| regions(&eu, &us, "src-topic-svc")))
                 .max_attempts(nonzero!(3u32))
                 .out_retry(KafkaPublish::default())
                 .transform(ToSourceTopic);
@@ -2657,15 +2682,7 @@ async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
 
 // The same registration without a named retry destination: a set of topics addresses no copy, so
 // the app must refuse to start rather than lose the copies at run time.
-#[subscriber(
-    KafkaTopics::new([
-        std::env::var("UNADDRESSED_EU_TOPIC").expect("topic env"),
-        std::env::var("UNADDRESSED_US_TOPIC").expect("topic env"),
-    ])
-    .group("unaddressed-svc")
-    .start(StartOffset::Earliest)
-    .commit(Commit::Tracked)
-)]
+#[subscriber(KafkaTopics)]
 async fn unaddressed(_order: &OrderPayload) -> HandlerOutcome {
     HandlerOutcome::retry()
 }
@@ -2677,15 +2694,11 @@ async fn a_capped_topic_set_refuses_to_start_without_a_retry_destination() {
     let us = unique("unaddressed-us");
     create_topic(&url, &eu, 1).await;
     create_topic(&url, &us, 1).await;
-    unsafe {
-        std::env::set_var("UNADDRESSED_EU_TOPIC", &eu);
-        std::env::set_var("UNADDRESSED_US_TOPIC", &us);
-    }
 
     let app = RustStream::new(AppInfo::new("unaddressed", "0.0.0")).with_broker(
         KafkaBroker::new([url.clone()]),
         |b| {
-            b.include(unaddressed)
+            b.include(unaddressed.map_source(|_| regions(&eu, &us, "unaddressed-svc")))
                 .max_attempts(nonzero!(3u32))
                 .out_retry(KafkaPublish::default());
         },
@@ -2725,6 +2738,69 @@ fn committed_offset(url: &str, group: &str, topic: &str, partition: i32) -> Opti
     }
 }
 
+/// The group as the coordinator describes it: its state, and each member with the partitions it
+/// was assigned. Read while a pass runs, it tells a member that never got an assignment from one
+/// that got it and read nothing.
+fn describe_group(url: &str, group: &str) -> String {
+    let probe: BaseConsumer = match ClientConfig::new().set("bootstrap.servers", url).create() {
+        Ok(probe) => probe,
+        Err(err) => return format!("unavailable ({err})"),
+    };
+    let list = match probe.fetch_group_list(Some(group), Duration::from_secs(10)) {
+        Ok(list) => list,
+        Err(err) => return format!("unavailable ({err})"),
+    };
+    let Some(info) = list.groups().first() else {
+        return "unknown to the coordinator".to_owned();
+    };
+    let members: Vec<String> = info
+        .members()
+        .iter()
+        .map(|member| {
+            let assigned = member
+                .assignment()
+                .and_then(decode_assignment)
+                .unwrap_or_else(|| "nothing".to_owned());
+            format!("{} assigned {assigned}", member.client_id())
+        })
+        .collect();
+    format!("{}, members [{}]", info.state(), members.join("; "))
+}
+
+/// Decodes a consumer-protocol assignment (version, then topics with their partitions) into
+/// `topic[partitions]` entries.
+fn decode_assignment(bytes: &[u8]) -> Option<String> {
+    fn take<const N: usize>(bytes: &mut &[u8]) -> Option<[u8; N]> {
+        let (head, rest) = bytes.split_first_chunk::<N>()?;
+        *bytes = rest;
+        Some(*head)
+    }
+    let mut rest = bytes;
+    let _version = i16::from_be_bytes(take(&mut rest)?);
+    let topics = i32::from_be_bytes(take(&mut rest)?);
+    let mut entries = Vec::new();
+    for _ in 0..topics {
+        let len = usize::try_from(i16::from_be_bytes(take(&mut rest)?)).ok()?;
+        let (name, tail) = rest.split_at_checked(len)?;
+        rest = tail;
+        let count = i32::from_be_bytes(take(&mut rest)?);
+        let mut partitions = Vec::new();
+        for _ in 0..count {
+            partitions.push(i32::from_be_bytes(take(&mut rest)?).to_string());
+        }
+        entries.push(format!(
+            "{}[{}]",
+            String::from_utf8_lossy(name),
+            partitions.join(",")
+        ));
+    }
+    Some(if entries.is_empty() {
+        "nothing".to_owned()
+    } else {
+        entries.join(" ")
+    })
+}
+
 /// Collects the sequence numbers a run handled and wakes the test once it has them all.
 #[derive(Clone)]
 struct ReplayProbe {
@@ -2746,7 +2822,9 @@ impl ReplayProbe {
         let mut seen = self.seen.lock().expect("seen mutex poisoned");
         seen.push(seq);
         if seen.len() >= self.expected {
-            self.done.notify_waiters();
+            // A stored permit, not a wake of current waiters: the records are already on the
+            // topic, so a pass can take them all before the test starts waiting.
+            self.done.notify_one();
         }
     }
 
@@ -2755,14 +2833,10 @@ impl ReplayProbe {
     }
 }
 
-// The first pass: an ordinary subscription, which leaves its position in the group.
-#[subscriber(
-    KafkaTopic::new(std::env::var("REPLAY_TOPIC").expect("topic env"))
-        .group(std::env::var("REPLAY_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-        .commit(Commit::Tracked)
-)]
-async fn consume_once(
+/// Every pass reads through this one handler; the passes differ only in what the mount site
+/// names.
+#[subscriber(KafkaTopic)]
+async fn record_replay(
     order: &OrderPayload,
     ctx: &mut Context<'_, (), ReplayProbe>,
 ) -> HandlerOutcome {
@@ -2770,30 +2844,65 @@ async fn consume_once(
     HandlerOutcome::ack()
 }
 
-// The second pass over the same topic in the same group, opened at a named position instead.
-#[subscriber(
-    KafkaTopic::new(std::env::var("REPLAY_TOPIC").expect("topic env"))
-        .group(std::env::var("REPLAY_GROUP").expect("group env"))
-        .commit(Commit::Tracked),
-    start_at(KafkaPosition::earliest())
-)]
-async fn replay_the_log(
-    order: &OrderPayload,
-    ctx: &mut Context<'_, (), ReplayProbe>,
-) -> HandlerOutcome {
-    ctx.state().record(order.seq);
-    HandlerOutcome::ack()
+/// One pass of the replay test over `topic` in `group`.
+struct ReplayPass<'a> {
+    name: &'static str,
+    url: &'a str,
+    topic: &'a str,
+    group: &'a str,
 }
 
-/// Runs `app` until `probe` has its records, or fails the test.
-async fn run_until_seen(app: impl App, probe: &ReplayProbe) {
-    let done = Arc::clone(&probe.done);
-    let wait = async move {
-        tokio::time::timeout(WAIT, done.notified())
-            .await
-            .expect("every record within the timeout");
-    };
-    App::run_until(app, wait).await.expect("run");
+impl ReplayPass<'_> {
+    /// What the cluster says about the group at this moment, for a failure message.
+    async fn diagnose(&self) -> String {
+        let (url, group, topic) = (
+            self.url.to_owned(),
+            self.group.to_owned(),
+            self.topic.to_owned(),
+        );
+        tokio::task::spawn_blocking(move || {
+            format!(
+                "committed offset {:?}, group {}",
+                committed_offset(&url, &group, &topic, 0),
+                describe_group(&url, &group),
+            )
+        })
+        .await
+        .expect("diagnostics task")
+    }
+
+    /// Runs `app` for up to `within`, returning whether `probe` got its records, and what the
+    /// group looked like if it did not.
+    async fn run(
+        &self,
+        app: impl App,
+        probe: &ReplayProbe,
+        within: Duration,
+    ) -> Result<(), String> {
+        let done = Arc::clone(&probe.done);
+        let outcome = Arc::new(Mutex::new(Ok(())));
+        let report = Arc::clone(&outcome);
+        let wait = async move {
+            if tokio::time::timeout(within, done.notified()).await.is_err() {
+                // Read before the app shuts down: the member and its assignment exist only now.
+                *report.lock().expect("outcome mutex poisoned") = Err(self.diagnose().await);
+            }
+        };
+        App::run_until(app, wait).await.expect("run");
+        outcome.lock().expect("outcome mutex poisoned").clone()
+    }
+
+    /// Runs `app` until `probe` has its records, or fails naming this pass and the group.
+    async fn run_until_seen(&self, app: impl App, probe: &ReplayProbe) {
+        if let Err(group) = self.run(app, probe, WAIT).await {
+            panic!(
+                "the {} pass saw {:?} of {} records within {WAIT:?}; {group}",
+                self.name,
+                probe.taken(),
+                probe.expected,
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2804,10 +2913,7 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     let topic = unique("replay");
     let group = unique("replay-group");
     create_topic(&url, &topic, 1).await;
-    unsafe {
-        std::env::set_var("REPLAY_TOPIC", &topic);
-        std::env::set_var("REPLAY_GROUP", &group);
-    }
+    let source = || tracked(&topic, &group);
 
     let seeder = connected_broker(&url).await;
     for seq in 0..COUNT {
@@ -2819,19 +2925,22 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
         .await;
     }
     seeder.shutdown().await.expect("seeder shutdown");
+    let pass = |name| ReplayPass {
+        name,
+        url: &url,
+        topic: &topic,
+        group: &group,
+    };
 
     // First pass: the group reads the log and leaves its position on the cluster.
     let first = ReplayProbe::new(COUNT as usize);
     let state = first.clone();
-    run_until_seen(
-        RustStream::new(AppInfo::new("replay", "0.0.0"))
-            .on_startup(async move |()| Ok::<_, Infallible>(state))
-            .with_broker(KafkaBroker::new([url.clone()]), |b| {
-                b.include(consume_once);
-            }),
-        &first,
-    )
-    .await;
+    let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(state))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(record_replay.map_source(|_| source()));
+        });
+    pass("first").run_until_seen(app, &first).await;
     assert_eq!(first.taken(), vec![0, 1, 2]);
     assert_eq!(
         committed_offset(&url, &group, &topic, 0),
@@ -2842,19 +2951,41 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     // Second pass: the named starting position wins over that committed offset.
     let replayed = ReplayProbe::new(COUNT as usize);
     let state = replayed.clone();
-    run_until_seen(
-        RustStream::new(AppInfo::new("replay", "0.0.0"))
-            .on_startup(async move |()| Ok::<_, Infallible>(state))
-            .with_broker(KafkaBroker::new([url.clone()]), |b| {
-                b.include(replay_the_log);
-            }),
-        &replayed,
-    )
-    .await;
+    let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(state))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(
+                record_replay
+                    .map_source(|_| source())
+                    .start_at(KafkaPosition::earliest()),
+            );
+        });
+    pass("start_at").run_until_seen(app, &replayed).await;
     assert_eq!(
         replayed.taken(),
         vec![0, 1, 2],
         "start_at must replay the log whatever the group committed",
+    );
+
+    // Third pass: a position that needs no lookup on the cluster. It is ready the moment the
+    // group hands the partition over, before librdkafka has fetched the committed offset, which
+    // is exactly when a seek of the new partition is refused.
+    let skipped = ReplayProbe::new(COUNT as usize - 1);
+    let state = skipped.clone();
+    let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(state))
+        .with_broker(KafkaBroker::new([url.clone()]), |b| {
+            b.include(
+                record_replay
+                    .map_source(|_| source())
+                    .start_at(KafkaPosition::offset(0, 1)),
+            );
+        });
+    pass("start_at offset").run_until_seen(app, &skipped).await;
+    assert_eq!(
+        skipped.taken(),
+        vec![1, 2],
+        "an offset start position must open the partition at that record",
     );
 
     // The control: the same group without the clause resumes after its committed position, so
@@ -2864,19 +2995,16 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(consume_once);
+            b.include(record_replay.map_source(|_| source()));
         });
-    let done = Arc::clone(&resumed.done);
-    let wait = async move {
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), done.notified())
-                .await
-                .is_err(),
-            "without the clause the group must resume past its committed position",
-        );
-    };
-    App::run_until(app, wait).await.expect("run");
-    assert!(resumed.taken().is_empty());
+    let outcome = pass("control")
+        .run(app, &resumed, Duration::from_secs(5))
+        .await;
+    assert!(
+        outcome.is_err() && resumed.taken().is_empty(),
+        "without the clause the group must resume past its committed position, got {:?}",
+        resumed.taken(),
+    );
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_transaction_is_invisible_until_it_commits_and_an_abort_discards_it() {
@@ -2995,9 +3123,12 @@ async fn under_auto_commit_a_requeue_brings_nothing_back() {
         let mut stream = Box::pin(subscriber.stream());
         let msg = next_message(&mut stream).await;
         assert_eq!(msg.payload(), b"first");
-        msg.nack(true)
-            .await
-            .expect("an advisory nack always succeeds");
+        let requeued = msg.nack(true).await;
+        assert!(
+            matches!(requeued, Err(AckError::Unsupported)),
+            "under Commit::Auto nothing brings the record back, so the requeue says so: \
+             {requeued:?}",
+        );
     }
 
     // librdkafka owns the position under `Commit::Auto`: it stored the offset as the record was
@@ -3014,7 +3145,7 @@ async fn under_auto_commit_a_requeue_brings_nothing_back() {
     assert_eq!(
         msg.payload(),
         b"second",
-        "under Commit::Auto a requeue is advisory: the record must not come back",
+        "under Commit::Auto a requeue brings nothing back: the record must not return",
     );
     msg.ack().await.expect("advisory ack");
 
@@ -3243,7 +3374,7 @@ async fn a_transactional_publisher_errors_after_the_connection_closes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
+async fn mixing_rebalance_protocols_in_one_group_fails_the_second_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("protocol-clash");
     let group = unique("protocol-clash-group");
@@ -3260,32 +3391,21 @@ async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
     let msg = next_message(&mut first_stream).await;
     msg.ack().await.expect("ack");
 
-    // A second member asking for the cooperative family has no protocol in common with it.
-    let mut second = broker
+    // A second member asking for the cooperative family has no protocol in common with it, so
+    // the group never assigns it anything and opening it fails, naming the clash.
+    let err = broker
         .subscribe_with(tracked(&topic, &group).assignment(Assignment::CooperativeSticky))
         .await
-        .expect("subscribe the second member");
-    let mut second_stream = Box::pin(second.stream());
-    let err = loop {
-        let next = tokio::time::timeout(WAIT, second_stream.next())
-            .await
-            .expect("the rejected join must surface on the subscription");
-        match next {
-            Some(Err(err)) => break err,
-            Some(Ok(delivered)) => delivered.ack().await.expect("ack"),
-            None => panic!("the stream ended instead of reporting the clash"),
-        }
-    };
+        .expect_err("a member the group refuses must not open");
+    assert!(matches!(err, KafkaError::Subscribe(_)), "got {err:?}");
     let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("protocol"),
-        "the error must name the protocol clash, got: {err}",
+        message.contains("protocol") && message.contains(&group),
+        "the error must name the protocol clash and the group, got: {err}",
     );
 
     drop(first_stream);
     drop(first);
-    drop(second_stream);
-    drop(second);
     broker.shutdown().await.expect("shutdown");
 }
 
@@ -3336,46 +3456,28 @@ async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_start_position_the_assignment_cannot_carry_surfaces_on_the_stream() {
+async fn a_start_position_the_assignment_cannot_carry_fails_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("bad-start");
     create_topic(&url, &topic, 1).await;
     let broker = connected_broker(&url).await;
 
-    publish(&broker, &topic, b"unreachable").await;
-
-    // Partition 7 of a one-partition topic: the subscription opens, because a group has nothing
-    // assigned yet and the position is held for the assignment, and the rebalance then finds
-    // nothing to move. A callback can return no error, so the stream is where it must appear.
-    let mut subscriber = broker
+    // Partition 7 of a one-partition topic: the subscription opens with partition 0 assigned,
+    // so the position names nothing it holds, and opening it fails rather than reading from
+    // somewhere the mount site did not name.
+    let err = broker
         .subscribe_with(StartAt::new(
             tracked(&topic, &unique("group")),
             KafkaPosition::offset(7, 0),
         ))
         .await
-        .expect("the position is held until the group assigns something");
-    let mut stream = Box::pin(subscriber.stream());
-
-    let next = tokio::time::timeout(WAIT, stream.next())
-        .await
-        .expect("the failed start position must reach the stream");
-    let err = match next {
-        Some(Err(err)) => err,
-        Some(Ok(msg)) => panic!(
-            "a subscription that could not be opened at its position must not pass for a working \
-             one, got {:?}",
-            String::from_utf8_lossy(msg.payload()),
-        ),
-        None => panic!("the stream ended instead of reporting the position"),
-    };
+        .expect_err("a subscription that cannot open at its position must not open");
     let message = err.to_string();
     assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err:?}");
     assert!(
-        message.contains("start position") && message.contains('7'),
-        "the error must name the position that could not be applied, got: {message}",
+        message.contains("partition: 7") && message.contains(&topic),
+        "the error must name the position and what the subscription holds, got: {message}",
     );
 
-    drop(stream);
-    drop(subscriber);
     broker.shutdown().await.expect("shutdown");
 }

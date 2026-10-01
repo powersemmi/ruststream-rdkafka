@@ -15,8 +15,11 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::{Seeker, Str};
 use tokio::task;
 
+use crate::broker::ConnState;
 use crate::error::KafkaError;
-use crate::tracker::{CommitTracker, TrackingContext};
+#[cfg(feature = "testing")]
+use crate::in_process::Member;
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// How long a reposition waits for librdkafka (the seek itself, and the timestamp lookup).
 const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -109,23 +112,24 @@ impl KafkaPosition {
 
 /// What a [`KafkaSeeker`] repositions.
 ///
-/// The two transports this crate ships are different machines, not one machine with a flag: a
-/// live consumer moves its assigned partitions through librdkafka, while the in-process test
-/// transport replays the retained log of the topics the subscription reads. Encoding that as an
-/// enum is what keeps a seeker from ever holding half of each.
+/// A live consumer moves its assigned partitions through librdkafka; under the `testing`
+/// feature a member of the in-process cluster moves its partitions there, by the same rules.
+/// Without the feature there is one variant and no branch.
 #[derive(Clone)]
 enum Repositioner {
     /// A librdkafka consumer: the reposition is a real seek over the partitions this member
     /// holds, plus the offset bookkeeping the new read position invalidates.
     Live {
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         tracker: Arc<CommitTracker>,
     },
-    /// The in-process test transport: the reposition replays the retained publish log of the
-    /// subscribed topics from the target on.
+    /// A member of the in-process cluster.
     #[cfg(feature = "testing")]
-    InProcess(Arc<crate::testing::seek::InProcessSeek>),
+    InProcess(Arc<Member>),
 }
+
+#[cfg(not(feature = "testing"))]
+const _: () = assert!(size_of::<Repositioner>() == 2 * size_of::<usize>());
 
 /// Repositions a live [`KafkaSubscriber`](crate::KafkaSubscriber), minted by
 /// [`Seekable::seeker`](ruststream::Seekable::seeker).
@@ -134,10 +138,6 @@ enum Repositioner {
 /// runtime owns the subscriber, so a handler reaches its subscription through the `SeekHandle`
 /// context key ([`Ctx(seeker): Ctx<SeekHandle>`](crate::context::keys::SeekHandle)) or through a
 /// token minted at the mount site.
-///
-/// One type serves both transports: the in-process test broker mints the same seeker over its
-/// retained log, so a service that repositions is testable with `TestApp` unchanged. What differs
-/// is stated on each operation.
 ///
 /// # Scope
 ///
@@ -156,6 +156,12 @@ enum Repositioner {
 #[derive(Clone)]
 pub struct KafkaSeeker {
     inner: Repositioner,
+    /// The connection the subscription was opened on. A seeker outlives the shutdown in a
+    /// handler's hands, and a seek through it must then error rather than move a consumer the
+    /// service no longer runs.
+    connection: Arc<ConnState>,
+    /// The subscription's name, for the error a seek after shutdown reports.
+    subscription: Str,
 }
 
 impl std::fmt::Debug for KafkaSeeker {
@@ -173,18 +179,28 @@ impl std::fmt::Debug for KafkaSeeker {
 
 impl KafkaSeeker {
     pub(crate) const fn new(
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         tracker: Arc<CommitTracker>,
+        connection: Arc<ConnState>,
+        subscription: Str,
     ) -> Self {
         Self {
             inner: Repositioner::Live { consumer, tracker },
+            connection,
+            subscription,
         }
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) const fn in_process(control: Arc<crate::testing::seek::InProcessSeek>) -> Self {
+    pub(crate) const fn in_process(
+        member: Arc<Member>,
+        connection: Arc<ConnState>,
+        subscription: Str,
+    ) -> Self {
         Self {
-            inner: Repositioner::InProcess(control),
+            inner: Repositioner::InProcess(member),
+            connection,
+            subscription,
         }
     }
 }
@@ -200,28 +216,24 @@ impl Seeker for KafkaSeeker {
     /// seek replayed but nobody handled, and an exactly-once window that was open when the seek
     /// landed aborts instead of committing offsets from the position it replaced.
     ///
-    /// On the in-process test transport the reposition is a replay of the retained log instead,
-    /// applied before this call returns; see
-    /// [`KafkaTestSubscriber`](crate::testing::KafkaTestSubscriber) for which positions it
-    /// resolves.
-    ///
-    /// A consumer that holds no partitions yet is the startup case, not an error: a group
-    /// subscription is assigned nothing until something polls it, which happens after the
-    /// subscription is handed to the runtime. The position is kept and applied to the first
-    /// assignment the group hands over, ahead of its first record.
+    /// A consumer that holds no partitions yet is not an error: a group can open a subscription
+    /// with none, when it has more members than partitions or the topic does not exist yet. The
+    /// position is kept and applied to the first assignment the group hands over, ahead of its
+    /// first record.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the position names no partition among the
-    /// ones this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the
-    /// reposition or the timestamp lookup fails.
+    /// Returns [`KafkaError::Closed`] once the broker the subscription was opened on has shut
+    /// down, [`KafkaError::InvalidOptions`] when the position names no partition among the ones
+    /// this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the reposition or
+    /// the timestamp lookup fails.
     ///
     /// # Cancel safety
     ///
-    /// Not cancel safe on a live consumer: dropping the future may leave the consumer
-    /// repositioned, its bookkeeping already reset. The in-process arm resolves without
-    /// suspending, so there is nothing to cancel.
+    /// Not cancel safe: dropping the future may leave the consumer repositioned, its bookkeeping
+    /// already reset.
     async fn seek(&self, to: Self::Position) -> Result<(), Self::Error> {
+        self.connection.ensure_open(&self.subscription)?;
         match &self.inner {
             Repositioner::Live { consumer, tracker } => {
                 let consumer = Arc::clone(consumer);
@@ -233,7 +245,7 @@ impl Seeker for KafkaSeeker {
                     .map_err(|err| KafkaError::Consume(Box::new(err)))?
             }
             #[cfg(feature = "testing")]
-            Repositioner::InProcess(control) => control.replay(&to),
+            Repositioner::InProcess(member) => member.seek(&to),
         }
     }
 }
@@ -241,9 +253,9 @@ impl Seeker for KafkaSeeker {
 /// Resolves `to` against the current assignment, resets the bookkeeping of every partition it
 /// names, and moves the consumer.
 ///
-/// A consumer with nothing assigned keeps the position instead: `start_at(..)` names it before
-/// the subscription is ever polled, and a group assigns partitions only once something polls, so
-/// there is nothing to seek yet. [`TrackingContext`] applies it to the assignment when it lands.
+/// A consumer with nothing assigned keeps the position instead: a group can open a subscription
+/// with no partitions, and a `start_at(..)` on it still has to take effect. [`TrackingContext`]
+/// applies it to the assignment when it lands.
 fn reposition(
     consumer: &StreamConsumer<TrackingContext>,
     tracker: &CommitTracker,
@@ -254,19 +266,74 @@ fn reposition(
         consumer.context().hold_start(to.clone());
         return Ok(());
     }
-    apply_position(consumer, tracker, &assignment, to)
+    let targets = apply_position(consumer, tracker, &assignment, to)?;
+    // A subscription whose stream has not started yet resumes from here when it does.
+    consumer.context().startup.moved(&targets);
+    Ok(())
 }
 
-/// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first.
-///
-/// Both entry points end here: a reposition of a running subscription, and the start position a
-/// rebalance carries to the partitions the group has just handed over.
-pub(crate) fn apply_position<C>(
+/// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first:
+/// the reposition of a running subscription.
+fn apply_position<C>(
     consumer: &C,
     tracker: &CommitTracker,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
+) -> Result<TopicPartitionList, KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
+    let targets = targets_in(consumer, assignment, to)?;
+
+    // The bookkeeping is reset before the consumer moves: between the two, a delivery pulled
+    // from the old position could otherwise settle into the new one and commit past records the
+    // replay has not handled yet.
+    for element in targets.elements() {
+        tracker.reposition(&Str::from(element.topic()), element.partition());
+    }
+    clear_stored_offsets(consumer, &targets)?;
+
+    let outcome = consumer
+        .seek_partitions(targets.clone(), SEEK_TIMEOUT)
+        .map_err(KafkaError::consume)?;
+    for element in outcome.elements() {
+        element.error().map_err(KafkaError::consume)?;
+    }
+    Ok(targets)
+}
+
+/// Writes `to` into an assignment the group has just handed over, before librdkafka takes it, so
+/// fetching begins there; the offset bookkeeping of each partition it names is reset first.
+///
+/// This is how a start position reaches a group subscription. Seeking the new partitions instead
+/// would race librdkafka: it refuses a seek (`Local: Erroneous state`) until it has fetched the
+/// group's committed offset for the partition, and that fetch is still in flight when the
+/// rebalance callback runs. An offset carried by the assignment itself needs no committed offset.
+pub(crate) fn position_assignment<C>(
+    consumer: &C,
+    tracker: &CommitTracker,
+    assignment: &mut TopicPartitionList,
+    to: &KafkaPosition,
 ) -> Result<(), KafkaError>
+where
+    C: Consumer<TrackingContext>,
+{
+    let targets = targets_in(consumer, assignment, to)?;
+    for element in targets.elements() {
+        tracker.reposition(&Str::from(element.topic()), element.partition());
+        assignment
+            .set_partition_offset(element.topic(), element.partition(), element.offset())
+            .map_err(KafkaError::consume)?;
+    }
+    Ok(())
+}
+
+/// Resolves `to` against `assignment`, refusing a position that names none of its partitions.
+fn targets_in<C>(
+    consumer: &C,
+    assignment: &TopicPartitionList,
+    to: &KafkaPosition,
+) -> Result<TopicPartitionList, KafkaError>
 where
     C: Consumer<TrackingContext>,
 {
@@ -278,22 +345,7 @@ where
             describe(assignment),
         )));
     }
-
-    // The bookkeeping is reset before the consumer moves: between the two, a delivery pulled
-    // from the old position could otherwise settle into the new one and commit past records the
-    // replay has not handled yet.
-    for element in targets.elements() {
-        tracker.reposition(&Str::from(element.topic()), element.partition());
-    }
-    clear_stored_offsets(consumer, &targets)?;
-
-    let outcome = consumer
-        .seek_partitions(targets, SEEK_TIMEOUT)
-        .map_err(KafkaError::consume)?;
-    for element in outcome.elements() {
-        element.error().map_err(KafkaError::consume)?;
-    }
-    Ok(())
+    Ok(targets)
 }
 
 /// Clears librdkafka's own stored offsets for the repositioned partitions.

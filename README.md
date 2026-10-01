@@ -1,7 +1,7 @@
 <h1 align="center">ruststream-rdkafka</h1>
 
 <p align="center">
-  <i>The Apache Kafka broker for the <a href="https://github.com/powersemmi/ruststream">RustStream</a> messaging framework: consumer groups, precise tracked commits, native record keys, and an in-process test broker.</i>
+  <i>The Apache Kafka broker for the <a href="https://github.com/powersemmi/ruststream">RustStream</a> messaging framework: consumer groups, precise tracked commits, native record keys, and an in-process mode that runs the production app in tests.</i>
 </p>
 
 <p align="center">
@@ -37,7 +37,8 @@ middleware come from the framework; this crate is the transport.
 - **Repositioning:** a handler moves its subscription to an offset or a timestamp.
 - **Confluent Schema Registry** framing, with Avro and Protobuf, behind features.
 - **AsyncAPI** with the specification's `kafka` binding, behind the `asyncapi` feature.
-- **Tests without a cluster:** handlers run against an in-process Kafka.
+- **Tests on the production app:** the app `main` runs, with `KafkaBroker` connected to an
+  in-process Kafka, or against a real cluster with `TestApp::start_live`.
 
 ## Install
 
@@ -52,7 +53,8 @@ ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 ```
 
 The crate builds librdkafka from source, so a C toolchain is required. Optional features:
-`asyncapi`, `schema-registry`, `avro`, `protobuf`, `ssl`, `ssl-vendored` and `zstd`.
+`testing`, `asyncapi`, `schema-registry`, `avro`, `protobuf`, `msgpack`, `cbor`, `ssl`,
+`ssl-vendored` and `zstd`.
 
 ## Write a service
 
@@ -60,7 +62,9 @@ The crate builds librdkafka from source, so a C toolchain is required. Optional 
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+// `Outgoing`, `PartialEq` and `Serialize` are here for the test below, which publishes an order
+// and asserts on the decoded one.
+#[derive(Debug, Deserialize, Outgoing, PartialEq, Serialize)]
 struct Order {
     id: u64,
 }
@@ -99,27 +103,27 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 
 ## Test it
 
-`TestApp` runs the handlers against an in-process Kafka, with no cluster.
+`TestApp` runs the app `main` runs, with `KafkaBroker` connected to an in-process Kafka and no
+cluster.
 
 ```rust
 use ruststream::testing::TestApp;
-use ruststream_rdkafka::testing::KafkaTestBroker;
 
-let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
-    .with_broker(KafkaTestBroker::new(), |b| {
-        b.include(confirm);
-    });
-let tb = TestApp::start(app).await?;
+let tb = TestApp::start(app()).await?;
 
-tb.broker::<KafkaTestBroker>()
-    .publish("orders", &Order { id: 42 })
+// `publish` returns once the handlers it woke have settled, so the assertions read finished state.
+tb.broker::<KafkaBroker>()
+    .message(&Order { id: 42 })
+    .to("orders")
+    .publish()
     .await?;
 
-tb.broker::<KafkaTestBroker>()
+tb.broker::<KafkaBroker>()
     .subscriber("orders")
     .assert_called_once()
     .settled(HandlerOutcome::ack());
-tb.broker::<KafkaTestBroker>()
+
+tb.broker::<KafkaBroker>()
     .published::<Confirmation>("confirmations")
     .assert_called_once()
     .with(&Confirmation { id: 42 });
@@ -132,7 +136,7 @@ tb.broker::<KafkaTestBroker>()
 - [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) - policies, record keys, transactions, exactly-once pipelines.
 - [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - Confluent framing, with
   [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it.
-- [`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) - the in-process broker and what it does not simulate.
+- [Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) - the production app under `TestApp`, in process and live.
 - The framework: <https://powersemmi.github.io/ruststream/latest>
 
 ## Minimum supported Rust version

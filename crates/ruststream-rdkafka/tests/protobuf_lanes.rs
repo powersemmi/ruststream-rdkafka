@@ -62,6 +62,13 @@ fn envelope(wire: &[u8]) -> (u32, &[u8]) {
     (id, &wire[5..])
 }
 
+/// A subscription on this run's `topic` in `group`, from the start of the log.
+fn from_earliest(topic: &str, group: String) -> KafkaTopic {
+    KafkaTopic::new(topic)
+        .group(group)
+        .start(StartOffset::Earliest)
+}
+
 fn unique(base: &str) -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -118,15 +125,14 @@ async fn scan_topic(
 /// "the pipeline travels along for shape, though a byte-for-byte reply never runs it"), while a
 /// slot publishes through it. Nothing in the handler serializes anything either way.
 mod plain_handler {
-    use super::{ConfirmationJson, scan_topic, unique};
+    use super::{ConfirmationJson, from_earliest, scan_topic, unique};
     use std::sync::Arc;
 
     use ruststream::prelude::*;
     use ruststream::runtime::{App, AppInfo, DefaultSlot, RustStream};
     use ruststream::{Broker, ConnectedBroker};
     use ruststream_rdkafka::{
-        KafkaBroker, KafkaPublish, KafkaTopic, ProtobufFrame, SchemaRegistry, SchemaType,
-        StartOffset, protobuf,
+        KafkaBroker, KafkaPublish, KafkaTopic, ProtobufFrame, SchemaRegistry, SchemaType, protobuf,
     };
     use tokio::sync::Notify;
 
@@ -193,11 +199,7 @@ message Confirmation {
     }
 
     // The whole point: nothing about the envelope in the signature, and no framing call.
-    #[subscriber(
-        KafkaTopic::new(std::env::var("PROTO_PLAIN_TRIGGER").expect("trigger env"))
-            .group(std::env::var("PROTO_PLAIN_GROUP").expect("group env"))
-            .start(StartOffset::Earliest)
-    )]
+    #[subscriber(KafkaTopic)]
     async fn confirm(
         order: &PlainOrder,
         State(signal): State<Signal>,
@@ -211,7 +213,8 @@ message Confirmation {
             .to(REPLY_TOPIC)
             .publish()
             .await;
-        signal.0.notify_waiters();
+        // A stored permit: the delivery may land before the test starts waiting for it.
+        signal.0.notify_one();
         if sent.is_err() {
             return HandlerOutcome::retry();
         }
@@ -227,10 +230,6 @@ message Confirmation {
             return;
         };
         let trigger = unique("proto-plain-trigger");
-        unsafe {
-            std::env::set_var("PROTO_PLAIN_TRIGGER", &trigger);
-            std::env::set_var("PROTO_PLAIN_GROUP", unique("proto-plain-group"));
-        }
         let marker = i64::from(std::process::id()) * 1000 + 7;
 
         let sr = SchemaRegistry::new(&registry);
@@ -280,9 +279,11 @@ message Confirmation {
             )
             .on_startup(async move |()| Ok::<_, std::io::Error>(PlainApp { signal: app_signal }))
             .with_broker(KafkaBroker::new([kafka.clone()]), |b| {
-                b.include(confirm)
-                    .out(DefaultSlot, KafkaPublish::default())
-                    .build();
+                b.include(
+                    confirm.map_source(|_| from_earliest(&trigger, unique("proto-plain-group"))),
+                )
+                .out(DefaultSlot, KafkaPublish::default())
+                .build();
             });
 
         let notified = Arc::clone(&signal.0);
@@ -326,9 +327,8 @@ message Confirmation {
         use ruststream::prelude::*;
         use ruststream::runtime::{AppInfo, DefaultSlot, RustStream};
         use ruststream::testing::TestApp;
-        use ruststream_rdkafka::testing::KafkaTestBroker;
         use ruststream_rdkafka::{
-            KafkaPublish, ProtobufFrame, SchemaRegistry, SchemaType, protobuf,
+            KafkaBroker, KafkaPublish, ProtobufFrame, SchemaRegistry, SchemaType, protobuf,
         };
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -379,11 +379,14 @@ message Confirmation {
                     ProtobufFrame::new(sr)
                         .message("in-process-plain-confirmations", "rsplain.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
-                    b.include(confirm_in_process)
-                        .out(DefaultSlot, KafkaPublish::default())
-                        .build();
-                });
+                .with_broker(
+                    KafkaBroker::new(["kafka:9092"]).default_group("tests"),
+                    |b| {
+                        b.include(confirm_in_process)
+                            .out(DefaultSlot, KafkaPublish::default())
+                            .build();
+                    },
+                );
             let tb = TestApp::start(app).await.expect("start");
 
             // The delivery goes on the topic already framed, as a registry-backed producer
@@ -403,7 +406,7 @@ message Confirmation {
                 .expect("publish drives the handler to quiescence");
 
             let published = tb
-                .broker::<KafkaTestBroker>()
+                .broker::<KafkaBroker>()
                 .published::<()>("in-process-plain-confirmations")
                 .assert_called_once();
             let wire = published.messages()[0].payload();
@@ -429,13 +432,13 @@ message Confirmation {
 /// the reply type carries nothing but its encode half. Where `plain_handler` puts the framing on
 /// the app (a layer, and a slot to leave through), this puts it on the reply's own publisher.
 mod plain_reply {
-    use super::{ConfirmationJson, scan_topic, unique};
+    use super::{ConfirmationJson, from_earliest, scan_topic, unique};
 
     use ruststream::prelude::*;
     use ruststream::runtime::{App, AppInfo, Reply, RustStream};
     use ruststream::{Broker, ConnectedBroker};
     use ruststream_rdkafka::{
-        KafkaBroker, KafkaPublish, KafkaTopic, SchemaRegistry, SchemaType, StartOffset, protobuf,
+        KafkaBroker, KafkaPublish, KafkaTopic, SchemaRegistry, SchemaType, protobuf,
     };
 
     /// The reply topic, fixed because the macro's `publish(..)` takes a string literal.
@@ -491,12 +494,7 @@ message Confirmation {
     }
 
     // No slot parameter, no `.publish().await`, no error branch. The handler returns its reply.
-    #[subscriber(
-        KafkaTopic::new(std::env::var("PROTO_REPLY_TRIGGER").expect("trigger env"))
-            .group(std::env::var("PROTO_REPLY_GROUP").expect("group env"))
-            .start(StartOffset::Earliest),
-        publish("proto-reply-confirmations-placeholder")
-    )]
+    #[subscriber(KafkaTopic, publish("proto-reply-confirmations-placeholder"))]
     async fn confirm(order: &ReplyOrder) -> ReplyConfirmation {
         ReplyConfirmation {
             id: order.id,
@@ -513,10 +511,6 @@ message Confirmation {
             return;
         };
         let trigger = unique("proto-reply-trigger");
-        unsafe {
-            std::env::set_var("PROTO_REPLY_TRIGGER", &trigger);
-            std::env::set_var("PROTO_REPLY_GROUP", unique("proto-reply-group"));
-        }
         let marker = i64::from(std::process::id()) * 1000 + 11;
 
         let registry = SchemaRegistry::new(&registry_url);
@@ -559,7 +553,10 @@ message Confirmation {
             |b| {
                 // `rsreply.Confirmation` is the second message of its schema, so the index path
                 // is pinned; a single-message `.proto` needs nothing here.
-                b.include(confirm).out(
+                b.include(
+                    confirm.map_source(|_| from_earliest(&trigger, unique("proto-reply-group"))),
+                )
+                .out(
                     Reply,
                     KafkaPublish::framed(&registry).message(REPLY_TOPIC, "rsreply.Confirmation"),
                 );
@@ -602,8 +599,9 @@ message Confirmation {
         use ruststream::prelude::*;
         use ruststream::runtime::{AppInfo, Reply, RustStream};
         use ruststream::testing::TestApp;
-        use ruststream_rdkafka::testing::KafkaTestBroker;
-        use ruststream_rdkafka::{KafkaPublish, ProtobufFrame, SchemaRegistry, protobuf};
+        use ruststream_rdkafka::{
+            KafkaBroker, KafkaPublish, ProtobufFrame, SchemaRegistry, protobuf,
+        };
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -654,7 +652,7 @@ message Confirmation {
                 .publish()
                 .await
                 .expect("publish drives the handler to quiescence");
-            tb.broker::<KafkaTestBroker>()
+            tb.broker::<KafkaBroker>()
                 .published::<()>(REPLY_TOPIC)
                 .assert_called_once()
                 .messages()[0]
@@ -680,7 +678,7 @@ message Confirmation {
         async fn a_returned_reply_is_framed_by_the_mount_sites_policy() {
             let (_server, registry) = registry().await;
             let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0")).with_broker(
-                KafkaTestBroker::new(),
+                KafkaBroker::new(["kafka:9092"]).default_group("tests"),
                 |b| {
                     b.include(confirm).out(
                         Reply,
@@ -702,13 +700,16 @@ message Confirmation {
                     ProtobufFrame::new(registry.clone())
                         .message(REPLY_TOPIC, "rsreply.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
-                    b.include(confirm).out(
-                        Reply,
-                        KafkaPublish::framed(&registry)
-                            .message(REPLY_TOPIC, "rsreply.Confirmation"),
-                    );
-                });
+                .with_broker(
+                    KafkaBroker::new(["kafka:9092"]).default_group("tests"),
+                    |b| {
+                        b.include(confirm).out(
+                            Reply,
+                            KafkaPublish::framed(&registry)
+                                .message(REPLY_TOPIC, "rsreply.Confirmation"),
+                        );
+                    },
+                );
             let tb = TestApp::start(app).await.expect("start");
 
             // Whichever of the two runs first frames it; the other sees the envelope already
