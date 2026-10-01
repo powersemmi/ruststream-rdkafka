@@ -87,6 +87,15 @@ partition, which is the case before its first commit and again after retention d
 starts at the oldest retained record, `Latest` at the end of the log. [`Assignment`] picks the
 group's rebalance strategy, and [`LaneKey`] what a worker lane is keyed by.
 
+A subscription is open once it knows where each of its partitions starts, so everything
+published after it opens reaches it, under librdkafka's default `latest` reset too. For a group
+that means the group has assigned this member its partitions: startup waits for that, up to
+[`KafkaBroker::assignment_timeout`] (60 seconds by default), and fails naming the subscription
+and its group when the group does not answer. Until the runtime starts reading the
+subscription, its consumer keeps answering the group, so the next member to join does not wait
+for it. A subscription to topics the cluster does not have yet opens without partitions; a topic
+created later is read from where `auto.offset.reset` puts it when the group assigns it.
+
 ```
 # #[cfg(feature = "json")]
 # mod demo {
@@ -222,8 +231,10 @@ Kafka keeps the log, so a subscription can be moved through it. [`KafkaPosition:
 [`topic_offset`](KafkaPosition::topic_offset) (one partition of one named topic) and
 [`timestamp`](KafkaPosition::timestamp) (epoch milliseconds, resolved per partition) are the
 positions. `start_at(position)` at the mount site opens the subscription there on every
-startup, whatever the group committed before: the position lands on the first assignment the
-group hands over, ahead of its first record. Under [`Assignment::CooperativeSticky`] that first
+startup, whatever the group committed before: the position lands on the partitions the
+subscription opened with, ahead of their first record, or on the first assignment the group
+hands over when it opened with none. A position that names none of the partitions it opened with
+fails startup. Under [`Assignment::CooperativeSticky`] that first
 assignment may be a part of the group's share, and partitions arriving in a later increment are
 not repositioned. A handler repositions the running subscription
 through the [`SeekHandle`](context::keys::SeekHandle) context key, reading where it currently

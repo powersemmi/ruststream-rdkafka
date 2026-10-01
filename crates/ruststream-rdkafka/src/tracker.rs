@@ -29,6 +29,7 @@ use tracing::warn;
 use crate::attention::Attention;
 use crate::error::KafkaError;
 use crate::seek::{self, KafkaPosition};
+use crate::startup::Startup;
 
 /// Which partition's bookkeeping a delivery settles into, and which read position it belongs to.
 ///
@@ -464,19 +465,30 @@ pub(crate) struct TrackingContext {
     /// The subscription's name, so a rebalance that cannot honour its start position says which
     /// subscription it was.
     subscription: String,
-    /// The position a `start_at(..)` named, waiting for partitions to apply it to. A group
-    /// assigns nothing until something polls the consumer, and the runtime polls only after the
-    /// subscription is open, so the position outlives the seek call that carried it.
+    /// The position a `start_at(..)` named, waiting for partitions to apply it to: a group can
+    /// open a subscription with none, so the position outlives the seek call that carried it.
     start: Mutex<Option<KafkaPosition>>,
+    /// The subscription between `subscribe` returning and its stream starting.
+    pub(crate) startup: Startup,
 }
 
 impl TrackingContext {
-    pub(crate) fn new(tracker: Arc<CommitTracker>, subscription: impl Into<String>) -> Self {
+    pub(crate) fn new(
+        tracker: Arc<CommitTracker>,
+        subscription: impl Into<String>,
+        startup: Startup,
+    ) -> Self {
         Self {
             tracker,
             subscription: subscription.into(),
             start: Mutex::new(None),
+            startup,
         }
+    }
+
+    /// The subscription's name.
+    pub(crate) fn subscription(&self) -> &str {
+        &self.subscription
     }
 
     /// Keeps `position` for the next assignment, as a seek on a consumer holding nothing does.
@@ -516,26 +528,31 @@ impl TrackingContext {
 impl ClientContext for TrackingContext {}
 
 impl ConsumerContext for TrackingContext {
-    /// Applies a rebalance the way librdkafka's default handling does, with two steps of this
-    /// crate's own: a revoke resets the tracker, and an assignment carries the subscription's
-    /// start position.
+    /// Applies a rebalance the way librdkafka's default handling does, with steps of this
+    /// crate's own: a revoke resets the tracker, an assignment carries the subscription's start
+    /// position, and a subscription whose stream has not started yet gets a concrete start for
+    /// every partition (see `startup`).
     ///
-    /// The start position is written into the assignment before librdkafka takes it (see
-    /// [`seek::position_assignment`]), which is the one point at which a `start_at(..)` on a
-    /// group subscription can take effect: it is named before anything polls the consumer, and
-    /// until something does, the group has assigned nothing to position.
+    /// A start position held for a subscription that opened with no partitions is written into
+    /// the assignment before librdkafka takes it (see [`seek::position_assignment`]): seeking the
+    /// new partitions instead would race the committed-offset fetch librdkafka starts with them.
     fn rebalance(
         &self,
         consumer: &BaseConsumer<Self>,
         err: RDKafkaRespErr,
         partitions: &mut TopicPartitionList,
     ) {
+        // A subscription whose stream has not started yet is kept (see `startup`): its
+        // partitions get a concrete start before librdkafka takes them.
+        let mut kept = false;
         let assigning = match err {
             RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS => {
+                kept = self.startup.assigning(consumer, partitions);
                 self.open_at_start(consumer, partitions);
                 true
             }
             RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS => {
+                self.startup.revoking(consumer, partitions);
                 self.tracker.revoke(partitions);
                 false
             }
@@ -558,12 +575,16 @@ impl ConsumerContext for TrackingContext {
             (false, true) => consumer.incremental_unassign(partitions),
             (false, false) => consumer.unassign(),
         };
-        if let Err(err) = applied {
+        if let Err(err) = &applied {
             warn!(
                 subscription = %self.subscription,
                 error = %err,
                 "librdkafka did not apply the rebalance",
             );
+        }
+        if kept {
+            self.startup
+                .assigned(consumer, partitions, applied.as_ref().copied());
         }
     }
 }
