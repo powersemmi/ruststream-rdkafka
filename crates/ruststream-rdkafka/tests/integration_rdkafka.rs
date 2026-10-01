@@ -7,9 +7,9 @@
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features -- --test-threads=1
 //! ```
 //!
-//! These cover exactly what the in-process test broker does not simulate: consumer groups,
-//! committed positions across subscriber restarts, the two commit modes, start offsets, and
-//! native-key partitioning.
+//! These run the transport against the cluster itself: consumer groups, committed positions
+//! across subscriber restarts, the commit modes, start offsets, native-key partitioning over
+//! topics with several partitions, and transactions.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -294,7 +294,7 @@ async fn tracked_commit_survives_subscriber_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nack_requeue_leaves_offset_for_redelivery() {
+async fn nack_requeue_redelivers_on_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("requeue");
     let group = unique("group");
@@ -302,6 +302,7 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let broker = connected_broker(&url).await;
 
     publish(&broker, &topic, b"poison").await;
+    publish(&broker, &topic, b"next").await;
 
     {
         let mut subscriber = broker
@@ -312,6 +313,35 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
         let msg = next_message(&mut stream).await;
         assert_eq!(msg.payload(), b"poison");
         msg.nack(true).await.expect("nack requeue");
+        let again = next_message(&mut stream).await;
+        assert_eq!(
+            again.payload(),
+            b"poison",
+            "nack(true) must deliver the record again on its subscription",
+        );
+        again.ack().await.expect("ack");
+        let next = next_message(&mut stream).await;
+        assert_eq!(next.payload(), b"next");
+        next.ack().await.expect("ack");
+    }
+
+    // A requeue that was never delivered again leaves its offset uncommitted: the next member
+    // of the group reads the record from there.
+    publish(&broker, &topic, b"held").await;
+    {
+        let mut subscriber = broker
+            .subscribe_with(tracked(&topic, &group))
+            .await
+            .expect("re-subscribe");
+        let msg = {
+            let mut stream = Box::pin(subscriber.stream());
+            next_message(&mut stream).await
+        };
+        assert_eq!(msg.payload(), b"held");
+        drop(subscriber);
+        msg.nack(true)
+            .await
+            .expect("nack requeue after the subscription closed");
     }
 
     let mut subscriber = broker
@@ -322,13 +352,44 @@ async fn nack_requeue_leaves_offset_for_redelivery() {
     let msg = next_message(&mut stream).await;
     assert_eq!(
         msg.payload(),
-        b"poison",
-        "nack(true) must leave the offset uncommitted for redelivery",
+        b"held",
+        "a requeue with no subscription left must leave the offset uncommitted for redelivery",
     );
     msg.ack().await.expect("ack");
 
     drop(stream);
     drop(subscriber);
+    broker.shutdown().await.expect("shutdown");
+}
+
+/// librdkafka holds a record to `message.max.bytes` with its framing and its headers counted: 36
+/// bytes of framing, and a varint length before each header name and value. The in-process
+/// cluster counts a record the same way, which its own unit tests pin to these numbers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_record_size_limit_counts_framing_and_headers() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("record-size");
+    create_topic(&url, &topic, 1).await;
+    let broker = connected_broker(&url).await;
+    let publisher = broker.publisher(KafkaPublish::default());
+    let mut headers = HeaderMap::new();
+    headers.insert("n", vec![0u8; 64]);
+    // 36 of framing, then the header: its name, its value, and one and two varint bytes.
+    let fits = 1_000_000 - 36 - (1 + 64 + 1 + 2);
+    for (payload, accepted) in [(fits, true), (fits + 1, false)] {
+        let body = vec![0u8; payload];
+        let sent = publisher
+            .publish(
+                OutgoingMessage::new(&topic, body.as_slice()).with_headers(headers.clone()),
+                None,
+            )
+            .await;
+        assert_eq!(
+            sent.is_ok(),
+            accepted,
+            "a {payload}-byte payload with a 64-byte header: {sent:?}",
+        );
+    }
     broker.shutdown().await.expect("shutdown");
 }
 
@@ -2134,8 +2195,8 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
 }
 
 // The reposition contract a handler sees - the `Position` and `SeekHandle` context keys, and the
-// batch-scoped context - is application-level behaviour, so it is exercised over the in-process
-// transport with `TestApp` in `tests/testing_core.rs`. What lives here is the transport itself:
+// batch-scoped context - is application-level behaviour, so it is exercised on the production
+// app with `TestApp` in `tests/harness.rs`. What lives here is the transport itself:
 // that a real consumer moves, and that the offset bookkeeping follows it (see
 // `a_seek_moves_the_tracked_watermark_with_the_read_position` and
 // `positions_reach_every_assigned_partition_and_report_bad_targets` above).
@@ -2263,9 +2324,8 @@ impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
     }
 }
 
-// The round-robin cycle is a producer-side placement, and only a topic with real partitions can
-// show where a record went: the in-process transport gives every topic one partition and records
-// the setting instead of honouring it.
+// The round-robin cycle is a producer-side placement, and only a topic created with several
+// partitions can show where a record went, so the test creates one on the cluster.
 #[subscriber(KafkaTopic, publish("round-robin-replies-placeholder"))]
 async fn spread(order: &OrderPayload) -> OrderPayload {
     order.clone()
@@ -3314,7 +3374,7 @@ async fn a_transactional_publisher_errors_after_the_connection_closes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
+async fn mixing_rebalance_protocols_in_one_group_fails_the_second_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("protocol-clash");
     let group = unique("protocol-clash-group");
@@ -3331,32 +3391,21 @@ async fn mixing_rebalance_protocols_in_one_group_surfaces_on_the_stream() {
     let msg = next_message(&mut first_stream).await;
     msg.ack().await.expect("ack");
 
-    // A second member asking for the cooperative family has no protocol in common with it.
-    let mut second = broker
+    // A second member asking for the cooperative family has no protocol in common with it, so
+    // the group never assigns it anything and opening it fails, naming the clash.
+    let err = broker
         .subscribe_with(tracked(&topic, &group).assignment(Assignment::CooperativeSticky))
         .await
-        .expect("subscribe the second member");
-    let mut second_stream = Box::pin(second.stream());
-    let err = loop {
-        let next = tokio::time::timeout(WAIT, second_stream.next())
-            .await
-            .expect("the rejected join must surface on the subscription");
-        match next {
-            Some(Err(err)) => break err,
-            Some(Ok(delivered)) => delivered.ack().await.expect("ack"),
-            None => panic!("the stream ended instead of reporting the clash"),
-        }
-    };
+        .expect_err("a member the group refuses must not open");
+    assert!(matches!(err, KafkaError::Subscribe(_)), "got {err:?}");
     let message = err.to_string().to_lowercase();
     assert!(
-        message.contains("protocol"),
-        "the error must name the protocol clash, got: {err}",
+        message.contains("protocol") && message.contains(&group),
+        "the error must name the protocol clash and the group, got: {err}",
     );
 
     drop(first_stream);
     drop(first);
-    drop(second_stream);
-    drop(second);
     broker.shutdown().await.expect("shutdown");
 }
 
@@ -3407,46 +3456,28 @@ async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_start_position_the_assignment_cannot_carry_surfaces_on_the_stream() {
+async fn a_start_position_the_assignment_cannot_carry_fails_the_subscription() {
     let Some(url) = kafka_url() else { return };
     let topic = unique("bad-start");
     create_topic(&url, &topic, 1).await;
     let broker = connected_broker(&url).await;
 
-    publish(&broker, &topic, b"unreachable").await;
-
-    // Partition 7 of a one-partition topic: the subscription opens, because a group has nothing
-    // assigned yet and the position is held for the assignment, and the rebalance then finds
-    // nothing to move. A callback can return no error, so the stream is where it must appear.
-    let mut subscriber = broker
+    // Partition 7 of a one-partition topic: the subscription opens with partition 0 assigned,
+    // so the position names nothing it holds, and opening it fails rather than reading from
+    // somewhere the mount site did not name.
+    let err = broker
         .subscribe_with(StartAt::new(
             tracked(&topic, &unique("group")),
             KafkaPosition::offset(7, 0),
         ))
         .await
-        .expect("the position is held until the group assigns something");
-    let mut stream = Box::pin(subscriber.stream());
-
-    let next = tokio::time::timeout(WAIT, stream.next())
-        .await
-        .expect("the failed start position must reach the stream");
-    let err = match next {
-        Some(Err(err)) => err,
-        Some(Ok(msg)) => panic!(
-            "a subscription that could not be opened at its position must not pass for a working \
-             one, got {:?}",
-            String::from_utf8_lossy(msg.payload()),
-        ),
-        None => panic!("the stream ended instead of reporting the position"),
-    };
+        .expect_err("a subscription that cannot open at its position must not open");
     let message = err.to_string();
     assert!(matches!(err, KafkaError::InvalidOptions(_)), "got {err:?}");
     assert!(
-        message.contains("start position") && message.contains('7'),
-        "the error must name the position that could not be applied, got: {message}",
+        message.contains("partition: 7") && message.contains(&topic),
+        "the error must name the position and what the subscription holds, got: {message}",
     );
 
-    drop(stream);
-    drop(subscriber);
     broker.shutdown().await.expect("shutdown");
 }
