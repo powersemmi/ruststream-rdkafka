@@ -23,10 +23,10 @@ use std::fmt;
 use std::future::{Future as _, poll_fn};
 use std::pin::pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
-use futures::FutureExt as _;
-use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use futures::StreamExt as _;
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::KafkaError;
 use rdkafka::message::{
     BorrowedHeaders, BorrowedMessage, Header, Headers as _, Message as _, OwnedHeaders,
@@ -38,10 +38,10 @@ use yoke::{Yoke, Yokeable};
 #[cfg(feature = "testing")]
 use crate::in_process::{InProcessRecord, WireHeader};
 use crate::seek::KafkaSeeker;
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, StoreTarget, TrackedConsumer};
 
 /// The consumer a subscription reads through, shared with every delivery it produced.
-pub(crate) type SharedConsumer = Arc<StreamConsumer<TrackingContext>>;
+pub(crate) type SharedConsumer = Arc<TrackedConsumer>;
 
 /// What every delivery of one subscription shares with it, behind one reference count: the
 /// commit tracker a settle reports to, the seeker a context hands out, and the topic name a
@@ -143,9 +143,7 @@ impl HeldRecord {
     /// Nothing is awaited: either a record is taken or nothing happens.
     pub(crate) fn ready(cart: &Cart) -> Option<Result<Self, KafkaError>> {
         let taken = Yoke::try_attach_to_cart(Arc::clone(cart), |cart| {
-            cart.consumer
-                .recv()
-                .now_or_never()
+            take_fetched(&cart.consumer)
                 .ok_or(NotTaken::Empty)?
                 .map(Record)
                 .map_err(NotTaken::Failed)
@@ -195,15 +193,14 @@ impl HeldRecord {
     ///
     /// The position is the record's own offset whenever nothing below it is still outstanding,
     /// which is every settle of an in-order handler. There the record answers for its own topic
-    /// and librdkafka takes the position off the record's topic handle, instead of looking one
-    /// up by name (a `CString`, a topic create and a topic destroy under its own lock, per
-    /// message).
+    /// and librdkafka takes the position off the record's topic handle. Any other position goes
+    /// through the partition's reusable [`StoreTarget`] list, which resolves the partition once
+    /// instead of by name on every store (a `CString` and a topic lookup per message).
     pub(crate) fn store(
         &self,
-        topic: &str,
-        partition: i32,
         offset: i64,
         position: i64,
+        mut target: StoreTarget<'_>,
     ) -> Result<(), KafkaError> {
         match self {
             Self::Fetched(yoke) if position == offset => yoke
@@ -213,11 +210,11 @@ impl HeldRecord {
             Self::Fetched(yoke) => yoke
                 .backing_cart()
                 .consumer
-                .store_offset(topic, partition, position),
-            Self::Copied { cart, .. } => cart.consumer.store_offset(topic, partition, position),
+                .store_offsets(target.list(position)?),
+            Self::Copied { cart, .. } => cart.consumer.store_offsets(target.list(position)?),
             #[cfg(feature = "testing")]
             Self::InProcess { record, .. } => {
-                record.store(topic, partition, position);
+                record.store(target.topic(), target.partition(), position);
                 Ok(())
             }
         }
@@ -303,6 +300,22 @@ impl HeldRecord {
             #[cfg(feature = "testing")]
             Self::InProcess { record, .. } => Some(RecordHeaders::InProcess(record.headers())),
         }
+    }
+}
+
+/// A record librdkafka has already fetched, taken without waiting: the first poll of `recv`.
+///
+/// It runs once per delivery. The client's `recv` future is generic code whose inlining depends
+/// on the codegen unit it lands in, so the take is written out here: `#[inline]` emits it into
+/// its caller's unit, and it stays inlined into the consume loop however the units fall.
+#[inline]
+fn take_fetched(consumer: &TrackedConsumer) -> Option<Result<BorrowedMessage<'_>, KafkaError>> {
+    match consumer
+        .stream()
+        .poll_next_unpin(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(taken) => taken,
+        Poll::Pending => None,
     }
 }
 

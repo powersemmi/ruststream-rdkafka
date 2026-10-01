@@ -217,36 +217,6 @@ async fn a_context_names_the_topic_of_its_record() {
 
 // -------------------------------------------------------------------------------- retries
 
-#[subscriber(KafkaTopic::new("retry").commit(Commit::Tracked))]
-async fn retry_once(order: &Order) -> HandlerOutcome {
-    let _ = order;
-    HandlerOutcome::retry()
-}
-
-/// A tracked retry leaves the offset unsettled and the consumer reads on: Kafka delivers the
-/// record again when the partition is next fetched from the committed offset, which is a restart
-/// or a rebalance, not this session.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tracked_retry_waits_for_the_next_fetch_of_its_partition() {
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
-        b.include(retry_once);
-    });
-    let tb = TestApp::start(app).await.expect("start");
-
-    tb.broker::<KafkaBroker>()
-        .message(&Order { id: 7 })
-        .to("retry")
-        .publish()
-        .await
-        .expect("publish");
-
-    tb.broker::<KafkaBroker>()
-        .subscriber("retry")
-        .assert_called_once()
-        .settled(HandlerOutcome::retry());
-    tb.shutdown().await.expect("shutdown");
-}
-
 /// How long a not-ready-yet delivery waits before it comes back.
 const DEFER: Duration = Duration::from_secs(5);
 

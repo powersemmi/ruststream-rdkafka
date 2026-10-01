@@ -351,7 +351,8 @@ jobs:
           RUSTSTREAM_REQUIRE_LIVE: "1"
         run: cargo test -p ruststream-rdkafka --test integration_rdkafka -- --test-threads=1
 
-      # run_suite in-process plus lifecycle and the commit-mode semantics against the live node.
+      # The core's conformance suites against the live node, and the checks that hold the
+      # in-process cluster to what the node does.
       - name: Run Kafka conformance suite
         env:
           KAFKA_TEST_URL: 127.0.0.1:9092

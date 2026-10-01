@@ -26,6 +26,7 @@ use ruststream::{
     SubscriptionSource,
 };
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio::task;
 
 use crate::eos::EosSource;
@@ -35,13 +36,14 @@ use crate::in_process::{Cluster, MemberSpec, ProducerSettings};
 use crate::publisher::{KafkaPublish, KafkaPublisher};
 #[cfg(feature = "schema-registry")]
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
+use crate::startup::{self, Opened, Reset, Startup};
 use crate::subscriber::{DeliveredTopic, KafkaSubscriber};
 use crate::subscription::{
-    Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan,
+    Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan, refuse_illegal_topics,
 };
 #[cfg(feature = "testing")]
 use crate::testable::Routes;
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// The live client state behind [`ConnectedKafkaBroker`]: the shared producer every publisher
 /// clones from, the resolved configurations subscriptions and transactional producers derive
@@ -53,6 +55,7 @@ pub(crate) struct ConnState {
     base_config: ClientConfig,
     default_group: Option<String>,
     flush_timeout: Duration,
+    assignment_timeout: Duration,
     /// Subscriptions in `Commit::Transactional` mode, keyed by their pipeline id (the
     /// transactional id of the `EosPipeline` that commits their offsets).
     eos_sources: Mutex<HashMap<String, Vec<EosSource>>>,
@@ -193,6 +196,11 @@ impl fmt::Debug for ConnState {
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Covers a group that has to wait out a member that left without saying so: its session
+/// (librdkafka's `session.timeout.ms`, 45 seconds by default) expires before the group
+/// rebalances, and a new group waits the coordinator's initial rebalance delay (three seconds
+/// by default) before its first one.
+const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// An Apache Kafka broker backed by [`rdkafka`](https://docs.rs/rdkafka) / librdkafka.
 ///
@@ -224,6 +232,7 @@ pub struct KafkaBroker {
     producer_config: Vec<(String, String)>,
     connect_timeout: Duration,
     flush_timeout: Duration,
+    assignment_timeout: Duration,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<SchemaRegistry>,
     #[cfg(feature = "schema-registry")]
@@ -247,6 +256,7 @@ impl KafkaBroker {
             producer_config: Vec::new(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
+            assignment_timeout: DEFAULT_ASSIGNMENT_TIMEOUT,
             #[cfg(feature = "schema-registry")]
             schema_registry: None,
             #[cfg(feature = "schema-registry")]
@@ -298,6 +308,38 @@ impl KafkaBroker {
     #[must_use]
     pub fn flush_timeout(mut self, timeout: Duration) -> Self {
         self.flush_timeout = timeout;
+        self
+    }
+
+    /// How long subscribing through a consumer group waits for the group to assign this member
+    /// its partitions before failing startup. Defaults to 60 seconds.
+    ///
+    /// A group subscription is open once the group has assigned its partitions and the offset
+    /// each one starts from is known, so everything published after `subscribe` returns reaches
+    /// it. The group has to agree on the assignment first: a new group waits the coordinator's
+    /// initial rebalance delay (`group.initial.rebalance.delay.ms`, three seconds by default),
+    /// and a group holding a member that left without saying so waits until that member's
+    /// session expires (`session.timeout.ms`, 45 seconds by default). The default covers both.
+    /// A subscription that names its partitions with [`KafkaPartitions`](crate::KafkaPartitions)
+    /// joins no group and does not wait.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use ruststream_rdkafka::KafkaBroker;
+    ///
+    /// // Members of this group run with a short session, so a departed one is gone sooner.
+    /// let broker = KafkaBroker::new(["localhost:9092"])
+    ///     .default_group("orders-svc")
+    ///     .config("session.timeout.ms", "10000")
+    ///     .assignment_timeout(Duration::from_secs(20));
+    /// # let _ = broker;
+    /// ```
+    #[must_use]
+    pub fn assignment_timeout(mut self, timeout: Duration) -> Self {
+        self.assignment_timeout = timeout;
         self
     }
 
@@ -401,6 +443,7 @@ impl Broker for KafkaBroker {
             base_config,
             default_group: self.default_group,
             flush_timeout: self.flush_timeout,
+            assignment_timeout: self.assignment_timeout,
             eos_sources: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             runtime: Handle::current(),
@@ -465,6 +508,7 @@ impl KafkaBroker {
             base_config,
             default_group: self.default_group,
             flush_timeout: self.flush_timeout,
+            assignment_timeout: self.assignment_timeout,
             eos_sources: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             // Taken when the transition is called, which is on the runtime that awaits it.
@@ -587,8 +631,9 @@ impl ConnectedKafkaBroker {
     /// Returns [`KafkaError::Closed`] once the connection this handle aliases has been shut
     /// down, [`KafkaError::InvalidOptions`] when neither the descriptor nor the broker names a
     /// consumer group (or the descriptor's own options do not hold together), and
-    /// [`KafkaError::Subscribe`] when the consumer cannot be created or the subscription is
-    /// rejected.
+    /// [`KafkaError::Subscribe`] when a topic name is not one Kafka accepts, the consumer cannot
+    /// be created, the subscription is rejected, or the group refuses this member or does not
+    /// assign it its partitions within [`KafkaBroker::assignment_timeout`].
     ///
     /// # Examples
     ///
@@ -618,8 +663,12 @@ impl ConnectedKafkaBroker {
     /// Opens the consumer a resolved descriptor asks for. The descriptors validate themselves
     /// before they get here, so what is left is what needs the broker: the default group, the
     /// base config, and the combinations manual assignment cannot honor.
-    pub(crate) fn open(&self, plan: SubscriptionPlan) -> Result<KafkaSubscriber, KafkaError> {
+    ///
+    /// A group subscription returns once the group assigned this member its partitions and the
+    /// start of each is known, bounded by [`KafkaBroker::assignment_timeout`]; see `startup`.
+    pub(crate) async fn open(&self, plan: SubscriptionPlan) -> Result<KafkaSubscriber, KafkaError> {
         self.state.ensure_open(&plan.name)?;
+        refuse_illegal_topics(&plan.reader)?;
         let manual = matches!(plan.reader, Reader::Assigned { .. });
         let group = plan
             .settings
@@ -650,16 +699,33 @@ impl ConnectedKafkaBroker {
             return self.open_in_process(cluster, plan, group, &config);
         }
 
+        let reset = Reset::of(&config);
         let tracker = Arc::new(CommitTracker::default());
-        let context = TrackingContext::new(Arc::clone(&tracker), &plan.name);
+        let (startup, opened) = match &plan.reader {
+            Reader::Subscribed(names) => {
+                let (startup, opened) = Startup::kept(names, reset);
+                (startup, Some(opened))
+            }
+            Reader::Assigned { .. } => (Startup::released(), None),
+        };
+        let context = TrackingContext::new(Arc::clone(&tracker), &plan.name, startup);
         let consumer: StreamConsumer<TrackingContext> = config
             .create_with_context(context)
             .map_err(KafkaError::subscribe)?;
+        let consumer = Arc::new(TrackedConsumer::new(consumer));
         // Decided here, where the reader still says what was subscribed: a delivery of a
         // subscription that reads one literal topic needs no name off the record.
         let delivered_topic = match &plan.reader {
             Reader::Assigned { topic, partitions } => {
-                assign_partitions(&consumer, topic, partitions, plan.settings.start)?;
+                let assigning = Arc::clone(&consumer);
+                let (topic_name, partitions) = (topic.clone(), partitions.clone());
+                let start = plan.settings.start;
+                // Resolving the starts asks the cluster, so it runs on the blocking pool.
+                task::spawn_blocking(move || {
+                    assign_partitions(&assigning, &topic_name, &partitions, start, reset)
+                })
+                .await
+                .map_err(|err| KafkaError::Subscribe(Box::new(err)))??;
                 DeliveredTopic::One(Str::from(topic.as_str()))
             }
             Reader::Subscribed(names) => {
@@ -674,8 +740,6 @@ impl ConnectedKafkaBroker {
                 literal.map_or(DeliveredTopic::PerRecord(None), DeliveredTopic::One)
             }
         };
-
-        let consumer = Arc::new(consumer);
         if let Commit::Transactional(pipeline) = &plan.settings.commit {
             self.state
                 .register_eos(pipeline, EosSource::new(&tracker, &consumer));
@@ -688,12 +752,60 @@ impl ConnectedKafkaBroker {
             settings.commit,
             tracker,
             settings.lane_key,
+            Arc::clone(&self.state),
         );
         #[cfg(feature = "schema-registry")]
         let subscriber = subscriber
             .with_schema_registry(self.state.schema_registry.clone())
             .with_schema_prefetch(self.state.schema_prefetch.clone());
+        if let Some(opened) = opened {
+            self.await_assignment(&subscriber, opened, group.as_deref())
+                .await?;
+        }
         Ok(subscriber)
+    }
+
+    /// Keeps a group subscription's consumer polled and waits for its first assignment: the
+    /// subscription is open once the group assigned its partitions and their starts are known.
+    async fn await_assignment(
+        &self,
+        subscriber: &KafkaSubscriber,
+        opened: oneshot::Receiver<Opened>,
+        group: Option<&str>,
+    ) -> Result<(), KafkaError> {
+        let cart = subscriber.cart();
+        let consumer = &cart.consumer;
+        let subscription = subscriber.topic();
+        let keeper = Arc::clone(&cart);
+        self.state
+            .runtime()
+            .spawn_blocking(move || startup::keep(&keeper));
+        let bound = self.state.assignment_timeout;
+        let group = group.unwrap_or_default();
+        let outcome = match tokio::time::timeout(bound, opened).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(reason))) => Err(format!(
+                "subscription {subscription:?} in consumer group {group:?} could not be opened: \
+                 {reason}"
+            )),
+            // The sender lives as long as the consumer this call holds, so only the bound ends
+            // the wait without an answer.
+            Ok(Err(_)) | Err(_) => {
+                let cause = consumer
+                    .context()
+                    .startup
+                    .last_error()
+                    .map(|err| format!("; the consumer last reported: {err}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "subscription {subscription:?} in consumer group {group:?} was not assigned \
+                     its partitions within {bound:?}{cause}"
+                ))
+            }
+        };
+        // A failed or dropped wait drops the subscriber too, which stops the keeper: the member
+        // leaves the group instead of staying in it with nobody reading.
+        outcome.map_err(|message| KafkaError::Subscribe(message.into()))
     }
 
     /// The consumer configuration a subscription with `def` settings in `group` reads with: the
@@ -778,7 +890,7 @@ impl ConnectedKafkaBroker {
             config,
             Arc::clone(&tracker),
         )?;
-        let member = cluster.join(spec)?;
+        let member = cluster.join(spec);
         if let Commit::Transactional(pipeline) = &plan.settings.commit {
             self.state
                 .register_eos(pipeline, EosSource::in_process(&tracker, &member));
@@ -791,6 +903,7 @@ impl ConnectedKafkaBroker {
             settings.commit,
             tracker,
             settings.lane_key,
+            Arc::clone(&self.state),
         );
         #[cfg(feature = "schema-registry")]
         let subscriber = subscriber
@@ -906,14 +1019,16 @@ fn validate_manual_assignment(
     Ok(())
 }
 
-/// `assign()`s the descriptor's exact partitions with their start offsets: `Stored` resumes
-/// from the group's committed positions (falling back to `auto.offset.reset`);
-/// `Beginning`/`End` are the explicit group-less starts.
+/// `assign()`s the descriptor's exact partitions with their start offsets: `Committed` resumes
+/// from the group's committed positions, falling back to `auto.offset.reset`; `Earliest`/`Latest`
+/// are the explicit group-less starts. Every start is resolved before the assignment, so what is
+/// published once the subscription is open reaches it.
 fn assign_partitions(
-    consumer: &StreamConsumer<TrackingContext>,
+    consumer: &TrackedConsumer,
     topic: &str,
     partitions: &[i32],
     start: StartOffset,
+    reset: Reset,
 ) -> Result<(), KafkaError> {
     let offset = match start {
         StartOffset::Committed => Offset::Stored,
@@ -926,6 +1041,8 @@ fn assign_partitions(
             .add_partition_offset(topic, *partition, offset)
             .map_err(KafkaError::subscribe)?;
     }
+    startup::resolve_starts(&**consumer, &mut assignment, &HashMap::new(), reset)
+        .map_err(KafkaError::subscribe)?;
     consumer.assign(&assignment).map_err(KafkaError::subscribe)
 }
 
