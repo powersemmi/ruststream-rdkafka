@@ -1,7 +1,5 @@
 //! Several topics, or a topic regex, consumed as one subscription.
 
-use std::future::{Future, ready};
-
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
 use ruststream::{NamedCopies, SubscriptionSource};
@@ -233,11 +231,11 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopics {
         &self.name
     }
 
-    fn subscribe(
+    async fn subscribe(
         self,
         connected: &ConnectedKafkaBroker,
-    ) -> impl Future<Output = Result<Self::Subscriber, KafkaError>> {
-        ready(self.into_plan().and_then(|plan| connected.open(plan)))
+    ) -> Result<Self::Subscriber, KafkaError> {
+        connected.open(self.into_plan()?).await
     }
 
     #[cfg(feature = "asyncapi")]

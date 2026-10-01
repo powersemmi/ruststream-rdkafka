@@ -32,7 +32,7 @@ pub enum StartOffset {
     Committed,
     /// Start from the earliest retained offset.
     Earliest,
-    /// Start from the latest offset (only messages published after the group formed).
+    /// Start from the latest offset: only messages published after the subscription opened.
     Latest,
 }
 
