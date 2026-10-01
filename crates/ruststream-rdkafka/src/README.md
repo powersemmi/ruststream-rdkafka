@@ -9,7 +9,8 @@ property, reachable through the `config` passthroughs; an option left unset keep
 librdkafka default.
 
 The Confluent Schema Registry lives in [`schema_registry`], with the two formats that need
-code of their own in [`avro`] and [`protobuf`]. [`testing`] is the in-process stand-in.
+code of their own in [`avro`] and [`protobuf`]. A test runs the service's own app with the
+broker connected in process ([Testing](#testing)).
 
 # A service
 
@@ -86,6 +87,15 @@ partition, which is the case before its first commit and again after retention d
 starts at the oldest retained record, `Latest` at the end of the log. [`Assignment`] picks the
 group's rebalance strategy, and [`LaneKey`] what a worker lane is keyed by.
 
+A subscription is open once it knows where each of its partitions starts, so everything
+published after it opens reaches it, under librdkafka's default `latest` reset too. For a group
+that means the group has assigned this member its partitions: startup waits for that, up to
+[`KafkaBroker::assignment_timeout`] (60 seconds by default), and fails naming the subscription
+and its group when the group does not answer. Until the runtime starts reading the
+subscription, its consumer keeps answering the group, so the next member to join does not wait
+for it. A subscription to topics the cluster does not have yet opens without partitions; a topic
+created later is read from where `auto.offset.reset` puts it when the group assigns it.
+
 ```
 # #[cfg(feature = "json")]
 # mod demo {
@@ -144,8 +154,9 @@ anything else:
   below the lowest still-unsettled delivery, so acks arriving out of order from concurrent
   lanes never commit past unprocessed work, and offset gaps the consumer never sees
   (transaction markers, compacted records) cannot block it. `nack(false)` settles the offset;
-  `nack(true)` leaves it unsettled, so the partition redelivers from the committed position on
-  its next fetch and every later ack stays uncommitted until that offset settles.
+  `nack(true)` hands the delivery back to its subscription, which delivers it again ahead of
+  what it fetches next. Its offset stays unsettled until then, so every later ack stays
+  uncommitted, and a process that stops first gets the record back from Kafka on restart.
 - [`Commit::Transactional`] is exactly-once: the subscription commits nothing of its own and
   registers its watermark with the [`EosPipeline`](crate::EosPipeline) of the same id.
 
@@ -202,12 +213,16 @@ fn app() -> RustStream {
 # fn main() {}
 ```
 
-Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` the
-committed position still stops in front of the first element asking for a redelivery and stays
-there until that offset comes back, so the acked elements behind it replay with it: duplicates,
+Returning `Vec<HandlerOutcome>` settles element by element. Under `Commit::Tracked` an element
+asking for a redelivery comes back alone, and the committed position stops in front of it until
+it settles; a process that stops first replays the acked elements behind it too: duplicates,
 not loss. A cap and a dead-letter topic are what stop one poison element from holding a
 partition back. How much librdkafka keeps queued locally is a consumer property
 (`queued.max.messages.kbytes` and friends) and stays in the descriptor's `config` passthrough.
+Whenever that queue fills, librdkafka pauses fetching the partition for `fetch.queue.backoff.ms`
+(1000 ms by default), which caps the throughput of large bodies behind a slow handler; a shorter
+pause is set the same way, `.config("fetch.queue.backoff.ms", "10")` on the descriptor or on
+[`KafkaBroker`] for every consumer.
 
 ## Positions and seeking
 
@@ -216,8 +231,10 @@ Kafka keeps the log, so a subscription can be moved through it. [`KafkaPosition:
 [`topic_offset`](KafkaPosition::topic_offset) (one partition of one named topic) and
 [`timestamp`](KafkaPosition::timestamp) (epoch milliseconds, resolved per partition) are the
 positions. `start_at(position)` at the mount site opens the subscription there on every
-startup, whatever the group committed before: the position lands on the first assignment the
-group hands over, ahead of its first record. Under [`Assignment::CooperativeSticky`] that first
+startup, whatever the group committed before: the position lands on the partitions the
+subscription opened with, ahead of their first record, or on the first assignment the group
+hands over when it opened with none. A position that names none of the partitions it opened with
+fails startup. Under [`Assignment::CooperativeSticky`] that first
 assignment may be a part of the group's share, and partitions arriving in a later increment are
 not repositioned. A handler repositions the running subscription
 through the [`SeekHandle`](context::keys::SeekHandle) context key, reading where it currently
@@ -383,8 +400,7 @@ struct RefundLine {
 #[publishes(RefundLine)]
 struct Lines;
 
-/// The body names the capability and nothing of this crate's, so the same routes file mounts
-/// on the in-process broker unchanged.
+/// The body names the capability and nothing of this crate's; the mount site names the policy.
 #[subscriber("refunds")]
 async fn refund(
     order: &Refund,
@@ -441,7 +457,9 @@ through `b.after_startup(EosPublish::new(id), hook)`.
 
 Every `commit_interval` (100 ms by default) the window closes: the pipeline waits for its
 participants to settle, adds the settled positions and the consumer's group metadata to the
-transaction, and commits. A publish error, a commit error or a settle stall aborts the window
+transaction, and commits. The window's commit runs on the runtime the broker connected on, so
+the publish that opens a window may come from a handler on a dedicated thread whose runtime stops
+afterwards. A publish error, a commit error or a settle stall aborts the window
 instead, the consumers seek back to the last committed offsets, and the whole window replays
 into a fresh transaction. So end-to-end latency is at least the commit interval, a `retry()`
 from a participant stalls its window until the transaction deadline, and the deferred
@@ -506,21 +524,22 @@ client and the cluster.
 
 # Testing
 
-The `testing` feature ships [`KafkaTestBroker`](testing::KafkaTestBroker), an in-process
-stand-in that follows the same ladder and that this crate's production publish policies pair
-against, so the routes file under test is the production one. Drive it with the core's
-[`TestApp`](https://docs.rs/ruststream/latest/ruststream/testing/index.html), whose `publish`
-returns once every handler it triggered has settled:
+A test runs the service's own app: the builder `main` runs, on [`KafkaBroker`], handed to the
+framework's `TestApp` harness unchanged. With the `testing` feature in `[dev-dependencies]`,
+`TestApp::start` connects the broker in process instead of reaching a cluster, and the test
+addresses it by its production type, `tb.broker::<KafkaBroker>()`. `TestApp::start_live` runs
+the same test body against a running Kafka. The harness's usage is the core's:
+<https://docs.rs/ruststream/latest/ruststream/testing/index.html>.
 
 ```
 # #[cfg(all(feature = "json", feature = "testing"))]
 # mod demo {
 use ruststream::testing::TestApp;
 use ruststream_rdkafka::prelude::*;
-use ruststream_rdkafka::testing::KafkaTestBroker;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+#[outgoing(name = "payments")]
 pub struct Payment {
     pub amount: u64,
 }
@@ -533,49 +552,81 @@ async fn accept(payment: &Payment) -> HandlerOutcome {
     HandlerOutcome::ack()
 }
 
-pub async fn zero_amounts_are_dropped() {
-    let app = RustStream::new(AppInfo::new("payments", "0.1.0"))
-        .with_broker(KafkaTestBroker::new().default_group("payments-svc"), |b| {
+/// The app `main` runs.
+pub fn app() -> RustStream {
+    RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
+        KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
+        |b| {
             b.include(accept);
-        });
-    let tb = TestApp::start(app).await.expect("start");
+        },
+    )
+}
 
-    tb.broker::<KafkaTestBroker>()
-        .publish("payments", &Payment { amount: 0 })
-        .await
-        .expect("the publish settles the handler");
+pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn std::error::Error>> {
+    let tb = TestApp::start(app()).await?;
 
-    tb.broker::<KafkaTestBroker>()
+    // The publish returns once the handler it woke has settled.
+    tb.broker::<KafkaBroker>()
+        .message(&Payment { amount: 0 })
+        .publish()
+        .await?;
+
+    tb.broker::<KafkaBroker>()
         .subscriber("payments")
         .assert_called_once()
         .with(&Payment { amount: 0 })
         .settled(HandlerOutcome::drop());
 
-    tb.shutdown().await.expect("shutdown");
+    tb.shutdown().await?;
+    Ok(())
 }
 # }
 # #[cfg(all(feature = "json", feature = "testing"))]
 # #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-# async fn main() {
-#     demo::zero_amounts_are_dropped().await;
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#     demo::zero_amounts_are_dropped().await
 # }
 # #[cfg(not(all(feature = "json", feature = "testing")))]
 # fn main() {}
 ```
 
-The transport routes by exact topic name, keeps consumer groups honest (a record reaches one
-member of each group, and every group reads its own copy), settles as a read position rather
-than a frame, retains what it routes so a subscription is really seekable over that log, and
-reproduces worker lanes and the client-visible half of a transaction. It does not simulate
-Kafka: every topic has exactly one partition, so a group's records land on one member and a
-`partition(..)` step is recorded rather than honoured; committed positions do not outlive their
-subscription; rebalancing, retention and record timestamps are absent; and every guarantee a
-transaction rests on is broker-side, so atomic visibility, zombie fencing and broker-held
-timeouts are not reproduced. Exactly-once is not approximated at all: `EosPublish` does not
-pair against the stand-in, so mounting such a route on it is a compile error rather than a green
-test proving nothing. Manual assignment and pattern subscriptions are refused loudly for the
-same reason. [`testing`] names each gap, and the live suites cover them against a cluster
-(`just brokers-up`, then `KAFKA_TEST_URL=127.0.0.1:9092 cargo test --workspace --all-features`).
+In process, the broker's connected form carries an in-process Kafka cluster in place of
+librdkafka, and so do its subscribers, its publishers, its seeker and its deliveries: the
+descriptors and publish policies of the routes file are the production ones, `EosPublish`
+included. The cluster has no settings of its own. It reads what librdkafka would read: the
+broker's `config` and `producer_config`, each descriptor's typed options and passthrough, and
+librdkafka's defaults for everything left unset. A property librdkafka refuses fails the connect
+or the subscription the same way.
+
+It models Kafka's semantics rather than a queue:
+
+- Topics and partitions. A topic comes into being with one partition, the broker's
+  `num.partitions` default, when a record is produced to it or a subscription names it. A record
+  lands on the partition a `partition(n)` step names, the one its key hashes to, or the next one
+  in turn; a partition the topic lacks, an illegal topic name and a record over
+  `message.max.bytes` are refused.
+- Consumer groups. A group hands each partition to one member, so each group reads a record
+  once and every group reads its own copy; a pattern subscription reads every topic its pattern
+  matches, and a [`KafkaPartitions`] reader reads its partitions apart from any group. A member
+  joining or leaving rebalances the group, and a partition resumes from the group's committed
+  offset, or from `auto.offset.reset` where the group has none.
+- Offsets. The commit mode decides what is committed, as on a cluster: auto-commit commits as
+  records are handed over, so a requeue under [`Commit::Auto`] reports itself unsupported; a
+  [`Commit::Tracked`] retry holds the committed position below the record, which comes back,
+  with everything after it, when the partition is next fetched from that position.
+- Positions. A seek moves the partitions the subscription reads, to an offset, either end of the
+  log, or the first record at a timestamp.
+- Transactions. A `read_committed` reader, librdkafka's default, reads a transaction's records
+  when it commits and never after an abort; a second pairing of a transactional id fences the
+  first; a transaction open past `transaction.timeout.ms` is aborted; and offsets sent to a
+  transaction commit with it, which is what an exactly-once pipeline rests on. A publish into an
+  open transaction keeps the harness's reaction open until the transaction ends, so an
+  exactly-once reply is on its topic when the publish that caused it returns.
+
+What only a cluster has belongs to the live mode, over the same test body: a topic created with
+more than one partition, a partition assignment the cooperative protocol keeps sticky,
+retention, and the timing of a real group join. The crate's live suites run against the stand in
+`docker-compose.test.yml` (`just test-brokers`).
 
 # Operations
 
@@ -612,5 +663,5 @@ same reason. [`testing`] names each gap, and the live suites cover them against 
 mount site with no `.codec(..)` step encodes with. `schema-registry` adds the Confluent client,
 the wire-format envelope and the subscriber-side prefetch; `avro` and `protobuf` add those
 formats on top of it. `asyncapi` contributes the Kafka bindings to the generated document,
-`testing` ships the in-process broker, and `ssl`, `ssl-vendored` and `zstd` map onto rdkafka's
-own backends.
+`testing` adds the in-process mode `TestApp::start` connects the broker through, and `ssl`,
+`ssl-vendored` and `zstd` map onto rdkafka's own backends.

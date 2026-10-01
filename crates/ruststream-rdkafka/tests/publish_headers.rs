@@ -9,9 +9,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
-use ruststream::{Broker, HeaderMap, OutgoingMessage, PublishPolicy, Publisher};
-use ruststream_rdkafka::testing::KafkaTestBroker;
-use ruststream_rdkafka::{KafkaFramedPublish, KafkaPublish, SchemaRegistry};
+use ruststream::testing::InProcess as _;
+use ruststream::{HeaderMap, OutgoingMessage, PublishPolicy, Publisher};
+use ruststream_rdkafka::{KafkaBroker, KafkaFramedPublish, KafkaPublish, SchemaRegistry};
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -93,7 +93,7 @@ async fn spent<P: Publisher>(publisher: &P, topic: &str, headers: HeaderMap) -> 
         .publish(OutgoingMessage::new(topic, BARE), None)
         .await
         .map_err(|err| err.to_string())
-        .expect("the in-process transport accepts the warm-up");
+        .expect("the in-process mode accepts the warm-up");
 
     let msg = OutgoingMessage::new(topic, BARE).with_headers(headers);
     let before = allocations();
@@ -101,7 +101,7 @@ async fn spent<P: Publisher>(publisher: &P, topic: &str, headers: HeaderMap) -> 
         .publish(msg, None)
         .await
         .map_err(|err| err.to_string())
-        .expect("the in-process transport accepts the publish");
+        .expect("the in-process mode accepts the publish");
     allocations() - before
 }
 
@@ -111,19 +111,19 @@ async fn spent<P: Publisher>(publisher: &P, topic: &str, headers: HeaderMap) -> 
 #[tokio::test]
 async fn framing_a_message_costs_nothing_for_its_headers() {
     let (_server, registry) = registry().await;
-    let connected = KafkaTestBroker::new()
+    let connected = KafkaBroker::new(["kafka:9092"])
         .default_group("tests")
-        .connect()
+        .connect_in_process()
         .await
-        .expect("connect");
+        .expect("connect in process");
     let framed = KafkaFramedPublish::over(KafkaPublish::default(), &registry)
         .pair(&connected)
         .await
-        .expect("the in-process transport pairs the framing policy");
+        .expect("the in-process mode pairs the framing policy");
     let plain = KafkaPublish::default()
         .pair(&connected)
         .await
-        .expect("the in-process transport pairs the plain policy");
+        .expect("the in-process mode pairs the plain policy");
 
     // A topic apiece, so every measured publish is the second one on a fresh log and the
     // transport's own bookkeeping is the same under all four.

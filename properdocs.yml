@@ -1,5 +1,5 @@
 site_name: ruststream-rdkafka
-site_description: The Apache Kafka broker for RustStream - consumer groups, precise tracked commits, native record keys, and an in-process test broker.
+site_description: The Apache Kafka broker for RustStream - consumer groups, precise tracked commits, native record keys, and an in-process mode that runs the production app in tests.
 site_url: https://powersemmi.github.io/ruststream-rdkafka/
 repo_url: https://github.com/powersemmi/ruststream-rdkafka
 repo_name: powersemmi/ruststream-rdkafka
