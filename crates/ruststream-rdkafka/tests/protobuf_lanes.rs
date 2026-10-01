@@ -327,9 +327,8 @@ message Confirmation {
         use ruststream::prelude::*;
         use ruststream::runtime::{AppInfo, DefaultSlot, RustStream};
         use ruststream::testing::TestApp;
-        use ruststream_rdkafka::testing::KafkaTestBroker;
         use ruststream_rdkafka::{
-            KafkaPublish, ProtobufFrame, SchemaRegistry, SchemaType, protobuf,
+            KafkaBroker, KafkaPublish, ProtobufFrame, SchemaRegistry, SchemaType, protobuf,
         };
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -380,11 +379,14 @@ message Confirmation {
                     ProtobufFrame::new(sr)
                         .message("in-process-plain-confirmations", "rsplain.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
-                    b.include(confirm_in_process)
-                        .out(DefaultSlot, KafkaPublish::default())
-                        .build();
-                });
+                .with_broker(
+                    KafkaBroker::new(["kafka:9092"]).default_group("tests"),
+                    |b| {
+                        b.include(confirm_in_process)
+                            .out(DefaultSlot, KafkaPublish::default())
+                            .build();
+                    },
+                );
             let tb = TestApp::start(app).await.expect("start");
 
             // The delivery goes on the topic already framed, as a registry-backed producer
@@ -404,7 +406,7 @@ message Confirmation {
                 .expect("publish drives the handler to quiescence");
 
             let published = tb
-                .broker::<KafkaTestBroker>()
+                .broker::<KafkaBroker>()
                 .published::<()>("in-process-plain-confirmations")
                 .assert_called_once();
             let wire = published.messages()[0].payload();
@@ -597,8 +599,9 @@ message Confirmation {
         use ruststream::prelude::*;
         use ruststream::runtime::{AppInfo, Reply, RustStream};
         use ruststream::testing::TestApp;
-        use ruststream_rdkafka::testing::KafkaTestBroker;
-        use ruststream_rdkafka::{KafkaPublish, ProtobufFrame, SchemaRegistry, protobuf};
+        use ruststream_rdkafka::{
+            KafkaBroker, KafkaPublish, ProtobufFrame, SchemaRegistry, protobuf,
+        };
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -649,7 +652,7 @@ message Confirmation {
                 .publish()
                 .await
                 .expect("publish drives the handler to quiescence");
-            tb.broker::<KafkaTestBroker>()
+            tb.broker::<KafkaBroker>()
                 .published::<()>(REPLY_TOPIC)
                 .assert_called_once()
                 .messages()[0]
@@ -675,7 +678,7 @@ message Confirmation {
         async fn a_returned_reply_is_framed_by_the_mount_sites_policy() {
             let (_server, registry) = registry().await;
             let app = RustStream::new(AppInfo::new("proto-reply", "0.0.0")).with_broker(
-                KafkaTestBroker::new(),
+                KafkaBroker::new(["kafka:9092"]).default_group("tests"),
                 |b| {
                     b.include(confirm).out(
                         Reply,
@@ -697,13 +700,16 @@ message Confirmation {
                     ProtobufFrame::new(registry.clone())
                         .message(REPLY_TOPIC, "rsreply.Confirmation"),
                 )
-                .with_broker(KafkaTestBroker::new(), |b| {
-                    b.include(confirm).out(
-                        Reply,
-                        KafkaPublish::framed(&registry)
-                            .message(REPLY_TOPIC, "rsreply.Confirmation"),
-                    );
-                });
+                .with_broker(
+                    KafkaBroker::new(["kafka:9092"]).default_group("tests"),
+                    |b| {
+                        b.include(confirm).out(
+                            Reply,
+                            KafkaPublish::framed(&registry)
+                                .message(REPLY_TOPIC, "rsreply.Confirmation"),
+                        );
+                    },
+                );
             let tb = TestApp::start(app).await.expect("start");
 
             // Whichever of the two runs first frames it; the other sees the envelope already

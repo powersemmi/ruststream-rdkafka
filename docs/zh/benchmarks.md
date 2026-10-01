@@ -11,9 +11,9 @@
 
 ## 数字 { #the-numbers }
 
-三个交错轮次中的最佳值，括号里是最差的一轮。越大越好。
+三个交错轮次中的最佳值，括号里是中位的一轮。越大越好。
 
-<div id="benchmark-results" data-benchmark-results="../../benchmarks/results.json" data-benchmark-labels='{"loading": "正在加载公布的结果...", "scenario": "场景", "raw": "裸客户端", "adapter": "适配层", "framework": "RustStream", "adapterOverhead": "适配层开销", "overhead": "开销", "indistinguishable": "无法区分", "brokerBound": "受 Broker 限制", "machine": "机器", "os": "操作系统", "broker": "Broker", "roundTrip": "往返时间", "build": "构建", "versions": "版本", "measured": "测量于", "unavailable": "读不到结果。它们公布在 {url}。", "unknownSchema": "公布的结果声明的 schema 是 {schema}，这一页不渲染它。"}'></div>
+<div id="benchmark-results" data-benchmark-results="../../benchmarks/results.json" data-benchmark-labels='{"loading": "正在加载公布的结果...", "scenario": "场景", "raw": "裸客户端", "adapter": "适配层", "framework": "RustStream", "adapterOverhead": "适配层开销", "overhead": "开销", "indistinguishable": "无法区分", "brokerBound": "受 Broker 限制", "machine": "机器", "os": "操作系统", "broker": "Broker", "roundTrip": "往返时间", "build": "构建", "versions": "版本", "measured": "测量于", "instructions": "每条消息的指令数", "allocations": "每条消息的内存分配次数", "cold": "冷启动（指令 / 分配）", "unavailable": "读不到结果。它们公布在 {url}。", "unknownSchema": "公布的结果声明的 schema 是 {schema}，这一页不渲染它。"}'></div>
 
 表格由浏览器从上一次运行写下的文档读出，所以这一页上没有任何会过期的副本。
 
@@ -45,6 +45,28 @@
 [`benchmarks/results.json`](https://powersemmi.github.io/ruststream-rdkafka/latest/benchmarks/results.json)，
 框架的站点用它拼出跨 Broker 的汇总表。
 
+## crate 自身的代码 { #the-crates-own-code }
+
+<div id="benchmark-code"></div>
+
+第二张表是一条消息在服务线程上的开销，是数出来的，不是计时得来的：指令数由 callgrind 统计，内存分配
+次数由 DHAT 统计。每个场景都是用户会写的那种服务，跑在 `KafkaBroker` 上，连的是同一个测试台：一个
+消费者组读一个只有一个分区的主题，另一个线程在被测区段开始之前把主题灌满。服务线程做的一切都计入：
+框架的分发、本 crate 的代码，以及本 crate 在这个线程上对 librdkafka 的调用。librdkafka 在自己的线程
+上做的事不计入：拉取、消费者组协议、生产者发送记录以及投递报告。所以回复到 Broker 的往返不在它那
+一行里，而服务线程发送回复、接收它的投递报告所做的工作在。
+
+指令数和分配次数都是稳态下每条消息的值：1000 次投递的运行和 2000 次投递的运行之间的斜率。最后一列
+是启动服务、加入消费者组并处理第一次投递一次性付出的开销。这些数字是绝对值，框架自身的开销也算在
+内；框架单独的开销由核心库在它的[基准测试页面](https://powersemmi.github.io/ruststream/latest/zh/benchmarks/)上公布。
+
+Broker 是真实的，所以同一个二进制文件多次运行，计数会有少许变化：服务线程多频繁地发现 librdkafka
+的队列为空、或在等投递报告，取决于时机，而每次等待都要付出一次唤醒。同一个二进制文件跑三次，分配
+次数完全相同；消费和批处理每条消息的指令数相差不到万分之一，回复最多相差百分之三。`just bench-code`
+在分配次数超过场景声明的下限（三次运行中的最大值再加千分之一）时失败，指令数比对照的那次运行多出
+百分之五以上也算失败：对照的是上一次运行，加上 `--baseline=main` 时是 `main`。改变开销的合并请求要
+附上自己的数字。
+
 ## 机器 { #the-machine }
 
 <div id="benchmark-environment"></div>
@@ -61,7 +83,8 @@ Broker 公布的一行比较：不同的传输在每条消息上做的事并不�
 一次运行的测量窗口从第一次投递开始，到最后一次被解码为止，三个循环都是这样。偏移量在那之后才存
 下来，所以一次运行携带的数百万次存储里的这一次，在哪个循环里都落在数字之外。
 
-多个分区的主题、一池工作分区、批处理器和事务流水线各自回答的是另一个问题，这里一个都没有测。
+多个分区的主题、一池工作分区、批处理器和事务流水线各自回答的是另一个问题，对比测试一个都没有测。
+代码表在同一个测试台上统计了批处理器。
 
 这些数字是一台机器在某一天的快照。
 它们由人手工重测，测量期间机器只跑这一项：这一页要讲的差值，比与其他任务共用的机器上的噪声还小。
@@ -75,3 +98,10 @@ just bench
 这条 recipe 从 `docker-compose.test.yml` 起停测试台，跑完两个场景，然后把测到的结果写回
 `docs/benchmarks/results.json`。它要花十五分钟左右，并且需要整台机器。消息条数不是固定的：一次试探
 运行会把它定下来，使得每一次被测量的运行在所在机器上都不短于五秒。
+
+```bash
+just bench-code
+```
+
+这条 recipe 起停同一个测试台，在 valgrind 下统计代码表，并重写同一份文档里的 `code` 部分。它要花
+一两分钟，需要 valgrind 和基准测试运行器：`cargo install --locked gungraun-runner --version =0.19.4`。
