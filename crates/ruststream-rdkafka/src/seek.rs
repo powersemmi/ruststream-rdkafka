@@ -15,10 +15,11 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::{Seeker, Str};
 use tokio::task;
 
+use crate::broker::ConnState;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// How long a reposition waits for librdkafka (the seek itself, and the timestamp lookup).
 const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -119,7 +120,7 @@ enum Repositioner {
     /// A librdkafka consumer: the reposition is a real seek over the partitions this member
     /// holds, plus the offset bookkeeping the new read position invalidates.
     Live {
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         tracker: Arc<CommitTracker>,
     },
     /// A member of the in-process cluster.
@@ -155,6 +156,12 @@ const _: () = assert!(size_of::<Repositioner>() == 2 * size_of::<usize>());
 #[derive(Clone)]
 pub struct KafkaSeeker {
     inner: Repositioner,
+    /// The connection the subscription was opened on. A seeker outlives the shutdown in a
+    /// handler's hands, and a seek through it must then error rather than move a consumer the
+    /// service no longer runs.
+    connection: Arc<ConnState>,
+    /// The subscription's name, for the error a seek after shutdown reports.
+    subscription: Str,
 }
 
 impl std::fmt::Debug for KafkaSeeker {
@@ -172,18 +179,28 @@ impl std::fmt::Debug for KafkaSeeker {
 
 impl KafkaSeeker {
     pub(crate) const fn new(
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         tracker: Arc<CommitTracker>,
+        connection: Arc<ConnState>,
+        subscription: Str,
     ) -> Self {
         Self {
             inner: Repositioner::Live { consumer, tracker },
+            connection,
+            subscription,
         }
     }
 
     #[cfg(feature = "testing")]
-    pub(crate) const fn in_process(member: Arc<Member>) -> Self {
+    pub(crate) const fn in_process(
+        member: Arc<Member>,
+        connection: Arc<ConnState>,
+        subscription: Str,
+    ) -> Self {
         Self {
             inner: Repositioner::InProcess(member),
+            connection,
+            subscription,
         }
     }
 }
@@ -199,22 +216,24 @@ impl Seeker for KafkaSeeker {
     /// seek replayed but nobody handled, and an exactly-once window that was open when the seek
     /// landed aborts instead of committing offsets from the position it replaced.
     ///
-    /// A consumer that holds no partitions yet is the startup case, not an error: a group
-    /// subscription is assigned nothing until something polls it, which happens after the
-    /// subscription is handed to the runtime. The position is kept and applied to the first
-    /// assignment the group hands over, ahead of its first record.
+    /// A consumer that holds no partitions yet is not an error: a group can open a subscription
+    /// with none, when it has more members than partitions or the topic does not exist yet. The
+    /// position is kept and applied to the first assignment the group hands over, ahead of its
+    /// first record.
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::InvalidOptions`] when the position names no partition among the
-    /// ones this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the
-    /// reposition or the timestamp lookup fails.
+    /// Returns [`KafkaError::Closed`] once the broker the subscription was opened on has shut
+    /// down, [`KafkaError::InvalidOptions`] when the position names no partition among the ones
+    /// this consumer holds and [`KafkaError::Consume`] when librdkafka rejects the reposition or
+    /// the timestamp lookup fails.
     ///
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the consumer repositioned, its bookkeeping
     /// already reset.
     async fn seek(&self, to: Self::Position) -> Result<(), Self::Error> {
+        self.connection.ensure_open(&self.subscription)?;
         match &self.inner {
             Repositioner::Live { consumer, tracker } => {
                 let consumer = Arc::clone(consumer);
@@ -234,9 +253,9 @@ impl Seeker for KafkaSeeker {
 /// Resolves `to` against the current assignment, resets the bookkeeping of every partition it
 /// names, and moves the consumer.
 ///
-/// A consumer with nothing assigned keeps the position instead: `start_at(..)` names it before
-/// the subscription is ever polled, and a group assigns partitions only once something polls, so
-/// there is nothing to seek yet. [`TrackingContext`] applies it to the assignment when it lands.
+/// A consumer with nothing assigned keeps the position instead: a group can open a subscription
+/// with no partitions, and a `start_at(..)` on it still has to take effect. [`TrackingContext`]
+/// applies it to the assignment when it lands.
 fn reposition(
     consumer: &StreamConsumer<TrackingContext>,
     tracker: &CommitTracker,
@@ -247,7 +266,10 @@ fn reposition(
         consumer.context().hold_start(to.clone());
         return Ok(());
     }
-    apply_position(consumer, tracker, &assignment, to)
+    let targets = apply_position(consumer, tracker, &assignment, to)?;
+    // A subscription whose stream has not started yet resumes from here when it does.
+    consumer.context().startup.moved(&targets);
+    Ok(())
 }
 
 /// Moves `assignment`'s partitions to `to`, resetting the offset bookkeeping of each one first:
@@ -257,7 +279,7 @@ fn apply_position<C>(
     tracker: &CommitTracker,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
-) -> Result<(), KafkaError>
+) -> Result<TopicPartitionList, KafkaError>
 where
     C: Consumer<TrackingContext>,
 {
@@ -272,12 +294,12 @@ where
     clear_stored_offsets(consumer, &targets)?;
 
     let outcome = consumer
-        .seek_partitions(targets, SEEK_TIMEOUT)
+        .seek_partitions(targets.clone(), SEEK_TIMEOUT)
         .map_err(KafkaError::consume)?;
     for element in outcome.elements() {
         element.error().map_err(KafkaError::consume)?;
     }
-    Ok(())
+    Ok(targets)
 }
 
 /// Writes `to` into an assignment the group has just handed over, before librdkafka takes it, so

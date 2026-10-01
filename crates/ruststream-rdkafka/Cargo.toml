@@ -82,6 +82,12 @@ tokio = { workspace = true }
 wiremock = "0.6"
 schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }
 
+# The publish cost test compares a publish with the raw client's, librdkafka's allocations
+# included: jemalloc replaces the C allocator in that test binary and counts per thread.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dev-dependencies]
+tikv-jemalloc-sys = { version = "0.7.1", features = ["override_allocator_on_supported_platforms"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
+
 # The crate overview links into the feature-gated modules (`schema_registry`, `avro`,
 # `protobuf`, `testing`, the document), so a page built on the default features would have
 # nowhere to send a reader. The list stops short of the TLS/SASL backends: the vendored

@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use rdkafka::ClientConfig;
 use ruststream::HeaderMap;
+use tokio::runtime::Handle;
 
 use super::{Cluster, Member, MemberSpec, ProducerSettings};
 use crate::message::PARTITION_KEY_HEADER;
@@ -50,7 +51,7 @@ fn member(
         Arc::new(CommitTracker::default()),
     )
     .expect("a valid consumer configuration");
-    cluster.join(spec).expect("join")
+    cluster.join(spec)
 }
 
 fn produce(cluster: &Cluster, topic: &str, payload: &str, key: Option<&str>) {
@@ -186,7 +187,7 @@ async fn a_committed_reader_waits_for_a_transaction_and_never_sees_an_aborted_on
     let reader = member(&cluster, "g", &["out"], &[]);
     let producer = cluster.init_transactions("tx-1");
 
-    cluster.begin(&producer).expect("begin");
+    cluster.begin(&producer, &Handle::current()).expect("begin");
     cluster
         .produce("out", None, b"aborted", &HeaderMap::new(), Some(&producer))
         .expect("produce");
@@ -196,7 +197,7 @@ async fn a_committed_reader_waits_for_a_transaction_and_never_sees_an_aborted_on
     );
     cluster.abort(&producer).expect("abort");
 
-    cluster.begin(&producer).expect("begin");
+    cluster.begin(&producer, &Handle::current()).expect("begin");
     cluster
         .produce(
             "out",
@@ -227,13 +228,15 @@ async fn a_committed_reader_waits_for_a_transaction_and_never_sees_an_aborted_on
 async fn a_second_pairing_fences_the_first() {
     let cluster = cluster();
     let older = cluster.init_transactions("tx-1");
-    cluster.begin(&older).expect("begin");
+    cluster.begin(&older, &Handle::current()).expect("begin");
     let newer = cluster.init_transactions("tx-1");
     let fenced = cluster
         .commit(&older)
         .expect_err("the older producer is fenced");
     assert!(fenced.to_string().contains("fenced"), "{fenced}");
-    cluster.begin(&newer).expect("the newer one works");
+    cluster
+        .begin(&newer, &Handle::current())
+        .expect("the newer one works");
 }
 
 #[tokio::test(start_paused = true)]
@@ -241,7 +244,7 @@ async fn a_transaction_open_past_its_timeout_is_aborted() {
     let cluster = cluster();
     let reader = member(&cluster, "g", &["out"], &[]);
     let producer = cluster.init_transactions("tx-1");
-    cluster.begin(&producer).expect("begin");
+    cluster.begin(&producer, &Handle::current()).expect("begin");
     cluster
         .produce("out", None, b"late", &HeaderMap::new(), Some(&producer))
         .expect("produce");
@@ -262,9 +265,12 @@ async fn a_transaction_open_past_its_timeout_is_aborted() {
 #[test]
 fn a_record_over_the_size_limit_and_a_missing_partition_are_refused() {
     let cluster = cluster();
-    let big = vec![0u8; 1_000_001];
+    // librdkafka counts a record's framing too: 36 bytes of it under the default limit.
     cluster
-        .produce("orders", None, &big, &HeaderMap::new(), None)
+        .produce("orders", None, &vec![0u8; 999_964], &HeaderMap::new(), None)
+        .expect("a record of exactly message.max.bytes");
+    cluster
+        .produce("orders", None, &vec![0u8; 999_965], &HeaderMap::new(), None)
         .expect_err("over message.max.bytes");
     cluster
         .produce("orders", Some(1), b"x", &HeaderMap::new(), None)

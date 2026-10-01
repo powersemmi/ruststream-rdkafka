@@ -12,25 +12,26 @@ use bytes::Bytes;
 #[cfg(feature = "testing")]
 use futures::future::Either;
 use futures::{Stream, ready};
-use rdkafka::consumer::{Consumer as _, StreamConsumer};
+use rdkafka::consumer::Consumer as _;
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
 use ruststream::{BatchSubscriber, Seekable, Str, Subscriber};
 use tracing::{debug, warn};
 
+use crate::broker::ConnState;
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
 use crate::message::{KafkaMessage, Lane, Settlement};
-use crate::record::{HeldRecord, SharedConsumer};
+use crate::record::{Cart, HeldRecord, LiveShared, Shared};
 #[cfg(feature = "schema-registry")]
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
 use crate::seek::KafkaSeeker;
 use crate::subscription::{Commit, LaneKey};
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer};
 
 /// Whether librdkafka is already retrying this error by itself, making a stream error item
 /// noise rather than signal. The set is deliberately small and explicit; when in doubt, the
@@ -43,8 +44,9 @@ fn is_transient(err: &rdkafka::error::KafkaError) -> bool {
 
 /// Where a delivery's topic name comes from.
 ///
-/// A subscription over one literal topic knows the answer before its first record, so the
-/// delivery takes the name the subscription already minted. Reading it back out of librdkafka
+/// A subscription over one literal topic knows the answer before its first record, so its
+/// deliveries read the name the subscription's shared block holds and carry none of their own.
+/// Reading it back out of librdkafka
 /// costs a `CStr` walk and a UTF-8 validation of the same bytes on every delivery, and answers
 /// what the descriptor said.
 #[derive(Debug)]
@@ -59,22 +61,31 @@ pub(crate) enum DeliveredTopic {
 }
 
 impl DeliveredTopic {
-    /// The topic of this delivery, as the shared string every delivery of that topic carries.
-    fn of(&mut self, record: &HeldRecord) -> Str {
+    /// The name the subscription's shared block holds: its one topic, or, when the records name
+    /// their own, the name the subscription was declared with.
+    fn shared(&self, declared: &str) -> Str {
         match self {
             Self::One(name) => name.clone(),
-            Self::PerRecord(last) => {
-                let name = record.topic();
-                if let Some(known) = last
-                    && &**known == name
-                {
-                    return known.clone();
-                }
-                let minted = Str::from(name);
-                *last = Some(minted.clone());
-                minted
-            }
+            Self::PerRecord(_) => Str::from(declared),
         }
+    }
+
+    /// The name a delivery carries itself: none when the subscription reads one topic, whose
+    /// name the shared block holds; otherwise the record's topic, as the shared string every
+    /// delivery of that topic carries.
+    fn own(&mut self, record: &HeldRecord) -> Option<Str> {
+        let Self::PerRecord(last) = self else {
+            return None;
+        };
+        let name = record.topic();
+        if let Some(known) = last
+            && &**known == name
+        {
+            return Some(known.clone());
+        }
+        let minted = Str::from(name);
+        *last = Some(minted.clone());
+        Some(minted)
     }
 }
 
@@ -100,8 +111,8 @@ pub struct KafkaSubscriber {
     commit: Commit,
     tracker: Arc<CommitTracker>,
     lane_key: LaneKey,
-    /// Minted once, when the subscription opens: every delivery carries a clone so a handler's
-    /// context can hand out the reposition handle for one reference-count bump.
+    /// Minted once, when the subscription opens. The shared block every delivery reaches holds
+    /// the same handle, so a handler's context hands it out without a count of its own.
     seeker: Arc<KafkaSeeker>,
     #[cfg(feature = "schema-registry")]
     schema_registry: Option<SchemaRegistry>,
@@ -115,32 +126,43 @@ pub struct KafkaSubscriber {
 /// What a subscription reads through: its librdkafka consumer, or, under the `testing` feature,
 /// its member of the in-process cluster.
 ///
-/// Without the feature there is one variant, so the type is the consumer handle itself and every
-/// `match` on it is irrefutable.
+/// Without the feature there is one variant, so the type is the cart itself and every `match` on
+/// it is irrefutable.
 enum Source {
-    Kafka(SharedConsumer),
+    Kafka(Cart),
     #[cfg(feature = "testing")]
-    InProcess(Arc<Member>),
+    InProcess(Arc<Member>, Arc<Shared>),
 }
 
 #[cfg(not(feature = "testing"))]
-const _: () = assert!(size_of::<Source>() == size_of::<SharedConsumer>());
+const _: () = assert!(size_of::<Source>() == size_of::<Cart>());
 
 impl KafkaSubscriber {
     pub(crate) fn new(
-        consumer: Arc<StreamConsumer<TrackingContext>>,
+        consumer: Arc<TrackedConsumer>,
         topic: String,
         delivered_topic: DeliveredTopic,
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
+        connection: Arc<ConnState>,
     ) -> Self {
         let seeker = Arc::new(KafkaSeeker::new(
             Arc::clone(&consumer),
             Arc::clone(&tracker),
+            connection,
+            Str::from(topic.as_str()),
         ));
+        let cart = Arc::new(LiveShared {
+            consumer,
+            shared: Arc::new(Shared::new(
+                Arc::clone(&tracker),
+                Arc::clone(&seeker),
+                delivered_topic.shared(&topic),
+            )),
+        });
         Self {
-            source: Source::Kafka(consumer),
+            source: Source::Kafka(cart),
             topic,
             delivered_topic,
             commit,
@@ -164,10 +186,20 @@ impl KafkaSubscriber {
         commit: Commit,
         tracker: Arc<CommitTracker>,
         lane_key: LaneKey,
+        connection: Arc<ConnState>,
     ) -> Self {
-        let seeker = Arc::new(KafkaSeeker::in_process(Arc::clone(&member)));
+        let seeker = Arc::new(KafkaSeeker::in_process(
+            Arc::clone(&member),
+            connection,
+            Str::from(topic.as_str()),
+        ));
+        let shared = Arc::new(Shared::new(
+            Arc::clone(&tracker),
+            Arc::clone(&seeker),
+            delivered_topic.shared(&topic),
+        ));
         Self {
-            source: Source::InProcess(member),
+            source: Source::InProcess(member, shared),
             topic,
             delivered_topic,
             commit,
@@ -227,6 +259,16 @@ impl KafkaSubscriber {
         }
     }
 
+    /// The cart a subscription over librdkafka reads through, for the keeper that polls it
+    /// before its stream starts (see `startup`).
+    pub(crate) fn cart(&self) -> Cart {
+        match &self.source {
+            Source::Kafka(cart) => Arc::clone(cart),
+            #[cfg(feature = "testing")]
+            Source::InProcess(..) => unreachable!("an in-process subscription is never kept"),
+        }
+    }
+
     /// The topic this subscriber consumes.
     #[must_use]
     pub fn topic(&self) -> &str {
@@ -253,7 +295,8 @@ impl KafkaSubscriber {
     fn map_delivery(&mut self, record: HeldRecord) -> KafkaMessage {
         // Minted once per topic and shared from here on: the delivery carries it, and the
         // tracker opens this partition's slot under it.
-        let topic = self.delivered_topic.of(&record);
+        let own_topic = self.delivered_topic.own(&record);
+        let topic = record.shared().topic(own_topic.as_ref());
         let partition = record.partition();
         let offset = record.offset();
         // The headers stay unread unless the delivery is asked for them - except under
@@ -265,7 +308,7 @@ impl KafkaSubscriber {
             let mut map = convert::headers_from_message(&record);
             map.insert(
                 Str::from_static(EOS_SOURCE_HEADER),
-                crate::eos::encode_source(&topic, partition, offset),
+                crate::eos::encode_source(topic, partition, offset),
             );
             headers.set(map).expect("the cell was just created");
         }
@@ -275,12 +318,10 @@ impl KafkaSubscriber {
         let settlement = match &self.commit {
             Commit::Auto => Settlement::Advisory,
             Commit::Tracked => Settlement::Tracked {
-                tracker: Arc::clone(&self.tracker),
-                slot: self.tracker.delivered(&topic, partition, offset),
+                slot: self.tracker.delivered(topic, partition, offset),
             },
             Commit::Transactional(_) => Settlement::Transactional {
-                tracker: Arc::clone(&self.tracker),
-                slot: self.tracker.delivered(&topic, partition, offset),
+                slot: self.tracker.delivered(topic, partition, offset),
             },
         };
         // The key itself is not built here: a subscription with no keyed lanes is never asked
@@ -290,15 +331,23 @@ impl KafkaSubscriber {
             LaneKey::Partition => Lane::Partition(OnceLock::new()),
         };
         KafkaMessage::new(
-            record,
-            headers,
-            topic,
-            partition,
-            offset,
-            settlement,
-            lane,
-            Arc::clone(&self.seeker),
+            record, headers, own_topic, partition, offset, settlement, lane,
         )
+    }
+}
+
+impl Drop for KafkaSubscriber {
+    /// Releases the deliveries handed back to this subscription and not delivered again: each one
+    /// holds the consumer open, and the group hands their records to the partition's next owner.
+    fn drop(&mut self) {
+        self.tracker.attention.close();
+        // A subscription closed before its stream started leaves the group rather than being
+        // kept in it.
+        match &self.source {
+            Source::Kafka(cart) => cart.consumer.context().startup.release(),
+            #[cfg(feature = "testing")]
+            Source::InProcess(..) => {}
+        }
     }
 }
 
@@ -334,15 +383,18 @@ impl Subscriber for KafkaSubscriber {
     fn stream(&mut self) -> impl Stream<Item = Result<Self::Message, Self::Error>> + Send + '_ {
         // Cloned once per stream and never per delivery: a wait owns the handles it needs, so
         // it borrows nothing from the stream that holds it.
-        let consumer = match &self.source {
-            Source::Kafka(consumer) => Arc::clone(consumer),
+        let cart = match &self.source {
+            Source::Kafka(cart) => Arc::clone(cart),
             #[cfg(feature = "testing")]
-            Source::InProcess(member) => {
-                let member = Arc::clone(member);
-                return Either::Right(in_process::stream(self, member));
+            Source::InProcess(member, shared) => {
+                let (member, shared) = (Arc::clone(member), Arc::clone(shared));
+                return Either::Right(in_process::stream(self, member, shared));
             }
         };
-        let context = Arc::clone(consumer.context());
+        cart.consumer
+            .context()
+            .startup
+            .hand_over(&cart.consumer, &self.tracker);
         let stream = KafkaStream {
             #[cfg(feature = "schema-registry")]
             registry: self.schema_registry.clone(),
@@ -350,9 +402,9 @@ impl Subscriber for KafkaSubscriber {
             prefetch: self.schema_prefetch.clone(),
             #[cfg(feature = "schema-registry")]
             finishing: None,
+            tracker: Arc::clone(&self.tracker),
             sub: self,
-            context,
-            consumer,
+            cart,
             waiting: None,
         };
         #[cfg(feature = "testing")]
@@ -368,8 +420,10 @@ impl Subscriber for KafkaSubscriber {
 /// so the compiler moved it three times per message before the caller ever saw it.
 pub(crate) struct KafkaStream<'a> {
     sub: &'a mut KafkaSubscriber,
-    context: Arc<TrackingContext>,
-    consumer: SharedConsumer,
+    /// Held here for the one question every turn asks it, whether anything waits ahead of the
+    /// fetch queue (see [`Attention`](crate::attention::Attention)).
+    tracker: Arc<CommitTracker>,
+    cart: Cart,
     /// The wait, kept across polls for as long as the fetch queue stays dry: the registration
     /// `recv` makes with the consumer's queue dies with the future that made it, so re-arming it
     /// per poll would drop the wakeup it was waiting for. Boxed because an `async fn` future
@@ -392,32 +446,48 @@ pub(crate) struct KafkaStream<'a> {
 enum ColdTurn {
     /// A record the wait took, or what the consumer reported instead of one.
     Record(Result<HeldRecord, rdkafka::error::KafkaError>),
-    /// A start position the rebalance could not apply, taken while the wait was being armed.
-    Failed(KafkaError),
-    /// The start-failure waiter fired; the flag is read at the top of the next turn.
+    /// Something waits ahead of the fetch queue (a requeued delivery, a start failure); the top
+    /// of the next turn serves it.
     Woken,
 }
 
-/// Waits for a record, or for a start position the rebalance could not apply.
+/// Waits for a record, or for something left ahead of the fetch queue: a delivery handed back
+/// with `nack(true)`, or a start position the rebalance could not apply.
 ///
-/// The waiter is enabled before the flag is read, so a failure landing between the two wakes this
-/// wait instead of being missed - which is what makes it reach a subscription whose topic may
-/// never deliver anything.
+/// The waiter is enabled before the flag is read, so what lands between the two wakes this wait
+/// instead of being missed - which is what makes it reach a subscription whose topic may never
+/// deliver anything.
 ///
 /// # Cancel safety
 ///
 /// Cancel safe: dropping this future before it resolves takes no record.
-async fn cold_turn(context: Arc<TrackingContext>, consumer: SharedConsumer) -> ColdTurn {
-    let mut recorded = pin!(context.start_failure_waiter());
-    recorded.as_mut().enable();
-    if let Some(err) = context.take_start_failure() {
-        return ColdTurn::Failed(err);
+async fn cold_turn(tracker: Arc<CommitTracker>, cart: Cart) -> ColdTurn {
+    let mut woken = pin!(tracker.attention.waiter());
+    woken.as_mut().enable();
+    if tracker.attention.raised() {
+        return ColdTurn::Woken;
     }
     tokio::select! {
         biased;
-        () = recorded => ColdTurn::Woken,
-        received = HeldRecord::next(&consumer) => ColdTurn::Record(received),
+        () = woken => ColdTurn::Woken,
+        received = HeldRecord::next(&cart) => ColdTurn::Record(received),
     }
+}
+
+/// What waits ahead of the fetch queue, once the flag says something does: a start failure
+/// first, then a delivery handed back with `nack(true)`. A handed-back delivery whose partition
+/// moved since (a seek, a revoke) is released instead, since the replay or the partition's next
+/// owner delivers its record.
+fn attended(tracker: &CommitTracker) -> Option<Result<KafkaMessage, KafkaError>> {
+    if let Some(err) = tracker.attention.take_start_failure() {
+        return Some(Err(err));
+    }
+    while let Some(delivery) = tracker.attention.take_requeued() {
+        if delivery.is_current() {
+            return Some(Ok(delivery));
+        }
+    }
+    None
 }
 
 /// Runs the registry middleware over a delivery.
@@ -475,11 +545,13 @@ impl Stream for KafkaStream<'_> {
                 this.finishing = None;
                 return Poll::Ready(Some(Ok(item)));
             }
-            // A start position the rebalance could not apply preempts whatever was fetched: a
-            // subscription that was not opened where it was asked must not pass for a working
-            // one.
-            if let Some(err) = this.context.take_start_failure() {
-                return Poll::Ready(Some(Err(err)));
+            // What waits ahead of the fetch queue preempts it: a start position the rebalance
+            // could not apply (a subscription that was not opened where it was asked must not
+            // pass for a working one), then a delivery handed back with `nack(true)`.
+            if this.tracker.attention.raised()
+                && let Some(item) = attended(&this.tracker)
+            {
+                return Poll::Ready(Some(item));
             }
             if let Some(waiting) = &mut this.waiting {
                 let turn = ready!(waiting.as_mut().poll(cx));
@@ -487,7 +559,6 @@ impl Stream for KafkaStream<'_> {
                 match turn {
                     // The waiter fired: the flag is read at the top of the next turn.
                     ColdTurn::Woken => continue,
-                    ColdTurn::Failed(err) => return Poll::Ready(Some(Err(err))),
                     ColdTurn::Record(Ok(record)) => {
                         if let Poll::Ready(item) = this.deliver(record) {
                             return Poll::Ready(item);
@@ -505,7 +576,7 @@ impl Stream for KafkaStream<'_> {
             }
             // A record already fetched needs no waiter: the failure flag above is sticky, so it
             // is read on the turn that finds nothing to deliver.
-            match HeldRecord::ready(&this.consumer) {
+            match HeldRecord::ready(&this.cart) {
                 Some(Ok(record)) => {
                     if let Poll::Ready(item) = this.deliver(record) {
                         return Poll::Ready(item);
@@ -516,8 +587,8 @@ impl Stream for KafkaStream<'_> {
                 // Nothing fetched, so the wait begins on the next turn of this loop.
                 None => {
                     this.waiting = Some(Box::pin(cold_turn(
-                        Arc::clone(&this.context),
-                        Arc::clone(&this.consumer),
+                        Arc::clone(&this.tracker),
+                        Arc::clone(&this.cart),
                     )));
                 }
             }
@@ -556,36 +627,44 @@ impl BatchSubscriber for KafkaSubscriber {
     ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
         let size = size.get();
         // See `stream`: the consumer is held beside the subscriber, not through it.
-        let consumer = match &self.source {
-            Source::Kafka(consumer) => Arc::clone(consumer),
+        let cart = match &self.source {
+            Source::Kafka(cart) => Arc::clone(cart),
             #[cfg(feature = "testing")]
-            Source::InProcess(member) => {
-                let member = Arc::clone(member);
-                return Either::Right(in_process::batches(self, member, size));
+            Source::InProcess(member, shared) => {
+                let (member, shared) = (Arc::clone(member), Arc::clone(shared));
+                return Either::Right(in_process::batches(self, member, shared, size));
             }
         };
-        let context = Arc::clone(consumer.context());
+        cart.consumer
+            .context()
+            .startup
+            .hand_over(&cart.consumer, &self.tracker);
+        let tracker = Arc::clone(&self.tracker);
         let batches = futures::stream::unfold(
-            (self, context, consumer),
-            move |(sub, context, consumer)| async move {
-                // Wait for the batch's first delivery, or for a start position the rebalance could
-                // not apply - see `stream` for why the wait is a select and not a check.
+            (self, tracker, cart),
+            move |(sub, tracker, cart)| async move {
+                // Wait for the batch's first delivery, or for what waits ahead of the fetch
+                // queue - see `stream` for why the wait is a select and not a check.
                 let first = loop {
-                    let recorded = context.start_failure_waiter();
-                    if let Some(err) = context.take_start_failure() {
-                        drop(recorded);
-                        return Some((Err(err), (sub, context, consumer)));
+                    let woken = tracker.attention.waiter();
+                    match attended(&tracker) {
+                        Some(Ok(delivery)) => break delivery,
+                        Some(Err(err)) => {
+                            drop(woken);
+                            return Some((Err(err), (sub, tracker, cart)));
+                        }
+                        None => {}
                     }
                     let received = tokio::select! {
                         biased;
-                        () = recorded => continue,
-                        received = HeldRecord::next(&consumer) => received,
+                        () = woken => continue,
+                        received = HeldRecord::next(&cart) => received,
                     };
                     match received {
                         Ok(record) => break sub.map_delivery(record),
                         Err(err) if is_transient(&err) => sub.note_transient(&err),
                         Err(err) => {
-                            return Some((Err(KafkaError::consume(err)), (sub, context, consumer)));
+                            return Some((Err(KafkaError::consume(err)), (sub, tracker, cart)));
                         }
                     }
                 };
@@ -596,7 +675,7 @@ impl BatchSubscriber for KafkaSubscriber {
                 // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
                 // so dropping the probe future loses nothing.
                 while batch.len() < size {
-                    let Some(result) = HeldRecord::ready(&consumer) else {
+                    let Some(result) = HeldRecord::ready(&cart) else {
                         break;
                     };
                     match result {
@@ -614,7 +693,7 @@ impl BatchSubscriber for KafkaSubscriber {
                 for item in &mut batch {
                     sub.transcode(item).await;
                 }
-                Some((Ok(batch), (sub, context, consumer)))
+                Some((Ok(batch), (sub, tracker, cart)))
             },
         );
         #[cfg(feature = "testing")]
@@ -631,15 +710,47 @@ mod in_process {
 
     use futures::Stream;
 
-    use super::KafkaSubscriber;
+    use super::{KafkaSubscriber, attended};
     use crate::error::KafkaError;
     use crate::in_process::{InProcessRecord, Member};
     use crate::message::KafkaMessage;
-    use crate::record::HeldRecord;
+    use crate::record::{HeldRecord, Shared};
+    use crate::tracker::CommitTracker;
+
+    /// What one wait of the in-process stream resolved to.
+    enum Turn {
+        /// What waited ahead of the member's records (see [`attended`]).
+        Attended(Result<KafkaMessage, KafkaError>),
+        /// A record the member fetched, or what it reported instead.
+        Fetched(Result<InProcessRecord, KafkaError>),
+    }
+
+    /// Serves what waits ahead of the member's records, or waits for either, as the live stream
+    /// does.
+    async fn turn(member: &Arc<Member>, tracker: &CommitTracker) -> Turn {
+        loop {
+            let woken = tracker.attention.waiter();
+            if let Some(item) = attended(tracker) {
+                return Turn::Attended(item);
+            }
+            tokio::select! {
+                biased;
+                () = woken => {}
+                fetched = member.next() => return Turn::Fetched(fetched),
+            }
+        }
+    }
 
     /// Turns a fetched record into a delivery.
-    fn deliver(sub: &mut KafkaSubscriber, record: InProcessRecord) -> KafkaMessage {
-        sub.map_delivery(HeldRecord::InProcess(Box::new(record)))
+    fn deliver(
+        sub: &mut KafkaSubscriber,
+        shared: &Arc<Shared>,
+        record: InProcessRecord,
+    ) -> KafkaMessage {
+        sub.map_delivery(HeldRecord::InProcess {
+            shared: Arc::clone(shared),
+            record: Box::new(record),
+        })
     }
 
     /// Runs the registry middleware over a delivery, as the live stream does.
@@ -656,43 +767,49 @@ mod in_process {
     pub(super) fn stream(
         sub: &mut KafkaSubscriber,
         member: Arc<Member>,
+        shared: Arc<Shared>,
     ) -> impl Stream<Item = Result<KafkaMessage, KafkaError>> + Send + '_ {
-        futures::stream::unfold((sub, member), async move |(sub, member)| {
-            let item = match member.next().await {
-                Ok(record) => {
-                    let item = deliver(sub, record);
+        futures::stream::unfold((sub, member, shared), async move |(sub, member, shared)| {
+            let item = match turn(&member, &shared.tracker).await {
+                Turn::Attended(item) => item,
+                Turn::Fetched(Ok(record)) => {
+                    let item = deliver(sub, &shared, record);
                     #[cfg(feature = "schema-registry")]
                     let item = finish(sub, item).await;
                     Ok(item)
                 }
-                Err(err) => Err(err),
+                Turn::Fetched(Err(err)) => Err(err),
             };
-            Some((item, (sub, member)))
+            Some((item, (sub, member, shared)))
         })
     }
 
     pub(super) fn batches(
         sub: &mut KafkaSubscriber,
         member: Arc<Member>,
+        shared: Arc<Shared>,
         size: usize,
     ) -> impl Stream<Item = Result<Vec<KafkaMessage>, KafkaError>> + Send + '_ {
         // The size rides the state: an async closure that captured it could not be called again.
         futures::stream::unfold(
-            (sub, member, size, None::<KafkaError>),
-            async move |(sub, member, size, failed)| {
+            (sub, member, shared, size, None::<KafkaError>),
+            async move |(sub, member, shared, size, failed)| {
                 if let Some(err) = failed {
-                    return Some((Err(err), (sub, member, size, None)));
+                    return Some((Err(err), (sub, member, shared, size, None)));
                 }
-                let first = match member.next().await {
-                    Ok(record) => record,
-                    Err(err) => return Some((Err(err), (sub, member, size, None))),
+                let first = match turn(&member, &shared.tracker).await {
+                    Turn::Attended(Ok(delivery)) => delivery,
+                    Turn::Fetched(Ok(record)) => deliver(sub, &shared, record),
+                    Turn::Attended(Err(err)) | Turn::Fetched(Err(err)) => {
+                        return Some((Err(err), (sub, member, shared, size, None)));
+                    }
                 };
                 let mut batch = Vec::with_capacity(size.min(64));
-                batch.push(deliver(sub, first));
+                batch.push(first);
                 let mut failed = None;
                 while batch.len() < size {
                     match member.fetch() {
-                        Some(Ok(record)) => batch.push(deliver(sub, record)),
+                        Some(Ok(record)) => batch.push(deliver(sub, &shared, record)),
                         // A failure inside an open batch yields the batch first, as the live
                         // subscriber does, and surfaces on the next poll.
                         Some(Err(err)) => {
@@ -710,7 +827,7 @@ mod in_process {
                     }
                     finished
                 };
-                Some((Ok(batch), (sub, member, size, failed)))
+                Some((Ok(batch), (sub, member, shared, size, failed)))
             },
         )
     }

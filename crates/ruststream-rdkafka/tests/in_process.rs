@@ -8,6 +8,9 @@
 
 #![cfg(feature = "testing")]
 
+use std::thread;
+use std::time::Duration;
+
 use futures::{FutureExt as _, Stream, StreamExt};
 use ruststream::testing::{InProcess as _, TestableBroker as _};
 use ruststream::{
@@ -16,10 +19,12 @@ use ruststream::{
     Subscriber, SubscriptionSource as _, TransactionalPublisher,
 };
 use ruststream_rdkafka::{
-    Commit, ConnectedKafkaBroker, KafkaBroker, KafkaError, KafkaMessage, KafkaOptions,
-    KafkaPartitions, KafkaPosition, KafkaPublish, KafkaTopic, KafkaTopics, LaneKey,
-    PARTITION_KEY_HEADER, StartOffset,
+    Commit, ConnectedKafkaBroker, KafkaBroker, KafkaEosPublish, KafkaError, KafkaMessage,
+    KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish, KafkaTopic, KafkaTopics, LaneKey,
+    PARTITION_KEY_HEADER, SourceOffset, StartOffset,
 };
+use tokio::runtime;
+use tokio::sync::oneshot;
 
 /// The production broker as a service configures it, connected in process: its address is never
 /// dialled.
@@ -188,6 +193,77 @@ async fn an_auto_commit_requeue_is_unsupported_and_brings_nothing_back() {
     );
 }
 
+/// A handler on a dedicated thread may be the one whose publish opens an exactly-once window,
+/// from a runtime that stops afterwards. The window's commit is the pipeline's own task and runs
+/// on the runtime the broker connected on, so the window still commits and its record becomes
+/// visible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_window_opened_from_a_stopped_runtime_still_commits() {
+    let broker = connected().await;
+    publish(&broker, "eos-foreign-in", b"a").await;
+    let pipeline = KafkaEosPublish::new("eos-foreign")
+        .commit_interval(Duration::from_millis(50))
+        .pair(&broker)
+        .await
+        .expect("pair the pipeline");
+    let mut subscriber = KafkaTopic::new("eos-foreign-in")
+        .group("eos-foreign-workers")
+        .start(StartOffset::Earliest)
+        .commit(Commit::Transactional("eos-foreign".into()))
+        .subscribe(&broker)
+        .await
+        .expect("subscribe the input");
+    let mut output = tracked("eos-foreign-out", "eos-foreign-readers")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe the output");
+
+    let mut input = Box::pin(subscriber.stream());
+    let msg = ready(&mut input).expect("the input record");
+    let source = SourceOffset::new(msg.topic(), msg.partition(), msg.offset());
+    let forwarding = pipeline.clone();
+    on_foreign_runtime(async move || {
+        forwarding
+            .publish(
+                &source,
+                OutgoingMessage::new("eos-foreign-out", b"a".as_slice()),
+                None,
+            )
+            .await
+            .expect("the publish opens the window");
+    })
+    .await;
+    msg.ack().await.expect("ack");
+
+    let mut output = Box::pin(output.stream());
+    let committed = tokio::time::timeout(Duration::from_secs(5), output.next())
+        .await
+        .expect("a window opened from a stopped runtime must still commit")
+        .expect("the output stream is open")
+        .expect("a delivery, not an error");
+    assert_eq!(committed.payload(), b"a");
+}
+
+/// Runs `work` on a single-threaded runtime of its own thread, stopped as soon as `work` returns,
+/// the way a handler on a dedicated thread publishes.
+async fn on_foreign_runtime<Output: Send + 'static>(
+    work: impl AsyncFnOnce() -> Output + Send + 'static,
+) -> Output {
+    let (done, finished) = oneshot::channel();
+    thread::spawn(move || {
+        let runtime = runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime builds");
+        let output = runtime.block_on(work());
+        drop(runtime);
+        let _ = done.send(output);
+    });
+    finished
+        .await
+        .expect("the foreign runtime's work completes")
+}
+
 /// A tracked subscription reading `topic` in `group`, from the start of the log.
 fn tracked(topic: &str, group: &str) -> KafkaTopic {
     KafkaTopic::new(topic)
@@ -196,11 +272,10 @@ fn tracked(topic: &str, group: &str) -> KafkaTopic {
         .commit(Commit::Tracked)
 }
 
-// A retry leaves the offset unsettled, which holds the group's committed position below it. The
-// consumer reads on; the record and everything after it come back when the partition is next
-// fetched from the committed offset, which is a restart or a rebalance.
+// A retry hands the delivery back to its subscription, which delivers it again ahead of what it
+// reads next; its offset stays unsettled until then, and settles like any other once it is acked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tracked_retry_holds_the_committed_position_until_the_next_member() {
+async fn a_tracked_retry_comes_back_on_its_subscription() {
     let broker = connected().await;
     for payload in [b"a".as_slice(), b"b", b"c"] {
         publish(&broker, "rewind", payload).await;
@@ -214,12 +289,10 @@ async fn a_tracked_retry_holds_the_committed_position_until_the_next_member() {
     a.ack().await.expect("ack");
     let b = ready(&mut stream).expect("b");
     b.nack(true).await.expect("a tracked requeue");
-    let c = ready(&mut stream).expect("the consumer reads on past the retried record");
-    assert_eq!(c.payload(), b"c");
-    c.ack().await.expect("ack");
-    assert!(
-        ready(&mut stream).is_none(),
-        "nothing comes back in this session"
+    assert_eq!(
+        drain(&mut stream).await,
+        payloads(&["b", "c"]),
+        "the retried record comes back first, and the consumer reads on behind it",
     );
     drop(stream);
     drop(subscriber);
@@ -229,10 +302,66 @@ async fn a_tracked_retry_holds_the_committed_position_until_the_next_member() {
         .await
         .expect("subscribe");
     let mut stream = Box::pin(restarted.stream());
+    assert!(
+        ready(&mut stream).is_none(),
+        "the retried record settled when it was acked, so the group committed past it",
+    );
+}
+
+// A retry whose partition moves before it comes back (a seek here, a revoke alike) is released:
+// the replay delivers its record, and delivering the handed-back copy as well would be a
+// duplicate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_overtaken_by_a_seek_comes_back_once() {
+    let broker = connected().await;
+    for payload in [b"a".as_slice(), b"b"] {
+        publish(&broker, "overtaken", payload).await;
+    }
+    let mut subscriber = tracked("overtaken", "workers")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    let seeker = subscriber.seeker();
+    let mut stream = Box::pin(subscriber.stream());
+    let a = ready(&mut stream).expect("a");
+    a.nack(true).await.expect("a tracked requeue");
+    seeker
+        .seek(KafkaPosition::earliest())
+        .await
+        .expect("seek to the start");
     assert_eq!(
         drain(&mut stream).await,
-        payloads(&["b", "c"]),
-        "the group resumes at the retried record, so the tail behind it replays too",
+        payloads(&["a", "b"]),
+        "the replay delivers the retried record, and the handed-back copy is released",
+    );
+}
+
+// A retry handed back after its subscription closed has no stream to come back on: it is released
+// unsettled, and the group's next member reads it from the committed offset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_the_subscription_closed_goes_to_the_next_member() {
+    let broker = connected().await;
+    publish(&broker, "late-retry", b"a").await;
+    let mut subscriber = tracked("late-retry", "workers")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    let a = {
+        let mut stream = Box::pin(subscriber.stream());
+        ready(&mut stream).expect("a")
+    };
+    drop(subscriber);
+    a.nack(true).await.expect("a tracked requeue");
+
+    let mut next = tracked("late-retry", "workers")
+        .subscribe(&broker)
+        .await
+        .expect("subscribe");
+    let mut stream = Box::pin(next.stream());
+    assert_eq!(
+        drain(&mut stream).await,
+        payloads(&["a"]),
+        "the next member reads the retried record from the committed offset",
     );
 }
 

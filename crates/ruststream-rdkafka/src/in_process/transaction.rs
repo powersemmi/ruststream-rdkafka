@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use ruststream::Str;
+use tokio::runtime::Handle;
 use tokio::time::Instant;
 
 use super::log::{Entry, ProducerId, Visibility};
@@ -65,7 +66,9 @@ impl Cluster {
     /// # Errors
     ///
     /// Returns [`KafkaError::Publish`] when a later pairing fenced the producer.
-    pub(crate) fn begin(&self, producer: &ProducerId) -> Result<(), KafkaError> {
+    ///
+    /// The transaction's timeout timer runs on `runtime`, the one the broker connected on.
+    pub(crate) fn begin(&self, producer: &ProducerId, runtime: &Handle) -> Result<(), KafkaError> {
         let mut state = self.lock();
         state.expire(self.settings.transaction_timeout);
         state.check_epoch(producer)?;
@@ -84,7 +87,7 @@ impl Cluster {
         // what reaches a reader waiting in front of it.
         let cluster = self.this.clone();
         let timeout = self.settings.transaction_timeout;
-        tokio::spawn(async move {
+        runtime.spawn(async move {
             tokio::time::sleep(timeout).await;
             if let Some(cluster) = cluster.upgrade() {
                 let mut state = cluster.lock();
