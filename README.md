@@ -60,7 +60,7 @@ The crate builds librdkafka from source, so a C toolchain is required. Optional 
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Debug, Deserialize, Outgoing, PartialEq, Serialize)]
 struct Order {
     id: u64,
 }
@@ -99,27 +99,26 @@ cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/
 
 ## Test it
 
-`TestApp` runs the handlers against an in-process Kafka, with no cluster.
+`TestApp` runs the service's own app with `KafkaBroker` in process, with no cluster.
 
 ```rust
 use ruststream::testing::TestApp;
-use ruststream_rdkafka::testing::KafkaTestBroker;
 
-let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
-    .with_broker(KafkaTestBroker::new(), |b| {
-        b.include(confirm);
-    });
-let tb = TestApp::start(app).await?;
+let tb = TestApp::start(app()).await?;
 
-tb.broker::<KafkaTestBroker>()
-    .publish("orders", &Order { id: 42 })
+tb.broker::<KafkaBroker>()
+    .message(&Order { id: 42 })
+    .to("orders")
+    .publish()
     .await?;
 
-tb.broker::<KafkaTestBroker>()
+tb.broker::<KafkaBroker>()
     .subscriber("orders")
     .assert_called_once()
+    .with(&Order { id: 42 })
     .settled(HandlerOutcome::ack());
-tb.broker::<KafkaTestBroker>()
+
+tb.broker::<KafkaBroker>()
     .published::<Confirmation>("confirmations")
     .assert_called_once()
     .with(&Confirmation { id: 42 });
