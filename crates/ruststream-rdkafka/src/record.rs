@@ -23,9 +23,9 @@ use std::fmt;
 use std::future::{Future as _, poll_fn};
 use std::pin::pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 
-use futures::FutureExt as _;
+use futures::StreamExt as _;
 use rdkafka::consumer::Consumer as _;
 use rdkafka::error::KafkaError;
 use rdkafka::message::{
@@ -143,9 +143,7 @@ impl HeldRecord {
     /// Nothing is awaited: either a record is taken or nothing happens.
     pub(crate) fn ready(cart: &Cart) -> Option<Result<Self, KafkaError>> {
         let taken = Yoke::try_attach_to_cart(Arc::clone(cart), |cart| {
-            cart.consumer
-                .recv()
-                .now_or_never()
+            take_fetched(&cart.consumer)
                 .ok_or(NotTaken::Empty)?
                 .map(Record)
                 .map_err(NotTaken::Failed)
@@ -302,6 +300,22 @@ impl HeldRecord {
             #[cfg(feature = "testing")]
             Self::InProcess { record, .. } => Some(RecordHeaders::InProcess(record.headers())),
         }
+    }
+}
+
+/// A record librdkafka has already fetched, taken without waiting: the first poll of `recv`.
+///
+/// It runs once per delivery. The client's `recv` future is generic code whose inlining depends
+/// on the codegen unit it lands in, so the take is written out here: `#[inline]` emits it into
+/// its caller's unit, and it stays inlined into the consume loop however the units fall.
+#[inline]
+fn take_fetched(consumer: &TrackedConsumer) -> Option<Result<BorrowedMessage<'_>, KafkaError>> {
+    match consumer
+        .stream()
+        .poll_next_unpin(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(taken) => taken,
+        Poll::Pending => None,
     }
 }
 
