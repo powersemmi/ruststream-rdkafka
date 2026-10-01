@@ -390,8 +390,9 @@ async fn a_dropped_record_settles_its_offset() {
         .await
         .expect("subscribe");
     let mut stream = Box::pin(restarted.stream());
-    assert!(
-        drain(&mut stream).await.is_empty(),
+    assert_eq!(
+        drain(&mut stream).await,
+        Vec::<Vec<u8>>::new(),
         "a dropped and an acked record both moved the committed position past themselves",
     );
 }
@@ -725,8 +726,9 @@ async fn a_committed_reader_sees_a_transaction_at_its_commit_and_never_after_an_
         .await
         .expect("publish");
     publisher.abort().await.expect("abort");
-    assert!(
-        drain(&mut stream).await.is_empty(),
+    assert_eq!(
+        drain(&mut stream).await,
+        Vec::<Vec<u8>>::new(),
         "an aborted record is never read"
     );
 
@@ -739,8 +741,9 @@ async fn a_committed_reader_sees_a_transaction_at_its_commit_and_never_after_an_
         .publish(OutgoingMessage::new("txn-out", b"two"), None)
         .await
         .expect("publish");
-    assert!(
-        drain(&mut stream).await.is_empty(),
+    assert_eq!(
+        drain(&mut stream).await,
+        Vec::<Vec<u8>>::new(),
         "an open transaction is invisible"
     );
     publisher.commit().await.expect("commit");
