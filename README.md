@@ -19,64 +19,26 @@
 
 ---
 
-`ruststream-rdkafka` implements the RustStream broker contract on top of
-[rdkafka](https://docs.rs/rdkafka) / librdkafka: `#[subscriber]` handlers consume topics through
-consumer groups, publishers await Kafka's delivery reports, and the whole service composes with
-the synchronous `#[ruststream::app]` builder because the broker's constructor is pure
-configuration - the runtime climbs the lifecycle ladder around it.
+`ruststream-rdkafka` connects a RustStream service to Apache Kafka over
+[`rdkafka`](https://docs.rs/rdkafka), the librdkafka binding. Handlers, routing, codecs and
+middleware come from the framework; this crate is the transport.
 
 ## Features
 
-- **Consumer groups as descriptors** - `KafkaTopic::new("orders").group("workers")` describes
-  one subscription; the bare-string `#[subscriber("orders")]` form rides on the broker's
-  `default_group`. `KafkaTopics` reads several topics or a `^` regex as one subscription, and
-  `KafkaPartitions::new("orders", [0, 1])` assigns partitions by hand, without group membership
-  or rebalancing.
-- **Three commit modes** - librdkafka auto-commit (`Commit::Auto`, the default); precise
-  per-message acknowledgement over a contiguous watermark (`Commit::Tracked`), correct under
-  concurrent handler lanes; and `Commit::Transactional`, where the consumer stops committing
-  and the exactly-once pipeline moves the positions inside the producer transaction.
-- **Native record keys** - the partition-key header becomes the record's Kafka key, so per-key
-  ordering works end to end, including `workers(n, by_key)` lanes.
-- **A typed record placement** - `partition(n)` on the publish builder pins one record to one
-  partition, ahead of the key and the partitioner; the number is an `i32`, and a test reads back
-  what a publish carried through `tb.out::<Marker>().with_options(..)`.
-- **Native batches** - a slice parameter consumes whole batches, and the subscriber implements
-  the core's `BatchSubscriber` directly rather than buffering client-side: a batch is one
-  delivery plus everything librdkafka has already fetched, cut off at the `batch(nonzero!(n))`
-  the mount site names, with no added waiting.
-- **Retries and dead-lettering** - under the tracked commit `nack(true)` delivers the record
-  again on its subscription, its offset unsettled until then, and the mount site declares the rest:
-  `max_attempts(n).dead_letter("orders.dlq")` reads the same on every broker. Kafka holds no
-  record back, so the framework publishes each retry copy itself and counts them in a header;
-  `KafkaTopic` says where a copy reaches its subscription again, and a subscription over a set
-  of topics names that destination at the mount site.
-- **Kafka's own vocabulary in the document** - with the `asyncapi` feature the generated
-  document carries the `kafka` binding: the topic behind a channel, the consumer group of a
-  `receive` operation, the schema registry a server is configured with, and where a
-  registry-backed payload keeps its schema id.
-- **librdkafka delegation** - unset options mean librdkafka defaults; raw `config(key, value)`
-  passthroughs on the broker, the producer, and the descriptor reach every property not
-  surfaced as a typed option.
-- **Typed lifecycle** - synchronous `new` records configuration, `connect` probes the cluster and
-  hands back the connected broker, `shutdown` consumes it into a closed witness carrying the flush
-  result; subscribing before connecting or publishing after shutdown does not compile.
-- **Policies, then live publishers** - `KafkaPublish` and its transactional, per-partition, and
-  exactly-once transitions are pure declaration, named at the mount site with
-  `.out(marker, policy)`; the runtime pairs each into a live publisher once the broker is
-  connected, so a handler never sees a not-connected one.
-- **Repositionable subscriptions** - a handler moves its own subscription over the partitions
-  this consumer holds (earliest, latest, an absolute offset, a timestamp, or the delivery's own
-  position) by reading the `SeekHandle` key off its context, with the tracked watermark and the
-  exactly-once offsets following the seek; `start_at(..)` applies a position on every startup.
-- **Confluent Schema Registry** - the `schema-registry` feature transcodes framed deliveries on
-  the way in and frames publishes by the subject's registered flavor on the way out, as
-  middleware on the async edges, so handlers and codecs stay on plain JSON. `avro` and
-  `protobuf` add those two flavors.
-- **Tests on the production app** - with the `testing` feature, the core `TestApp` harness runs
-  the app `main` runs with `KafkaBroker` connected to an in-process cluster (consumer groups,
-  offsets, transactions), no cluster required; `TestApp::start_live` runs the same test against
-  a real Kafka.
+- **Consumer groups as descriptors:** one topic, a set of topics or a regex, or partitions
+  assigned by hand.
+- **Three commit modes:** librdkafka auto-commit, precise per-message acknowledgement, and
+  commits inside a producer transaction.
+- **Record keys and placement:** the partition key becomes the Kafka key, and a publish can pin a
+  record to a partition.
+- **Native batches** cut from what librdkafka has already fetched.
+- **Retry caps and dead-letter topics** declared where the handler is mounted.
+- **Transactions and exactly-once pipelines** as publish policies.
+- **Repositioning:** a handler moves its subscription to an offset or a timestamp.
+- **Confluent Schema Registry** framing, with Avro and Protobuf, behind features.
+- **AsyncAPI** with the specification's `kafka` binding, behind the `asyncapi` feature.
+- **Tests on the production app:** the app `main` runs, with `KafkaBroker` connected to an
+  in-process Kafka, or against a real cluster with `TestApp::start_live`.
 
 ## Install
 
@@ -85,15 +47,14 @@ configuration - the runtime climbs the lifecycle ladder around it.
 ruststream = { version = "0.7", features = ["macros", "json"] }
 ruststream-rdkafka = "0.7"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 ```
 
-The crate builds librdkafka from source by default (a C toolchain is the only requirement).
-Cargo features: `json` (on by default), `msgpack`, and `cbor` forward the core's codecs;
-`schema-registry`, `avro`, and `protobuf` cover Confluent framing; `testing` adds the
-in-process mode tests connect the broker through; `ssl` / `ssl-vendored` for TLS and `zstd` for compression map 1:1 onto
-rdkafka's. SASL PLAIN/SCRAM/OAUTHBEARER need no feature - librdkafka implements them
-built-in; other backends (gssapi, dynamic linking, ...) can be enabled by depending on
-`rdkafka` directly, since cargo features are additive across the dependency graph.
+The crate builds librdkafka from source, so a C toolchain is required. Optional features:
+`testing`, `asyncapi`, `schema-registry`, `avro`, `protobuf`, `msgpack`, `cbor`, `ssl`,
+`ssl-vendored` and `zstd`.
 
 ## Write a service
 
@@ -113,8 +74,6 @@ struct Confirmation {
     id: u64,
 }
 
-// `Commit::Tracked` turns every ack into a precise per-message acknowledgement; the `publish`
-// clause sends the returned value to the `confirmations` topic.
 #[subscriber(
     KafkaTopic::new("orders").commit(Commit::Tracked),
     publish("confirmations")
@@ -134,34 +93,18 @@ fn app() -> impl App {
 }
 ```
 
-`#[ruststream::app]` generates `main`, so `cargo run -- run` starts the service and
-`cargo run -- asyncapi gen` prints its AsyncAPI document.
+`#[ruststream::app]` generates `main`, so the binary understands `run` and `asyncapi gen`.
 
-The reply above rides the broker's default publish policy, so the mount site names no
-publisher. Everything else is named there: `.out_reply(policy)` for the reply slot,
-`.out(DefaultSlot, policy)` (or your own marker) for an `Out<..>` handler parameter, and
-`.out_retry(policy)` for the delayed copy `retry_after` republishes. A policy
-holds no connection - `Publish::default().transactional_id("orders-svc-1")`,
-`EosPublish::new("enrich-svc-1")` - which is why it can be written next to the `include`; the
-runtime pairs it into a live publisher after the broker connects.
+Scaffold a fresh project from the template:
 
-Those policy names come from this crate's prelude, which aliases `KafkaPublish` and its
-transitions to the uniform ones, so mount sites read the same on every broker. A handler body
-imports `ruststream::prelude::*` instead and bounds its slot with a capability
-(`Out<impl Publisher>`, `Out<impl TransactionalPublisher>`): it names no broker type, and
-mounts unchanged under whichever policy the routes pair it with.
-
-Full compiling examples: `examples/kafka_quickstart.rs` and `examples/kafka_topics.rs`.
+```bash
+cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
+```
 
 ## Test it
 
-The app `main` runs, handed to the harness unchanged: `TestApp::start` connects `KafkaBroker` to
-an in-process cluster, with no Kafka, and the test addresses the broker by that type.
-
-```toml
-[dev-dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["testing"] }
-```
+`TestApp` runs the app `main` runs, with `KafkaBroker` connected to an in-process Kafka and no
+cluster.
 
 ```rust
 use ruststream::testing::TestApp;
@@ -178,7 +121,6 @@ tb.broker::<KafkaBroker>()
 tb.broker::<KafkaBroker>()
     .subscriber("orders")
     .assert_called_once()
-    .with(&Order { id: 42 })
     .settled(HandlerOutcome::ack());
 
 tb.broker::<KafkaBroker>()
@@ -186,22 +128,6 @@ tb.broker::<KafkaBroker>()
     .assert_called_once()
     .with(&Confirmation { id: 42 });
 ```
-
-The in-process cluster reads its settings from the broker and the descriptors, and answers as
-Kafka does: consumer groups share a topic's partitions, offsets commit by the subscription's
-commit mode and outlive its members, a seek moves the partitions a subscription reads, and a
-`read_committed` reader sees a transaction when it commits. `TestApp::start_live(app())` runs
-the same body against a running Kafka. Full example: `examples/kafka_testing.rs`.
-
-## Scaffold a service
-
-```bash
-cargo generate --git https://github.com/powersemmi/ruststream-rdkafka templates/kafka-topic --name my-service
-```
-
-The starter wires one broker with a default consumer group, a tracked-commit subscriber under a
-declared attempt cap and dead-letter topic plus a published reply, and the `#[ruststream::app]`
-entry point.
 
 ## Documentation
 
@@ -211,16 +137,16 @@ entry point.
 - [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - Confluent framing, with
   [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it.
 - [Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) - the production app under `TestApp`, in process and live.
-- Entry pages, installation and the tutorial: <https://powersemmi.github.io/ruststream/>
+- The framework: <https://powersemmi.github.io/ruststream/latest>
+
+## Minimum supported Rust version
+
+The MSRV is **1.88**, edition 2024.
 
 ## Contributing
 
-```bash
-just check          # fmt, clippy, and feature checks
-just test           # the suite; the live-cluster tests skip without a broker
-just test-brokers   # the same suite against a Kafka container
-```
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 
-Apache-2.0.
+Licensed under the [Apache-2.0](./LICENSE) license.
