@@ -55,6 +55,7 @@ use self::transaction::Transactional;
 use crate::error::KafkaError;
 use crate::message::PARTITION_KEY_HEADER;
 use crate::seek::KafkaPosition;
+use crate::subscription::legal_topic;
 
 /// What the cluster reads off the producer configuration when the broker connects.
 #[derive(Debug, Clone, Copy)]
@@ -224,19 +225,14 @@ impl Cluster {
         headers: &HeaderMap,
         transaction: Option<&ProducerId>,
     ) -> Result<(), KafkaError> {
-        if !log::legal_topic(topic) {
+        if !legal_topic(topic) {
             return Err(produce_error(RDKafkaErrorCode::InvalidTopic));
         }
         let key = headers
             .get(PARTITION_KEY_HEADER)
             .map(Bytes::copy_from_slice);
         let wire = log::wire_headers(headers);
-        let size = payload.len()
-            + key.as_ref().map_or(0, Bytes::len)
-            + wire
-                .iter()
-                .map(|(name, value)| name.len() + value.as_ref().map_or(0, Bytes::len))
-                .sum::<usize>();
+        let size = log::record_size(payload, key.as_deref(), &wire);
         if size > self.settings.max_message_bytes {
             return Err(produce_error(RDKafkaErrorCode::MessageSizeTooLarge));
         }
@@ -323,13 +319,8 @@ impl Cluster {
     }
 
     /// Opens a member for a subscription: it joins its group, which rebalances, or takes the
-    /// partitions it names.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::Subscribe`] for a topic name or a pattern the cluster refuses.
-    pub(crate) fn join(self: &Arc<Self>, spec: MemberSpec) -> Result<Arc<Member>, KafkaError> {
-        spec.validate()?;
+    /// partitions it names. The names were checked when the subscription opened.
+    pub(crate) fn join(self: &Arc<Self>, spec: MemberSpec) -> Arc<Member> {
         let wake = Arc::new(Notify::new());
         let mut state = self.lock();
         let id = state.next_member;
@@ -368,7 +359,7 @@ impl Cluster {
         let changes = state.reconcile();
         drop(state);
         self.apply(changes);
-        Ok(Arc::new(Member::new(Arc::clone(self), id, wake)))
+        Arc::new(Member::new(Arc::clone(self), id, wake))
     }
 
     /// Takes the member out of its group, which rebalances.
@@ -467,7 +458,7 @@ impl State {
     /// Creates `topic` with the default partition count, when it does not exist yet, and
     /// rebalances every group a member of which it is new to.
     fn create_topic(&mut self, topic: &str) {
-        if self.topics.contains_key(topic) || !log::legal_topic(topic) {
+        if self.topics.contains_key(topic) || !legal_topic(topic) {
             return;
         }
         self.topics

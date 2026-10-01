@@ -169,16 +169,34 @@ impl Topic {
     }
 }
 
-/// Whether Kafka accepts `name` as a topic: 1 to 249 characters from `[a-zA-Z0-9._-]`, and not
-/// `.` or `..`.
-pub(crate) fn legal_topic(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 249
-        && name != "."
-        && name != ".."
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+/// The most framing librdkafka reserves for one record of the v2 message format: its length,
+/// attributes, timestamp and offset deltas, the key and value lengths and the header count, each
+/// counted at the widest its varint can be (`RD_KAFKAP_MESSAGE_V2_MAX_OVERHEAD`).
+const RECORD_OVERHEAD: usize = 5 + 1 + 10 + 5 + 5 + 5 + 5;
+
+/// The size librdkafka holds a record to against `message.max.bytes` before it takes it: the
+/// record's framing, its key and value, and each header as it is serialized, a varint length
+/// before its name and before its value.
+pub(crate) fn record_size(payload: &[u8], key: Option<&[u8]>, headers: &[WireHeader]) -> usize {
+    let headers: usize = headers
+        .iter()
+        .map(|(name, value)| {
+            let value = value.as_ref().map_or(0, Bytes::len);
+            name.len() + value + length_varint(name.len()) + length_varint(value)
+        })
+        .sum();
+    RECORD_OVERHEAD + key.map_or(0, <[u8]>::len) + payload.len() + headers
+}
+
+/// How many bytes the varint librdkafka writes a length as takes: the length is zigzag encoded,
+/// which doubles it, then written seven bits to a byte.
+fn length_varint(len: usize) -> usize {
+    // Doubling a non-zero length adds one bit to it.
+    let bits = match len {
+        0 => 0,
+        _ => (usize::BITS - len.leading_zeros() + 1) as usize,
+    };
+    bits.div_ceil(7).max(1)
 }
 
 /// The wire headers a publish's header map becomes: every header except the ones this crate maps
@@ -257,6 +275,23 @@ mod tests {
     }
 
     #[test]
+    fn a_record_counts_as_librdkafka_counts_it() {
+        assert_eq!(record_size(b"", None, &[]), 36);
+        assert_eq!(record_size(&vec![0; 999_964], None, &[]), 1_000_000);
+        // A 63-byte length doubles into one varint byte, a 64-byte one into two.
+        let header =
+            |name: usize, value: usize| ("n".repeat(name), Some(Bytes::from(vec![0; value])));
+        assert_eq!(
+            record_size(b"", Some(b"key"), &[header(1, 63)]),
+            36 + 3 + 1 + 63 + 1 + 1
+        );
+        assert_eq!(
+            record_size(b"", None, &[header(1, 64)]),
+            36 + 1 + 64 + 1 + 2
+        );
+    }
+
+    #[test]
     fn a_key_always_lands_on_one_partition_and_a_named_partition_must_exist() {
         let mut topic = Topic::new(4);
         let first = topic.place(None, Some(b"tenant-1"));
@@ -266,13 +301,5 @@ mod tests {
         assert_eq!(topic.place(Some(-1), None), None);
         let keyless: Vec<_> = (0..4).map(|_| topic.place(None, None)).collect();
         assert_eq!(keyless, [Some(0), Some(1), Some(2), Some(3)]);
-    }
-
-    #[test]
-    fn topic_names_follow_kafkas_rule() {
-        assert!(legal_topic("orders.eu-1_v2"));
-        for bad in ["", ".", "..", "orders eu", "orders/eu", &"x".repeat(250)] {
-            assert!(!legal_topic(bad), "{bad:?} must be refused");
-        }
     }
 }

@@ -1,6 +1,7 @@
 #![doc = include_str!("README.md")]
 #![forbid(unsafe_code)]
 
+mod attention;
 #[cfg(feature = "asyncapi")]
 mod bindings;
 mod broker;
@@ -15,6 +16,7 @@ mod publisher;
 mod record;
 mod redelivery;
 mod seek;
+mod startup;
 mod subscriber;
 mod subscription;
 #[cfg(feature = "testing")]
