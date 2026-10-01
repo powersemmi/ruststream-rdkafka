@@ -31,7 +31,7 @@ use crate::in_process::Member;
 use crate::publisher::{
     KafkaOptions, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
 };
-use crate::tracker::{CommitTracker, TrackingContext};
+use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// The Kafka Streams default for exactly-once commit intervals.
 const DEFAULT_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -53,23 +53,20 @@ pub(crate) struct EosSource {
 /// variant.
 #[derive(Clone)]
 enum WeakConsumer {
-    Kafka(Weak<StreamConsumer<TrackingContext>>),
+    Kafka(Weak<TrackedConsumer>),
     #[cfg(feature = "testing")]
     InProcess(Weak<Member>),
 }
 
 /// The consumer behind a source pinned for one window commit.
 enum LiveConsumer {
-    Kafka(Arc<StreamConsumer<TrackingContext>>),
+    Kafka(Arc<TrackedConsumer>),
     #[cfg(feature = "testing")]
     InProcess(Arc<Member>),
 }
 
 impl EosSource {
-    pub(crate) fn new(
-        tracker: &Arc<CommitTracker>,
-        consumer: &Arc<StreamConsumer<TrackingContext>>,
-    ) -> Self {
+    pub(crate) fn new(tracker: &Arc<CommitTracker>, consumer: &Arc<TrackedConsumer>) -> Self {
         Self {
             tracker: Arc::downgrade(tracker),
             consumer: WeakConsumer::Kafka(Arc::downgrade(consumer)),
