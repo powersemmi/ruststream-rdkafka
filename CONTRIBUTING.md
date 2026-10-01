@@ -55,6 +55,10 @@ just ci             # check and test, plus codespell, cargo deny and zizmor
 starts the Compose stand, runs the whole suite against it with the live tests required, and stops
 the stand.
 
+The broker contract is checked by the core's conformance suites in `tests/conformance_rdkafka.rs`.
+`just test` runs them against the in-process cluster. `just test-brokers` runs them against Kafka
+as well, together with the checks that hold the in-process cluster to what the server does.
+
 The `kafka-topic` scaffold under `templates/` is rendered and compiled against this branch by
 CI's lint job whenever it or the crate changes. `cargo generate --path templates/kafka-topic
 --name smoke` renders it locally.

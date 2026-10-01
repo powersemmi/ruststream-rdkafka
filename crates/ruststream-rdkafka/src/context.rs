@@ -13,31 +13,41 @@
 //! being separate types is what keeps a batch body from naming a position that belongs to one
 //! record.
 
+use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use ruststream::{BuildBatchContext, BuildContext, Field, Str};
 
 use crate::message::KafkaMessage;
+use crate::record::Shared;
 use crate::seek::{KafkaPosition, KafkaSeeker};
 
 /// Native Kafka delivery metadata plus this subscription's reposition handle, built once per
 /// delivery.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KafkaContext {
-    topic: Str,
+    /// What the subscription shares, the seeker and the topic name among it, behind one
+    /// reference count.
+    shared: Arc<Shared>,
+    /// The record's own topic, when the subscription reads several.
+    topic: Option<Str>,
     partition: i32,
     offset: i64,
     timestamp_millis: Option<i64>,
     key: Option<Bytes>,
-    seeker: Arc<KafkaSeeker>,
 }
 
 impl KafkaContext {
     /// The topic the record was consumed from.
     #[must_use]
     pub fn topic(&self) -> &str {
-        &self.topic
+        self.topic_name()
+    }
+
+    /// The topic as the shared string: the record's own, or the subscription's.
+    fn topic_name(&self) -> &Str {
+        self.shared.topic(self.topic.as_ref())
     }
 
     /// The partition the record was consumed from.
@@ -67,7 +77,7 @@ impl KafkaContext {
     /// The topic name in the form the subscription minted it: a field key reading it hands it
     /// over for a reference count instead of copying it.
     pub(crate) fn shared_topic(&self) -> Str {
-        self.topic.clone()
+        self.topic_name().clone()
     }
 
     /// The record key in the form the delivery carries it, handed over the same way.
@@ -85,42 +95,32 @@ impl KafkaContext {
     /// The handle repositioning the subscription this delivery came from.
     #[must_use]
     pub fn seeker(&self) -> &KafkaSeeker {
-        &self.seeker
+        &self.shared.seeker
+    }
+}
+
+impl fmt::Debug for KafkaContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaContext")
+            .field("topic", self.topic_name())
+            .field("partition", &self.partition)
+            .field("offset", &self.offset)
+            .field("timestamp_millis", &self.timestamp_millis)
+            .field("key", &self.key)
+            .field("seeker", &self.shared.seeker)
+            .finish()
     }
 }
 
 impl BuildContext<KafkaMessage> for KafkaContext {
     fn build(msg: &KafkaMessage) -> Self {
         Self {
-            topic: msg.shared_topic(),
+            shared: msg.shared_handle(),
+            topic: msg.own_topic(),
             partition: msg.partition(),
             offset: msg.offset(),
             timestamp_millis: msg.timestamp_millis(),
             key: msg.key().map(Bytes::copy_from_slice),
-            // The subscription minted the handle when it opened, so carrying it costs one
-            // reference-count bump per delivery, not a producer or consumer setup.
-            seeker: msg.seeker_handle(),
-        }
-    }
-}
-
-/// The in-process transport carries the same context, so a service reading its broker fields
-/// mounts on [`KafkaTestBroker`](crate::testing::KafkaTestBroker) unchanged and is testable with
-/// `TestApp`. What it reports is what that transport actually has: the topic and the log offset
-/// are real and the seeker really repositions, the partition is zero (the transport gives each
-/// topic one), and there is no record timestamp because it stamps none.
-#[cfg(feature = "testing")]
-impl BuildContext<crate::testing::KafkaTestMessage> for KafkaContext {
-    fn build(msg: &crate::testing::KafkaTestMessage) -> Self {
-        Self {
-            // The in-process transport mints a topic name per delivery rather than sharing the
-            // subscription's, so this is the one context build that copies the name.
-            topic: Str::from(msg.topic()),
-            partition: 0,
-            offset: msg.offset(),
-            timestamp_millis: None,
-            key: msg.key().map(Bytes::copy_from_slice),
-            seeker: msg.seeker_handle(),
         }
     }
 }
@@ -193,17 +193,6 @@ impl BuildBatchContext<KafkaMessage> for KafkaBatchContext {
     }
 }
 
-/// The in-process transport carries the batch context too: its seeker repositions the retained
-/// log, so a batch body that replays is testable with `TestApp`.
-#[cfg(feature = "testing")]
-impl BuildBatchContext<crate::testing::KafkaTestMessage> for KafkaBatchContext {
-    fn build(first: &crate::testing::KafkaTestMessage) -> Self {
-        Self {
-            seeker: first.seeker_handle(),
-        }
-    }
-}
-
 /// Zero-sized [`Field`] keys reading one [`KafkaContext`] field each.
 pub mod keys {
     use bytes::Bytes;
@@ -224,7 +213,7 @@ pub mod keys {
         type Value<'a> = &'a Str;
 
         fn get(self, src: &KafkaContext) -> &Str {
-            &src.topic
+            src.topic_name()
         }
     }
 
