@@ -609,7 +609,7 @@ mod tests {
         let bytes = codec.encode(&order()).expect("encode");
         let (id, datum) = parse_envelope(&bytes).expect("the wire format");
         assert_eq!(id, 11);
-        assert!(!datum.is_empty());
+        assert_ne!(datum, b"");
 
         // And it reads its own frame back through the id the envelope names.
         assert_eq!(codec.decode::<Order>(&bytes).expect("decode"), order());

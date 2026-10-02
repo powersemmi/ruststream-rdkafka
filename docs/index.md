@@ -142,7 +142,8 @@ modes, keyed worker lanes, batches, retries and repositioning.
 delivery guarantees, transactions and exactly-once pipelines.
 [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) covers the Confluent envelope, with
 [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it, and
-[`testing`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/testing/index.html) covers the in-process broker.
+[Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) covers the service's own app under `TestApp`, in process and against a running
+Kafka.
 
 Installation, the tutorial and the list of brokers are on the framework's own site:
 <https://powersemmi.github.io/ruststream/>.

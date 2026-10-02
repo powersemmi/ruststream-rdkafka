@@ -13,6 +13,8 @@ pub use partitions::KafkaPartitions;
 pub use topic::KafkaTopic;
 pub use topics::KafkaTopics;
 
+use rdkafka::error::KafkaError as RdKafkaError;
+
 use crate::error::KafkaError;
 
 /// Where a consumer group starts reading when it has no valid committed offset.
@@ -30,7 +32,7 @@ pub enum StartOffset {
     Committed,
     /// Start from the earliest retained offset.
     Earliest,
-    /// Start from the latest offset (only messages published after the group formed).
+    /// Start from the latest offset: only messages published after the subscription opened.
     Latest,
 }
 
@@ -89,8 +91,9 @@ pub enum LaneKey {
 pub enum Commit {
     /// librdkafka auto-commit, the librdkafka default: positions are stored as messages are
     /// handed to the application and committed every `auto.commit.interval.ms`. `ack` and
-    /// `nack` are advisory no-ops; a crash can lose the tail of processed-but-uncommitted work
-    /// or skip unprocessed deliveries that were already stored.
+    /// `nack(false)` are advisory no-ops and `nack(true)` reports
+    /// [`AckError::Unsupported`](ruststream::AckError::Unsupported); a crash can lose the tail of
+    /// processed-but-uncommitted work or skip unprocessed deliveries that were already stored.
     #[default]
     Auto,
     /// Per-message acknowledgement: `enable.auto.offset.store` is switched off and an `ack`
@@ -132,6 +135,36 @@ pub(crate) enum Reader {
     /// librdkafka `assign()` of exactly these partitions of one topic: no group membership,
     /// no rebalancing.
     Assigned { topic: String, partitions: Vec<i32> },
+}
+
+/// Whether Kafka accepts `name` as a topic: 1 to 249 characters from `[a-zA-Z0-9._-]`, and not
+/// `.` or `..`.
+pub(crate) fn legal_topic(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 249
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// Refuses a subscription to a topic name the cluster would refuse. librdkafka accepts such a
+/// subscription and reports the name only later, on the consumer's queue, so the subscription
+/// would open and deliver nothing; refusing it here fails the service at startup instead.
+/// Patterns are regexes and are left to librdkafka.
+pub(crate) fn refuse_illegal_topics(reader: &Reader) -> Result<(), KafkaError> {
+    let illegal = match reader {
+        Reader::Subscribed(names) => names
+            .iter()
+            .find(|name| !name.starts_with('^') && !legal_topic(name)),
+        Reader::Assigned { topic, .. } => Some(topic).filter(|topic| !legal_topic(topic)),
+    };
+    illegal.map_or(Ok(()), |topic| {
+        Err(KafkaError::subscribe(RdKafkaError::Subscription(format!(
+            "{topic:?} is not a legal Kafka topic name"
+        ))))
+    })
 }
 
 /// A descriptor resolved into what opening a consumer needs, with nothing left to validate.
@@ -205,4 +238,17 @@ pub(crate) fn reject_empty(name: &str) -> Result<(), KafkaError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topic_names_follow_kafkas_rule() {
+        assert!(legal_topic("orders.eu-1_v2"));
+        for bad in ["", ".", "..", "orders eu", "orders/eu", &"x".repeat(250)] {
+            assert!(!legal_topic(bad), "{bad:?} must be refused");
+        }
+    }
 }

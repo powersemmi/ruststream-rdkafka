@@ -27,7 +27,7 @@ use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Subs
 use ruststream_rdkafka::avro::AvroCodec;
 use ruststream_rdkafka::{
     ConnectedKafkaBroker, KafkaBroker, KafkaPublish, KafkaTopic, MissingSubject, SchemaFramed,
-    SchemaPrefetch, SchemaRegistry, StartOffset,
+    SchemaPrefetch, SchemaRegistry, SchemaType, StartOffset,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -74,7 +74,8 @@ impl<T> Probe<T> {
 
     fn record(&self, value: T) {
         self.seen.lock().expect("probe mutex poisoned").push(value);
-        self.done.notify_waiters();
+        // A stored permit: the record may arrive before the test starts waiting for it.
+        self.done.notify_one();
     }
 }
 
@@ -90,24 +91,24 @@ struct JsonApp {
 
 // The handler is an ordinary handler over an ordinary struct: the codec put the schema in the
 // pipeline, so nothing about Avro reaches this signature.
-#[subscriber(
-    KafkaTopic::new(std::env::var("CODEC_AVRO_TOPIC").expect("topic env"))
-        .group(std::env::var("CODEC_AVRO_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaTopic)]
 async fn take_order(order: &OrderV2, State(probe): State<Probe<OrderV2>>) -> HandlerOutcome {
     probe.record(order.clone());
     HandlerOutcome::ack()
 }
 
-#[subscriber(
-    KafkaTopic::new(std::env::var("CODEC_JSON_TOPIC").expect("topic env"))
-        .group(std::env::var("CODEC_JSON_GROUP").expect("group env"))
-        .start(StartOffset::Earliest)
-)]
+#[subscriber(KafkaTopic)]
 async fn take_json(order: &JsonOrder, State(probe): State<Probe<JsonOrder>>) -> HandlerOutcome {
     probe.record(order.clone());
     HandlerOutcome::ack()
+}
+
+/// The subscription every live test here reads through: the run's own topic and group, from the
+/// start of the log.
+fn from_earliest(topic: &str, group: &str) -> KafkaTopic {
+    KafkaTopic::new(topic)
+        .group(group)
+        .start(StartOffset::Earliest)
 }
 
 fn unique(base: &str) -> String {
@@ -180,10 +181,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
         return;
     };
     let topic = unique("codec-avro");
-    unsafe {
-        std::env::set_var("CODEC_AVRO_TOPIC", &topic);
-        std::env::set_var("CODEC_AVRO_GROUP", unique("codec-avro-group"));
-    }
+    let group = unique("codec-avro-group");
     let marker = i64::from(std::process::id()) * 1000 + 11;
 
     // One subject, two versions. The second is accepted because adding a field with a default is
@@ -229,7 +227,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
     let app = RustStream::new(AppInfo::new("codec-avro", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_order);
+            b.include(take_order.map_source(|_| from_earliest(&topic, &group)));
         });
 
     let done = Arc::clone(&probe.done);
@@ -289,10 +287,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
         return;
     };
     let topic = unique("codec-json");
-    unsafe {
-        std::env::set_var("CODEC_JSON_TOPIC", &topic);
-        std::env::set_var("CODEC_JSON_GROUP", unique("codec-json-group"));
-    }
+    let group = unique("codec-json-group");
     let marker = i64::from(std::process::id()) * 1000 + 13;
 
     let subject = unique("codec-json-orders");
@@ -342,7 +337,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
     let app = RustStream::new(AppInfo::new("codec-json", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(JsonApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_json);
+            b.include(take_json.map_source(|_| from_earliest(&topic, &group)));
         });
 
     let done = Arc::clone(&probe.done);
@@ -480,4 +475,75 @@ async fn live_a_drifted_model_is_caught_at_connect() {
         .shutdown()
         .await
         .expect("shutdown");
+}
+
+/// Sets `subject`'s compatibility level, which the registry facade has no call for because a
+/// service never needs one.
+async fn set_level(registry: &str, subject: &str, level: &str) {
+    reqwest::Client::new()
+        .put(format!("{registry}/config/{subject}"))
+        .json(&serde_json::json!({ "compatibility": level }))
+        .send()
+        .await
+        .expect("reach the registry")
+        .error_for_status()
+        .expect("the registry takes the level");
+}
+
+/// Under a transitive level the startup check asks what registration would: every version the
+/// level names, not only the latest. The model is compatible with version 3 and not with
+/// version 1, so the registry refuses to register it, and connect must refuse too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_a_transitive_level_checks_the_whole_history_at_connect() {
+    let Some((registry, kafka)) = live_urls() else {
+        return;
+    };
+    let subject = unique("codec-transitive");
+    // The history is written under NONE: version 2 changes the type of `id`, which no level
+    // but NONE lets through. Versions 2 and 3 agree with each other in both directions.
+    set_level(&registry, &subject, "NONE").await;
+    let client = SchemaRegistry::new(&registry);
+    for fields in [
+        r#"{"name":"id","type":"long"},{"name":"item","type":"string"}"#,
+        r#"{"name":"id","type":"string"},{"name":"item","type":"string"},
+           {"name":"note","type":"string","default":"none"}"#,
+        r#"{"name":"id","type":"string"},{"name":"item","type":"string"},
+           {"name":"note","type":"string","default":"none"},
+           {"name":"tag","type":"string","default":""}"#,
+    ] {
+        let schema = format!(r#"{{"type":"record","name":"CodecOrder","fields":[{fields}]}}"#);
+        client
+            .register(&subject, SchemaType::Avro, schema)
+            .await
+            .expect("register a version of the history");
+    }
+    set_level(&registry, &subject, "FULL_TRANSITIVE").await;
+
+    // The registry itself refuses the model: this is the answer the check must agree with.
+    let refused = client
+        .register(
+            &subject,
+            SchemaType::Avro,
+            Drifted::get_schema().canonical_form(),
+        )
+        .await
+        .expect_err("version 1 makes the model incompatible under FULL_TRANSITIVE");
+    assert!(refused.to_string().contains("409"), "{refused}");
+
+    let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    let _codec = AvroCodec::registry(&prefetch).register::<Drifted>(&subject);
+    let err = KafkaBroker::new([kafka])
+        .schema_prefetch(prefetch)
+        .connect()
+        .await
+        .expect_err("a model the registry would not register must not reach a topic");
+    assert!(err.to_string().contains(&subject), "{err}");
+    assert!(
+        err.to_string().contains("not compatible"),
+        "the registry's own account travels in the error: {err}",
+    );
+    assert!(
+        err.to_string().contains("oldSchemaVersion: 1"),
+        "the version that refused is the first one, not the latest: {err}",
+    );
 }
