@@ -216,13 +216,26 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream_rdkafka::KafkaBroker;
+/// ```
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
 ///
-/// let broker = KafkaBroker::new(["localhost:9092"])
-///     .default_group("orders-svc")
-///     .config("client.id", "orders-svc");
-/// # let _ = broker;
+/// #[subscriber("orders")]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     println!("order {}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("orders-svc")
+///         .config("client.id", "orders-svc");
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+///         b.include(place);
+///     })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaBroker {
@@ -328,14 +341,28 @@ impl KafkaBroker {
     /// ```
     /// use std::time::Duration;
     ///
-    /// use ruststream_rdkafka::KafkaBroker;
+    /// use ruststream_rdkafka::prelude::*;
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Order { id: u64 }
     ///
-    /// // Members of this group run with a short session, so a departed one is gone sooner.
-    /// let broker = KafkaBroker::new(["localhost:9092"])
-    ///     .default_group("orders-svc")
-    ///     .config("session.timeout.ms", "10000")
-    ///     .assignment_timeout(Duration::from_secs(20));
-    /// # let _ = broker;
+    /// #[subscriber("orders")]
+    /// async fn place(order: &Order) -> HandlerOutcome {
+    ///     println!("order {}", order.id);
+    ///     HandlerOutcome::ack()
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     // Members of this group run with a short session, so a departed one is gone sooner
+    ///     // and startup waits less for the group to assign its partitions.
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .config("session.timeout.ms", "10000")
+    ///         .assignment_timeout(Duration::from_secs(20));
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+    ///         b.include(place);
+    ///     })
+    /// }
+    /// # let _ = app;
     /// ```
     #[must_use]
     pub fn assignment_timeout(mut self, timeout: Duration) -> Self {
@@ -578,17 +605,35 @@ impl KafkaBroker {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream::{Broker, ConnectedBroker};
-/// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+/// A backfill tool that runs outside the runtime: connect, publish, shut down, and report what
+/// the producer could not flush.
 ///
-/// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
-/// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
-/// let publisher = connected.publisher(KafkaPublish::default());
-/// let _closed = connected.shutdown().await?;
-/// # let _ = publisher;
-/// # Ok(())
-/// # }
+/// ```no_run
+/// use std::error::Error;
+///
+/// use ruststream::{Broker, ConnectedBroker};
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "orders")]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// async fn backfill(ids: &[u64]) -> Result<(), Box<dyn Error + Send + Sync>> {
+///     let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+///     let publisher = connected.publisher(Publish::default());
+///     for &id in ids {
+///         publisher.message(&Order { id }).publish().await?;
+///     }
+///     let closed = connected.shutdown().await?;
+///     if closed.unflushed_records() > 0 {
+///         eprintln!("{} records were not flushed", closed.unflushed_records());
+///     }
+///     Ok(())
+/// }
+/// # let _ = backfill;
 /// ```
 #[derive(Debug)]
 pub struct ConnectedKafkaBroker {
@@ -605,15 +650,30 @@ impl ConnectedKafkaBroker {
     /// # Examples
     ///
     /// ```no_run
-    /// use ruststream::Broker;
-    /// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+    /// use std::error::Error;
+    /// use std::time::Duration;
     ///
-    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
-    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
-    /// let publisher = connected.publisher(KafkaPublish::default());
-    /// # let _ = publisher;
-    /// # Ok(())
-    /// # }
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::prelude::*;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize, Outgoing)]
+    /// #[outgoing(name = "prices")]
+    /// struct Price {
+    ///     sku: String,
+    ///     cents: u64,
+    /// }
+    ///
+    /// async fn publish_prices(prices: &[Price]) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ///     let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    ///     let policy = Publish::default().queue_timeout(Duration::from_secs(5));
+    ///     let publisher = connected.publisher(policy);
+    ///     for price in prices {
+    ///         publisher.message(price).publish().await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// # let _ = publish_prices;
     /// ```
     #[must_use]
     pub fn publisher(&self, policy: KafkaPublish) -> KafkaPublisher {
@@ -637,18 +697,32 @@ impl ConnectedKafkaBroker {
     ///
     /// # Examples
     ///
+    /// An audit tool that tails a topic outside the runtime, acknowledging each record once it
+    /// is written down:
+    ///
     /// ```no_run
-    /// use ruststream::Broker;
+    /// use std::error::Error;
+    /// use std::pin::pin;
+    ///
+    /// use futures::StreamExt;
+    /// use ruststream::{Broker, IncomingMessage, Subscriber};
     /// use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
     ///
-    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
-    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
-    /// let subscriber = connected
-    ///     .subscribe_with(KafkaTopic::new("orders").group("orders-svc"))
-    ///     .await?;
-    /// # let _ = subscriber;
-    /// # Ok(())
-    /// # }
+    /// async fn tail() -> Result<(), Box<dyn Error + Send + Sync>> {
+    ///     let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    ///     let mut orders = connected
+    ///         .subscribe_with(KafkaTopic::new("orders").group("orders-audit"))
+    ///         .await?;
+    ///     let mut records = pin!(orders.stream());
+    ///     while let Some(record) = records.next().await {
+    ///         let record = record?;
+    ///         let (partition, offset) = (record.partition(), record.offset());
+    ///         println!("{partition}@{offset}: {} bytes", record.payload().len());
+    ///         record.ack().await?;
+    ///     }
+    ///     Ok(())
+    /// }
+    /// # let _ = tail;
     /// ```
     pub fn subscribe_with<Source>(
         &self,

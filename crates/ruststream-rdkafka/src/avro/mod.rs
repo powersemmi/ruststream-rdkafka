@@ -151,23 +151,33 @@ fn downcast<T: AvroSchema + 'static>(
 ///
 /// # Examples
 ///
+/// An export tool writing one bare datum per file, reusing one buffer for all of them:
+///
 /// ```
+/// use std::error::Error;
+/// use std::fs;
+/// use std::path::Path;
+///
 /// use apache_avro::AvroSchema;
 /// use ruststream::BytesMut;
-/// use serde::{Deserialize, Serialize};
+/// use ruststream_rdkafka::avro;
+/// use serde::Serialize;
 ///
-/// #[derive(Serialize, Deserialize, AvroSchema)]
+/// #[derive(Serialize, AvroSchema)]
 /// struct Order {
 ///     id: i64,
 /// }
 ///
-/// # fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut buf = BytesMut::new();
-/// ruststream_rdkafka::avro::encode(&Order { id: 7 }, &mut buf)?;
-/// assert_eq!(&buf[..], &[14]); // one zigzag varint
-/// # Ok(())
-/// # }
-/// # check().unwrap();
+/// fn export(orders: &[Order], dir: &Path) -> Result<(), Box<dyn Error>> {
+///     let mut buf = BytesMut::new();
+///     for order in orders {
+///         buf.clear();
+///         avro::encode(order, &mut buf)?;
+///         fs::write(dir.join(format!("{}.avro", order.id)), &buf)?;
+///     }
+///     Ok(())
+/// }
+/// # let _ = export;
 /// ```
 pub fn encode<T>(value: &T, buf: &mut BytesMut) -> Result<(), KafkaError>
 where
@@ -196,25 +206,29 @@ where
 ///
 /// # Examples
 ///
-/// ```
-/// use apache_avro::AvroSchema;
-/// use ruststream::BytesMut;
-/// use serde::{Deserialize, Serialize};
+/// An inspection tool printing an exported datum:
 ///
-/// #[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
+/// ```
+/// use std::error::Error;
+/// use std::fs;
+/// use std::path::Path;
+///
+/// use apache_avro::AvroSchema;
+/// use ruststream_rdkafka::avro;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize, AvroSchema)]
 /// struct Order {
 ///     id: i64,
 /// }
 ///
-/// # fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut buf = BytesMut::new();
-/// ruststream_rdkafka::avro::encode(&Order { id: 7 }, &mut buf)?;
-///
-/// let back: Order = ruststream_rdkafka::avro::decode(&buf)?;
-/// assert_eq!(back, Order { id: 7 });
-/// # Ok(())
-/// # }
-/// # check().unwrap();
+/// fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
+///     let datum = fs::read(path)?;
+///     let order: Order = avro::decode(&datum)?;
+///     println!("{}: order {}", path.display(), order.id);
+///     Ok(())
+/// }
+/// # let _ = inspect;
 /// ```
 pub fn decode<T>(payload: &[u8]) -> Result<T, KafkaError>
 where

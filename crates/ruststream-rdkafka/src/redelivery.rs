@@ -38,7 +38,7 @@ use crate::context::keys::Topic;
 ///
 /// /// Reading the source topic is also what puts the Kafka context on this registration, which
 /// /// is what the transform reads.
-/// #[ruststream::subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
+/// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
 /// async fn place(order: &Order, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
 ///     println!("order {} from {topic}", order.id);
 ///     HandlerOutcome::ack()

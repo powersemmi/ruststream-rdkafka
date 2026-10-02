@@ -483,18 +483,43 @@ prelude plus this crate's broker, descriptors and their settings, publish polici
 concept names, the per-delivery context keys, and the capability traits a handler names.
 
 ```
+# #[cfg(feature = "json")]
+# mod demo {
 use ruststream_rdkafka::prelude::*;
+use serde::{Deserialize, Serialize};
 
-let orders = KafkaTopic::new("orders")
-    .group("orders-svc")
-    .commit(Commit::Tracked)
-    .start(StartOffset::Earliest);
+#[derive(Deserialize)]
+struct Order {
+    id: u64,
+}
 
-let replies = Publish::default();
-let lines: TransactionalPublish = Publish::default().transactional_id("refunds-svc-1");
-let lanes: PartitionedPublish = lines.clone().per_partition();
-let pipeline = EosPublish::new("enrich-svc-1");
-# let _ = (orders, replies, lanes, pipeline);
+#[derive(Serialize, Outgoing)]
+#[outgoing(name = "confirmations")]
+struct Confirmation {
+    id: u64,
+}
+
+#[subscriber(
+    KafkaTopic::new("orders")
+        .group("orders-svc")
+        .commit(Commit::Tracked)
+        .start(StartOffset::Earliest),
+    publish
+)]
+async fn confirm(order: &Order) -> Confirmation {
+    Confirmation { id: order.id }
+}
+
+fn app() -> RustStream {
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+        KafkaBroker::new(["localhost:9092"]),
+        |b| {
+            b.include(confirm).out_reply(Publish::default());
+        },
+    )
+}
+# }
+# fn main() {}
 ```
 
 A handler body imports the framework prelude and bounds an injected slot with the capability it
@@ -534,6 +559,8 @@ the same test body against a running Kafka. The harness's usage is the core's:
 ```
 # #[cfg(all(feature = "json", feature = "testing"))]
 # mod demo {
+use std::error::Error;
+
 use ruststream::testing::TestApp;
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -562,7 +589,7 @@ pub fn app() -> RustStream {
     )
 }
 
-pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn Error>> {
     let tb = TestApp::start(app()).await?;
 
     // The publish returns once the handler it woke has settled.
@@ -573,7 +600,7 @@ pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn std::error::Error>
 
     tb.broker::<KafkaBroker>()
         .subscriber("payments")
-        .assert_called_once()
+        .assert_called(1)
         .with(&Payment { amount: 0 })
         .settled(HandlerOutcome::drop());
 
