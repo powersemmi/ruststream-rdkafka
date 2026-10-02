@@ -25,7 +25,7 @@ testing = ["ruststream-rdkafka/testing"]
 # enables `ruststream/testing`, and a benchmark inside that package would be built against it.
 [dev-dependencies]
 # The code-cost benchmarks: callgrind and DHAT through the runner the core pins.
-gungraun = "=0.19.4"
+gungraun = "=0.20.0"
 ruststream-rdkafka.workspace = true
 ruststream = { workspace = true, features = ["macros", "json"] }
 rdkafka.workspace = true
