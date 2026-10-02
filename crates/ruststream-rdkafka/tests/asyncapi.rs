@@ -104,7 +104,7 @@ fn a_partition_reader_describes_the_topic_it_reads() {
     );
 }
 
-/// A reply that leaves its destination open, so the mount site's `publish("dest")` clause names
+/// A reply that leaves its destination open, so the mount site's `reply("dest")` clause names
 /// the topic it goes to.
 #[derive(Debug, Serialize, Outgoing)]
 struct Confirmation {
@@ -122,13 +122,13 @@ struct Shipment {
 #[publishes(Shipment)]
 struct Shipments;
 
-#[subscriber("placed", publish("confirmations"))]
+#[subscriber("placed", reply("confirmations"))]
 async fn place(order: &Order, Out(_shipments): Out<impl Publisher, Shipments>) -> Confirmation {
     Confirmation { id: order.id }
 }
 
 /// A publish policy holds producer settings and never a topic, so the topic a published channel
-/// stands for is the destination the mount site resolved: the `publish("dest")` clause for the
+/// stands for is the destination the mount site resolved: the `reply("dest")` clause for the
 /// reply, the message's own `#[outgoing(name)]` for the slot.
 #[test]
 fn a_published_channel_reports_the_topic_it_publishes_to() {

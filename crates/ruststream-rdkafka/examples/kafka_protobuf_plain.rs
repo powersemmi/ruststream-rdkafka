@@ -51,7 +51,7 @@ struct Confirmation {
 // --8<-- [start:handler]
 // An ordinary function over ordinary types: nothing about the wire in the signature, and no
 // publish call. The delivery arrived past its envelope, and the reply leaves before one.
-#[subscriber("orders", publish)]
+#[subscriber("orders", reply)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
         id: order.id,

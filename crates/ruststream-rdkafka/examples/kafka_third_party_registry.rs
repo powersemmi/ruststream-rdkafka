@@ -58,7 +58,7 @@ struct Orders {
 // --8<-- [end:state]
 
 // --8<-- [start:handler]
-#[subscriber("orders", publish("confirmations"))]
+#[subscriber("orders", reply("confirmations"))]
 async fn relay(
     framed: &Framed<'_>,
     State(registry): State<Registry>,

@@ -164,7 +164,7 @@ struct Origin {
     topic: String,
 }
 
-#[subscriber(KafkaTopics::new(["origin-eu", "origin-us"]).group("origins"), publish("origins"))]
+#[subscriber(KafkaTopics::new(["origin-eu", "origin-us"]).group("origins"), reply("origins"))]
 async fn name_a_listed_topic(order: &Order, ctx: &mut Context<'_, KafkaContext>) -> Origin {
     let _ = order;
     Origin {
@@ -172,7 +172,7 @@ async fn name_a_listed_topic(order: &Order, ctx: &mut Context<'_, KafkaContext>)
     }
 }
 
-#[subscriber(KafkaTopic::new("origin-one").group("origins"), publish("origins"))]
+#[subscriber(KafkaTopic::new("origin-one").group("origins"), reply("origins"))]
 async fn name_the_one_topic(order: &Order, ctx: &mut Context<'_, KafkaContext>) -> Origin {
     let _ = order;
     Origin {
@@ -416,7 +416,7 @@ struct PlanItem {
     order_id: u64,
 }
 
-#[subscriber("keyed-orders", publish("keyed-items"))]
+#[subscriber("keyed-orders", reply("keyed-items"))]
 async fn plan_keyed(order: &PlanOrder) -> PlanItem {
     PlanItem { order_id: order.id }
 }
@@ -477,12 +477,12 @@ struct Acknowledgement {
     id: u64,
 }
 
-#[subscriber("receipt-requests", publish)]
+#[subscriber("receipt-requests", reply)]
 async fn issue_receipt(req: &ReceiptRequest) -> Receipt {
     Receipt { id: req.id }
 }
 
-#[subscriber("ack-requests", publish("acknowledgements"))]
+#[subscriber("ack-requests", reply("acknowledgements"))]
 async fn acknowledge(req: &ReceiptRequest) -> Acknowledgement {
     Acknowledgement { id: req.id }
 }

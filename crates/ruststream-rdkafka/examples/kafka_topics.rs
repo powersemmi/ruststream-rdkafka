@@ -35,7 +35,7 @@ struct Confirmation {
         .commit(Commit::Tracked)
         .assignment(Assignment::CooperativeSticky)
         .config("fetch.min.bytes", "1024"),
-    publish
+    reply
 )]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {

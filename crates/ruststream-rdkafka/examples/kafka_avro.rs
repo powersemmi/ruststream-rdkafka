@@ -39,7 +39,7 @@ struct Confirmation {
 // --8<-- [start:handler]
 // An ordinary handler on the default JSON codec: the middleware already converted the Avro
 // datum to JSON on the way in, and converts the reply back to Avro on the way out.
-#[subscriber("orders", publish)]
+#[subscriber("orders", reply)]
 async fn confirm(order: &Order) -> Confirmation {
     let _ = &order.item;
     Confirmation {

@@ -76,7 +76,7 @@ struct Confirmation {
 
 #[subscriber(
     KafkaTopic::new("orders").commit(Commit::Tracked),
-    publish("confirmations")
+    reply("confirmations")
 )]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation { id: order.id }

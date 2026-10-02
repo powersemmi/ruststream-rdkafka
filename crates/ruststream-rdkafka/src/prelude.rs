@@ -49,7 +49,7 @@
 //!     KafkaTopic::new("orders")
 //!         .commit(Commit::Tracked)
 //!         .start(StartOffset::Earliest),
-//!     publish
+//!     reply
 //! )]
 //! async fn confirm(order: &Order) -> Confirmation {
 //!     Confirmation { id: order.id }

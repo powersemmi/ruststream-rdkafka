@@ -427,7 +427,7 @@ async fn live_registry_roundtrips_register_warm_and_fetch() {
     assert_eq!(by_id.definition(), latest.definition());
 }
 
-/// The fixed reply topic of the live framing test: the macro's `publish(..)` takes a string
+/// The fixed reply topic of the live framing test: the macro's `reply(..)` takes a string
 /// literal, so runs share it and pick their own messages out by a unique marker id.
 const FRAMED_TOPIC: &str = "sr-json-frames-placeholder";
 
@@ -440,7 +440,7 @@ struct SrOrder {
 
 // The producing side of the live test: a plain publishing handler; the app's `SchemaFrame`
 // publish layer frames its replies for the wire.
-#[subscriber(KafkaTopic, publish("sr-json-frames-placeholder"))]
+#[subscriber(KafkaTopic, reply("sr-json-frames-placeholder"))]
 async fn relay(order: &SrOrder) -> SrOrder {
     order.clone()
 }

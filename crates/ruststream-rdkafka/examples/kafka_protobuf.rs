@@ -47,7 +47,7 @@ struct Confirmation {
 // --8<-- [end:types]
 
 // An ordinary handler on the default JSON codec: the middleware converts both directions.
-#[subscriber("orders", publish)]
+#[subscriber("orders", reply)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
         id: order.id,

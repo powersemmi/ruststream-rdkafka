@@ -23,7 +23,7 @@ use tokio::sync::Notify;
 
 mod live;
 
-/// The fixed reply topic (the macro's `publish(..)` takes a string literal). Runs share it:
+/// The fixed reply topic (the macro's `reply(..)` takes a string literal). Runs share it:
 /// each pins its own uniquely-named subject on the `SchemaFrame`, so its messages carry a
 /// schema id no other run has, and the probe filters deliveries by a marker id range.
 const FRAMED_TOPIC: &str = "proto-mw-frames-placeholder";
@@ -51,7 +51,7 @@ struct ProtoApp {
 
 // The producing side: plain JSON through the pipeline; the SchemaFrame layer serializes the
 // reply as the pinned Protobuf message under this run's subject.
-#[subscriber(KafkaTopic, publish("proto-mw-frames-placeholder"))]
+#[subscriber(KafkaTopic, reply("proto-mw-frames-placeholder"))]
 async fn proto_relay(order: &Order) -> Order {
     order.clone()
 }

@@ -262,7 +262,7 @@ struct PipelineInner {
 ///     KafkaTopic::new("raw-orders")
 ///         .group("enrich-svc")
 ///         .commit(Commit::Transactional("enrich-1".into())),
-///     publish("enriched-orders")
+///     reply("enriched-orders")
 /// )]
 /// async fn enrich(order: &Order) -> Order {
 ///     order.clone()

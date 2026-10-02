@@ -35,7 +35,7 @@ pub struct Confirmation {
 
 /// Confirms an incoming order and publishes a `Confirmation` to the `confirmations` topic.
 ///
-/// The `publish` clause makes the runtime encode the `Ok` value and publish it through the
+/// The `reply` clause makes the runtime encode the `Ok` value and publish it through the
 /// publisher wired in `routes`, at the topic the reply type declares; an `Err` settles the
 /// delivery by its `HandlerOutcome` instead.
 ///
@@ -43,7 +43,7 @@ pub struct Confirmation {
 /// republishes the delivery to the `orders` topic with the retry count incremented, and the cap
 /// declared in `routes` is what ends a message that never settles. `drop()` takes the
 /// dead-letter path at once.
-#[subscriber(KafkaTopic::new("orders").commit(Commit::Tracked), publish)]
+#[subscriber(KafkaTopic::new("orders").commit(Commit::Tracked), reply)]
 pub async fn confirm(order: &Order) -> Result<Confirmation, HandlerOutcome> {
     if order.quantity == 0 {
         // Malformed input is not worth retrying: drop() dead-letters it right away.
