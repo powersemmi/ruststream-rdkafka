@@ -193,7 +193,7 @@ async fn an_exactly_once_reply_costs_nothing_for_its_headers() {
 
     // A commit interval longer than the test, so no window closes between the two measurements.
     let pipeline = KafkaEosPublish::new(&pipeline_id)
-        .commit_interval(Duration::from_secs(600))
+        .commit_interval(Duration::from_mins(10))
         .pair(&broker)
         .await
         .expect("pair the pipeline");

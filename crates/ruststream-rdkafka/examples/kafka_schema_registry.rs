@@ -36,7 +36,7 @@ struct Confirmation {
 // --8<-- [start:handler]
 // An ordinary handler on the default JSON codec: the broker middleware already stripped the
 // Confluent envelope (and, with the avro/protobuf features, converted the datum to JSON).
-#[subscriber("orders", publish)]
+#[subscriber("orders", reply)]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation {
         id: order.id,

@@ -63,7 +63,7 @@ impl FromRef<Orders> for Seen {
 }
 
 // --8<-- [start:manual]
-/// The definition value `#[subscriber("orders", publish("confirmations"))]` would have minted.
+/// The definition value `#[subscriber("orders", reply("confirmations"))]` would have minted.
 struct Confirm;
 
 // The input axis is the generated message, the reply axis is the generated message, and neither

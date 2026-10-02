@@ -27,8 +27,8 @@ A minimal service is one handler and one app function:
   the broker's `default_group`.
 - The name an outgoing message declares is the destination topic. A reply type that declares
   `#[outgoing(name = "confirmations")]` is published to `confirmations`, and the subscriber
-  writes the bare `publish` clause. A reply type that declares no name is published to the topic
-  the mount site names, `publish("enriched-orders")`. A partition-key header becomes the record's
+  writes the bare `reply` clause. A reply type that declares no name is published to the topic
+  the mount site names, `reply("enriched-orders")`. A partition-key header becomes the record's
   native key, so Kafka itself keeps per-key ordering (see [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing)).
 - Settlement follows Kafka's committed position rather than a per-message frame. `Commit::Auto`,
   the default, leaves that position to librdkafka's auto-commit; `Commit::Tracked` makes each
@@ -115,7 +115,7 @@ schema id rides in the payload under the Confluent encoding, under the subject i
 strategy found.
 
 A channel the service publishes to reports its topic too. That topic is the destination the mount
-site resolved: a registration's `publish("dest")` clause, the reply type's own
+site resolved: a registration's `reply("dest")` clause, the reply type's own
 `#[outgoing(name)]`, the name of a slot entry, a declared dead-letter topic. A publish policy
 carries producer settings and no destination, so it has no topic of its own to report.
 

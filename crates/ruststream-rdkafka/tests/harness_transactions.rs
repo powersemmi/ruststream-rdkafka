@@ -204,7 +204,7 @@ struct Enriched {
 
 #[subscriber(
     KafkaTopic::new("eos-in").commit(Commit::Transactional("enrich-1".to_owned())),
-    publish("eos-out")
+    reply("eos-out")
 )]
 async fn enrich(order: &Order) -> Enriched {
     Enriched {

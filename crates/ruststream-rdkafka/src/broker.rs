@@ -200,7 +200,7 @@ const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// (librdkafka's `session.timeout.ms`, 45 seconds by default) expires before the group
 /// rebalances, and a new group waits the coordinator's initial rebalance delay (three seconds
 /// by default) before its first one.
-const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// An Apache Kafka broker backed by [`rdkafka`](https://docs.rs/rdkafka) / librdkafka.
 ///

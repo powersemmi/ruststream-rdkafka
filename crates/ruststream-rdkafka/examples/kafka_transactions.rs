@@ -127,7 +127,7 @@ async fn bill(
     KafkaTopic::new("raw-orders")
         .group("enrich-svc")
         .commit(Commit::Transactional("enrich-svc-1".into())),
-    publish("enriched-orders"),
+    reply("enriched-orders"),
     workers(4, by_key)
 )]
 async fn enrich(order: &Order) -> Order {

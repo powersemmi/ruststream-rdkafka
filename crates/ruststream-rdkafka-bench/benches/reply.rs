@@ -33,7 +33,7 @@ struct Confirmation {
     KafkaTopic::new(common::topic())
         .group(common::group())
         .start(StartOffset::Earliest),
-    publish
+    reply
 )]
 async fn confirm(order: &Order, ctx: &mut Context<'_, (), Latch>) -> Confirmation {
     ctx.state().arrived();

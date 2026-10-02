@@ -146,7 +146,7 @@ pub trait SchemaCache: Send + Sync + 'static {
 /// # #[derive(serde::Serialize, Outgoing)]
 /// # #[outgoing(name = "confirmations")]
 /// # struct Confirmation { id: u64 }
-/// # #[subscriber("orders", publish)]
+/// # #[subscriber("orders", reply)]
 /// # async fn confirm(order: &Order) -> Confirmation {
 /// #     Confirmation { id: order.id }
 /// # }

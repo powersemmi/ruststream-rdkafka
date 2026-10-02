@@ -22,7 +22,7 @@ use tokio::sync::Notify;
 
 mod live;
 
-/// The fixed reply topic (the macro's `publish(..)` takes a string literal). Runs share it:
+/// The fixed reply topic (the macro's `reply(..)` takes a string literal). Runs share it:
 /// each pins its own uniquely-named subject on the `SchemaFrame`, so its messages carry a
 /// schema id no other run has, and the probe filters deliveries by a marker id range.
 const FRAMED_TOPIC: &str = "avro-mw-frames-placeholder";
@@ -50,7 +50,7 @@ struct AvroApp {
 
 // The producing side: plain JSON through the pipeline; the SchemaFrame layer transcodes the
 // reply to an Avro datum under this run's subject.
-#[subscriber(KafkaTopic, publish("avro-mw-frames-placeholder"))]
+#[subscriber(KafkaTopic, reply("avro-mw-frames-placeholder"))]
 async fn avro_relay(order: &Order) -> Order {
     order.clone()
 }

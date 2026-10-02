@@ -281,7 +281,7 @@ Where a policy is named:
 - [`ConnectedKafkaBroker::publisher`] - outside the runtime, on a broker you connected yourself.
 
 A reply type declares where it goes: `#[outgoing(name = "confirmations")]` on the type plus a
-bare `publish` clause on the subscriber, or no name on the type and `publish("confirmations")`
+bare `reply` clause on the subscriber, or no name on the type and `reply("confirmations")`
 at the mount site. Kafka has no reply correlation, so this crate implements no request/reply
 capability; a synchronous exchange is a reply topic of your own plus a correlation header.
 
@@ -504,7 +504,7 @@ struct Confirmation {
         .group("orders-svc")
         .commit(Commit::Tracked)
         .start(StartOffset::Earliest),
-    publish
+    reply
 )]
 async fn confirm(order: &Order) -> Confirmation {
     Confirmation { id: order.id }
@@ -536,7 +536,7 @@ bootstrap addresses reach the document as bare `host:port` coordinates, with the
 userinfo stripped, for the reason a registry URL does - the document is published and shared.
 
 A channel the service publishes to reports its topic too, and that topic is the destination the
-mount site resolved: a registration's `publish("dest")` clause, a reply type's own
+mount site resolved: a registration's `reply("dest")` clause, a reply type's own
 `#[outgoing(name)]`, the name of a slot entry, a declared dead-letter topic. A publish policy
 carries producer settings and no destination, so it has none of its own to report.
 

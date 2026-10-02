@@ -25,8 +25,8 @@ serde = { version = "1", features = ["derive"] }
 - 一次订阅就是一个消费者读一个主题。[`KafkaTopic`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) 描述它，消费者组也在其中；
   光写字符串的 `#[subscriber("orders")]` 形态，从 Broker 的 `default_group` 取消费者组。
 - 出站消息声明的名字就是目的主题。声明了 `#[outgoing(name = "confirmations")]` 的回复类型发往
-  `confirmations`，订阅者只写不带名字的 `publish`。没有声明名字的回复类型，发往挂载点指定的主题，
-  也就是 `publish("enriched-orders")`。分区键消息头成为记录的原生 key，因此按键的顺序由 Kafka
+  `confirmations`，订阅者只写不带名字的 `reply`。没有声明名字的回复类型，发往挂载点指定的主题，
+  也就是 `reply("enriched-orders")`。分区键消息头成为记录的原生 key，因此按键的顺序由 Kafka
   自己保证（参见[发布](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing)）。
 - 结算跟随 Kafka 已提交的位置，而不是逐条消息的一个帧。默认的 `Commit::Auto` 把这个位置交给
   librdkafka 的自动提交；`Commit::Tracked` 让每次 `ack` 都成为一次精确的单条确认，落在一条连续的
@@ -106,7 +106,7 @@ ruststream-rdkafka = { version = "0.7", features = ["asyncapi"] }
 里，subject 由它的命名策略找出。
 
 服务发布过去的 channel 也报告自己的主题。这个主题就是挂载点解析出的目的地：注册上的
-`publish("dest")` 从句、回复类型自己的 `#[outgoing(name)]`、槽位条目的名字、声明的死信主题。发布
+`reply("dest")` 从句、回复类型自己的 `#[outgoing(name)]`、槽位条目的名字、声明的死信主题。发布
 策略带的是生产者设置，不带目的地，所以它没有自己的主题可报。
 
 Registry 的地址进入文档时会去掉用户信息，理由和 bootstrap 地址一样 - 文档会被发布、被转手，而进入

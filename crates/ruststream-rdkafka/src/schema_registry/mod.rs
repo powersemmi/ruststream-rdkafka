@@ -73,7 +73,7 @@
 //!     pub id: i64,
 //! }
 //!
-//! #[subscriber("orders", publish)]
+//! #[subscriber("orders", reply)]
 //! async fn confirm(order: &Order) -> Confirmation {
 //!     Confirmation { id: order.id }
 //! }
@@ -968,7 +968,7 @@ fn outgoing_json_to_datum(
 ///     order_id: i64,
 /// }
 ///
-/// #[subscriber("orders", publish)]
+/// #[subscriber("orders", reply)]
 /// async fn ship(order: &Order) -> Shipment {
 ///     Shipment { order_id: order.id }
 /// }
@@ -1277,7 +1277,7 @@ impl SchemaPrefetch {
 ///     order_id: i64,
 /// }
 ///
-/// #[subscriber("orders", publish)]
+/// #[subscriber("orders", reply)]
 /// async fn invoice(order: &Invoice) -> Invoice {
 ///     Invoice { order_id: order.order_id }
 /// }
@@ -1575,7 +1575,7 @@ impl SubjectMap {
 /// }
 ///
 /// /// Returns plain JSON; the layer frames it for `confirmations-value` on the way out.
-/// #[subscriber("orders", publish)]
+/// #[subscriber("orders", reply)]
 /// async fn confirm(order: &Order) -> Confirmation {
 ///     Confirmation { id: order.id }
 /// }

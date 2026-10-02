@@ -120,7 +120,7 @@ async fn scan_topic(
 /// path on outgoing publishes. The handler is then an ordinary function over ordinary types,
 /// which is what the Avro codec already gave Avro.
 ///
-/// The reply leaves through an `Out` slot rather than a `publish(..)` clause, because the core
+/// The reply leaves through an `Out` slot rather than a `reply(..)` clause, because the core
 /// routes a byte-for-byte *reply* around the app's publish pipeline by design (`RawReplyRoute`:
 /// "the pipeline travels along for shape, though a byte-for-byte reply never runs it"), while a
 /// slot publishes through it. Nothing in the handler serializes anything either way.
@@ -441,7 +441,7 @@ mod plain_reply {
         KafkaBroker, KafkaPublish, KafkaTopic, SchemaRegistry, SchemaType, protobuf,
     };
 
-    /// The reply topic, fixed because the macro's `publish(..)` takes a string literal.
+    /// The reply topic, fixed because the macro's `reply(..)` takes a string literal.
     const REPLY_TOPIC: &str = "proto-reply-confirmations-placeholder";
 
     /// Neither message is declared first, so a compact single-zero path would hide a wrong one.
@@ -483,7 +483,7 @@ message Confirmation {
     }
 
     // The reply carries its encode half and an `Outgoing` derive that names nothing, so the
-    // address comes from the `publish(..)` clause below.
+    // address comes from the `reply(..)` clause below.
     #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
     #[wire(encode = ::prost::Message::encode)]
     struct ReplyConfirmation {
@@ -494,7 +494,7 @@ message Confirmation {
     }
 
     // No slot parameter, no `.publish().await`, no error branch. The handler returns its reply.
-    #[subscriber(KafkaTopic, publish("proto-reply-confirmations-placeholder"))]
+    #[subscriber(KafkaTopic, reply("proto-reply-confirmations-placeholder"))]
     async fn confirm(order: &ReplyOrder) -> ReplyConfirmation {
         ReplyConfirmation {
             id: order.id,
@@ -611,7 +611,7 @@ message Confirmation {
         const CONFIRMATIONS_ID: u32 = 31;
         const REPLY_TOPIC: &str = "in-process-reply-confirmations";
 
-        #[subscriber("in-process-reply-orders", publish("in-process-reply-confirmations"))]
+        #[subscriber("in-process-reply-orders", reply("in-process-reply-confirmations"))]
         async fn confirm(order: &ReplyOrder) -> ReplyConfirmation {
             ReplyConfirmation {
                 id: order.id,

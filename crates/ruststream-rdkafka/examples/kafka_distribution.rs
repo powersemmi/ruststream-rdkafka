@@ -24,7 +24,7 @@ struct WorkItem {
 }
 
 // A keyless reply: nothing pins it to a partition, so distribution is the publisher's call.
-#[subscriber("orders", publish)]
+#[subscriber("orders", reply)]
 async fn plan(order: &Order) -> WorkItem {
     WorkItem { order_id: order.id }
 }

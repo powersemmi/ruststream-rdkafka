@@ -314,11 +314,11 @@ impl ProtobufFraming {
 /// this one's is "the payload is already the subject's datum, put the envelope on". Install one
 /// or the other.
 ///
-/// # The layer does not see a `publish(..)` reply
+/// # The layer does not see a `reply(..)` reply
 ///
 /// A handler's outgoing message reaches this layer when it leaves through an
 /// [`Out`](ruststream::runtime::Out) slot, and **not** when it is returned as the reply of a
-/// `publish(..)` mount. That is the core's own division rather than a gap here: a byte-for-byte
+/// `reply(..)` mount. That is the core's own division rather than a gap here: a byte-for-byte
 /// reply goes straight to its paired publisher, deliberately, so a value that owns its bytes
 /// leaves exactly as it wrote them.
 ///
@@ -464,7 +464,7 @@ impl PublishLayer for ProtobufFrame {
 ///     accepted: bool,
 /// }
 ///
-/// #[subscriber("orders", publish("confirmations"))]
+/// #[subscriber("orders", reply("confirmations"))]
 /// async fn confirm(order: &Order) -> Confirmation {
 ///     Confirmation { id: order.id, accepted: true }
 /// }
@@ -479,7 +479,7 @@ impl PublishLayer for ProtobufFrame {
 ///
 /// The handler returns its reply and nothing else: no slot parameter, no `publish().await`, no
 /// error branch in the body. The reply type declares no destination of its own - its `Outgoing`
-/// derive names nothing, so the address comes from the `publish("confirmations")` clause - and
+/// derive names nothing, so the address comes from the `reply("confirmations")` clause - and
 /// beyond that it carries only `#[derive(Serialized)]` and the encode half of `#[wire(..)]`.
 ///
 /// The same policy works wherever else one is named, an [`Out`](ruststream::runtime::Out) slot
@@ -503,7 +503,7 @@ impl PublishLayer for ProtobufFrame {
 ///
 /// On the first publish to each destination, and cached from then on. It cannot be at startup:
 /// [`PublishPolicy::pair`] is where a policy could do I/O, and the destination topic is not known
-/// there - it comes from the mount's `publish(..)` clause, or from the call site of a slot
+/// there - it comes from the mount's `reply(..)` clause, or from the call site of a slot
 /// publish, neither of which a policy is handed. So a missing subject surfaces as a failed
 /// publish rather than a failed startup, which the handler's failure policy then settles.
 #[derive(Clone, Debug)]
@@ -540,7 +540,7 @@ impl KafkaFramedPublish {
     /// #     #[prost(int64, tag = "1")]
     /// #     id: i64,
     /// # }
-    /// # #[subscriber("orders", publish)]
+    /// # #[subscriber("orders", reply)]
     /// # async fn confirm(order: &Order) -> Confirmation {
     /// #     Confirmation { id: order.id }
     /// # }

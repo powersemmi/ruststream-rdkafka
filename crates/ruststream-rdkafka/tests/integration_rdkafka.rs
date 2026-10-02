@@ -2203,7 +2203,7 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
 
 // The EOS publishing-handler sugar: a bare handler returns the reply, and the pipeline's
 // reply publisher pairs it with the consumed offset - no Ctx, no manual publish.
-#[subscriber(KafkaTopic, publish("eos-sugar-replies-placeholder"))]
+#[subscriber(KafkaTopic, reply("eos-sugar-replies-placeholder"))]
 async fn eos_sugar(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
@@ -2326,7 +2326,7 @@ impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
 
 // The round-robin cycle is a producer-side placement, and only a topic created with several
 // partitions can show where a record went, so the test creates one on the cluster.
-#[subscriber(KafkaTopic, publish("round-robin-replies-placeholder"))]
+#[subscriber(KafkaTopic, reply("round-robin-replies-placeholder"))]
 async fn spread(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
@@ -2402,7 +2402,7 @@ async fn round_robin_walks_the_partitions_of_the_reply_topic() {
 
 // The same cycle over replies that already carry a record key: keys exist for ordering, so the
 // cycle must leave the placement Kafka derives from the key alone.
-#[subscriber(KafkaTopic, publish("round-robin-keyed-replies-placeholder"))]
+#[subscriber(KafkaTopic, reply("round-robin-keyed-replies-placeholder"))]
 async fn spread_keyed(order: &OrderPayload) -> OrderPayload {
     order.clone()
 }
