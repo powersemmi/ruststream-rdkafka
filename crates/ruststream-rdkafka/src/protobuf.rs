@@ -74,26 +74,31 @@ use crate::schema_registry::{
 /// # Examples
 ///
 /// ```
-/// use ruststream::prelude::*;
+/// use ruststream_rdkafka::prelude::*;
 ///
-/// #[derive(Clone, PartialEq, prost::Message, Deserialized, Serialized)]
-/// #[wire(
-///     encode = ::prost::Message::encode,
-///     decode = ruststream_rdkafka::protobuf::decode_confluent
-/// )]
+/// /// What `prost-build` emits, plus the decode lane: deliveries arrive past their envelope.
+/// #[derive(Clone, PartialEq, prost::Message, Deserialized)]
+/// #[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
 /// struct Order {
 ///     #[prost(int64, tag = "1")]
 ///     id: i64,
 /// }
 ///
-/// # fn check() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-/// // Schema id 42, the compact `[0]` index path, then `id = 7`.
-/// let payload = [0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x08, 0x07];
-/// let order = Order::from_payload(&payload)?;
-/// assert_eq!(order.id, 7);
-/// # Ok(())
-/// # }
-/// # check().unwrap();
+/// #[subscriber("orders")]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     println!("order {}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///         |b| {
+///             b.include(place);
+///         },
+///     )
+/// }
+/// # let _ = app;
 /// ```
 pub fn decode_confluent<T: prost::Message + Default>(payload: &[u8]) -> Result<T, KafkaError> {
     match parse_envelope(payload) {
@@ -330,13 +335,49 @@ impl ProtobufFraming {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream::runtime::{AppInfo, RustStream};
+/// ```
+/// use ruststream_rdkafka::prelude::*;
 /// use ruststream_rdkafka::{ProtobufFrame, SchemaRegistry};
 ///
-/// let registry = SchemaRegistry::new("http://localhost:8081");
-/// let app = RustStream::new(AppInfo::new("orders", "1.0.0"))
-///     .publish_layer(ProtobufFrame::new(registry));
+/// #[derive(Clone, PartialEq, prost::Message, Deserialized)]
+/// #[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
+/// struct Order {
+///     #[prost(int64, tag = "1")]
+///     id: i64,
+/// }
+///
+/// #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
+/// #[wire(encode = ::prost::Message::encode)]
+/// #[outgoing(name = "audit")]
+/// struct Audit {
+///     #[prost(int64, tag = "1")]
+///     order_id: i64,
+/// }
+///
+/// #[derive(OutSlot)]
+/// #[publishes(Audit)]
+/// struct Journal;
+///
+/// /// The audit record leaves through a slot, so the app-wide layer frames it.
+/// #[subscriber("orders")]
+/// async fn place(order: &Order, Out(journal): Out<impl Publisher, Journal>) -> HandlerOutcome {
+///     if journal.message(&Audit { order_id: order.id }).publish().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> impl App {
+///     let registry = SchemaRegistry::new("http://localhost:8081");
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .publish_layer(ProtobufFrame::new(registry))
+///         .with_broker(
+///             KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///             |b| {
+///                 b.include(place).out(Journal, Publish::default()).build();
+///             },
+///         )
+/// }
 /// # let _ = app;
 /// ```
 #[derive(Clone, Debug)]
@@ -484,14 +525,40 @@ impl KafkaFramedPublish {
     /// ```
     /// use std::time::Duration;
     ///
-    /// use ruststream_rdkafka::{KafkaFramedPublish, KafkaPublish, SchemaRegistry};
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::{KafkaFramedPublish, SchemaRegistry};
+    /// # #[derive(Clone, PartialEq, prost::Message, Deserialized)]
+    /// # #[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
+    /// # struct Order {
+    /// #     #[prost(int64, tag = "1")]
+    /// #     id: i64,
+    /// # }
+    /// # #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
+    /// # #[wire(encode = ::prost::Message::encode)]
+    /// # #[outgoing(name = "confirmations")]
+    /// # struct Confirmation {
+    /// #     #[prost(int64, tag = "1")]
+    /// #     id: i64,
+    /// # }
+    /// # #[subscriber("orders", publish)]
+    /// # async fn confirm(order: &Order) -> Confirmation {
+    /// #     Confirmation { id: order.id }
+    /// # }
     ///
-    /// let registry = SchemaRegistry::new("http://localhost:8081");
-    /// let policy = KafkaFramedPublish::over(
-    ///     KafkaPublish::default().queue_timeout(Duration::from_secs(5)),
-    ///     &registry,
-    /// );
-    /// # let _ = policy;
+    /// fn app() -> RustStream {
+    ///     let registry = SchemaRegistry::new("http://localhost:8081");
+    ///     let replies = KafkaFramedPublish::over(
+    ///         Publish::default().queue_timeout(Duration::from_secs(5)),
+    ///         &registry,
+    ///     );
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+    ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+    ///         |b| {
+    ///             b.include(confirm).out_reply(replies);
+    ///         },
+    ///     )
+    /// }
+    /// # let _ = app;
     /// ```
     pub fn over(publish: KafkaPublish, registry: &SchemaRegistry) -> Self {
         Self {

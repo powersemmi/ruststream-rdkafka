@@ -250,10 +250,35 @@ struct PipelineInner {
 /// ```
 /// use std::time::Duration;
 ///
-/// use ruststream_rdkafka::KafkaEosPublish;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
 ///
-/// let policy = KafkaEosPublish::new("enrich-1").commit_interval(Duration::from_millis(50));
-/// # let _ = policy;
+/// #[derive(Clone, Serialize, Deserialize, Outgoing)]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// #[subscriber(
+///     KafkaTopic::new("raw-orders")
+///         .group("enrich-svc")
+///         .commit(Commit::Transactional("enrich-1".into())),
+///     publish("enriched-orders")
+/// )]
+/// async fn enrich(order: &Order) -> Order {
+///     order.clone()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("enrich", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]),
+///         |b| {
+///             let pipeline = EosPublish::new("enrich-1")
+///                 .commit_interval(Duration::from_millis(50));
+///             b.include(enrich).out_reply(pipeline).transform(EosReplies);
+///         },
+///     )
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]

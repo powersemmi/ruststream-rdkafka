@@ -138,37 +138,35 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 /// ```
 /// # #[cfg(feature = "json")]
 /// # mod demo {
-/// use ruststream::prelude::*;
-/// use ruststream_rdkafka::context::{KafkaBatchContext, keys::SeekHandle};
-/// use ruststream_rdkafka::{KafkaPosition, prelude::Seeker as _};
+/// use ruststream_rdkafka::context::KafkaBatchContext;
+/// use ruststream_rdkafka::prelude::*;
 /// # #[derive(serde::Deserialize)]
 /// # struct Order { id: u64, resume_at: Option<i64>, partition: i32 }
 ///
-/// struct Reprocess;
-///
-/// impl Handle<[Order], (), (), KafkaBatchContext> for Reprocess {
-///     async fn handle(
-///         &self,
-///         orders: &[Order],
-///         _outs: &(),
-///         ctx: &mut Context<'_, KafkaBatchContext>,
-///     ) -> Result<(), Vec<HandlerOutcome>> {
-///         // The batch is settled first; the reposition then opens the next batch at the
-///         // target the producer marked on one of the elements.
-///         let target = orders
-///             .iter()
-///             .find_map(|order| order.resume_at.map(|at| (order.partition, at)));
-///         if let Some((partition, at)) = target
-///             && ctx
-///                 .context(SeekHandle)
-///                 .seek(KafkaPosition::offset(partition, at))
-///                 .await
-///                 .is_err()
-///         {
-///             return Err(orders.iter().map(|_| HandlerOutcome::retry()).collect());
-///         }
-///         Ok(())
+/// /// The batch is settled first; the reposition then opens the next batch at the target the
+/// /// producer marked on one of the elements.
+/// #[subscriber(KafkaTopic::new("orders").group("orders-svc"))]
+/// async fn reprocess(orders: &[Order], ctx: &mut Context<'_, KafkaBatchContext>) -> HandlerOutcome {
+///     let target = orders
+///         .iter()
+///         .find_map(|order| order.resume_at.map(|at| (order.partition, at)));
+///     if let Some((partition, at)) = target
+///         && ctx
+///             .context(SeekHandle)
+///             .seek(KafkaPosition::offset(partition, at))
+///             .await
+///             .is_err()
+///     {
+///         return HandlerOutcome::retry();
 ///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(reprocess.batch(nonzero!(100usize)));
+///         })
 /// }
 /// # }
 /// ```

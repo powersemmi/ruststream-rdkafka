@@ -45,7 +45,7 @@ use crate::publisher::KafkaOptions;
 /// # #[outgoing(name = "work-items")]
 /// # struct WorkItem { order_id: u64 }
 ///
-/// #[ruststream::subscriber("orders", publish)]
+/// #[subscriber("orders", publish)]
 /// async fn plan(order: &Order) -> WorkItem {
 ///     WorkItem { order_id: order.id }
 /// }

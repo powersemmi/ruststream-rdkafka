@@ -297,13 +297,31 @@ struct RegistryInner {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream_rdkafka::{KafkaBroker, SchemaRegistry};
+/// ```
+/// use ruststream_rdkafka::prelude::*;
+/// use ruststream_rdkafka::{SchemaFrame, SchemaRegistry};
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[subscriber("orders")]
+/// # async fn place(order: &Order) -> HandlerOutcome {
+/// #     println!("order {}", order.id);
+/// #     HandlerOutcome::ack()
+/// # }
 ///
-/// let registry = SchemaRegistry::new("http://localhost:8081").basic_auth("svc", "secret");
-/// // Consuming: subscriptions transcode framed deliveries to plain JSON through the client.
-/// let broker = KafkaBroker::new(["localhost:9092"]).schema_registry(registry.clone());
-/// # let _ = broker;
+/// fn app() -> impl App {
+///     let registry = SchemaRegistry::new("http://localhost:8081").basic_auth("svc", "secret");
+///     // Consuming: subscriptions transcode framed deliveries to plain JSON through the client.
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("orders-svc")
+///         .schema_registry(registry.clone());
+///     // Publishing: outgoing JSON is framed in the destination subject's registered flavor.
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .publish_layer(SchemaFrame::new(registry))
+///         .with_broker(broker, |b| {
+///             b.include(place);
+///         })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Clone)]
 pub struct SchemaRegistry {
@@ -408,10 +426,27 @@ impl SchemaRegistry {
     /// use std::time::Duration;
     ///
     /// use ruststream_rdkafka::SchemaRegistry;
+    /// use ruststream_rdkafka::prelude::*;
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Order { id: u64 }
+    /// # #[subscriber("orders")]
+    /// # async fn place(order: &Order) -> HandlerOutcome {
+    /// #     println!("order {}", order.id);
+    /// #     HandlerOutcome::ack()
+    /// # }
     ///
-    /// let registry =
-    ///     SchemaRegistry::new("http://localhost:8081").request_timeout(Duration::from_secs(2));
-    /// # let _ = registry;
+    /// fn app() -> RustStream {
+    ///     // A registry that stops answering fails the lookup in two seconds, not ten.
+    ///     let registry = SchemaRegistry::new("http://localhost:8081")
+    ///         .request_timeout(Duration::from_secs(2));
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .schema_registry(registry);
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+    ///         b.include(place);
+    ///     })
+    /// }
+    /// # let _ = app;
     /// ```
     #[must_use]
     pub fn request_timeout(self, timeout: Duration) -> Self {
@@ -913,16 +948,44 @@ fn outgoing_json_to_datum(
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
+/// ```
+/// # #[cfg(feature = "avro")]
+/// # mod demo {
+/// use apache_avro::AvroSchema;
 /// use ruststream_rdkafka::avro::AvroCodec;
+/// use ruststream_rdkafka::prelude::*;
+/// use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+/// use serde::{Deserialize, Serialize};
 ///
-/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-/// // Every type a codec registers records its subject here, so `connect` resolves it and a
-/// // subject that is missing is settled by the prefetch's policy rather than at first publish.
-/// let codec = AvroCodec::registry(&prefetch);
-/// let broker = KafkaBroker::new(["localhost:9092"]).schema_prefetch(prefetch);
-/// # let _ = (codec, broker);
+/// #[derive(Deserialize, AvroSchema)]
+/// struct Order {
+///     id: i64,
+/// }
+///
+/// #[derive(Serialize, AvroSchema, Outgoing)]
+/// #[outgoing(name = "shipments")]
+/// struct Shipment {
+///     order_id: i64,
+/// }
+///
+/// #[subscriber("orders", publish)]
+/// async fn ship(order: &Order) -> Shipment {
+///     Shipment { order_id: order.id }
+/// }
+///
+/// fn app() -> RustStream {
+///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+///     // Every type a codec registers records its subject here, so `connect` resolves it and a
+///     // subject that is missing is settled by the prefetch's policy rather than at first publish.
+///     let codec = AvroCodec::registry(&prefetch).register::<Shipment>("shipments-value");
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("shipping-svc")
+///         .schema_prefetch(prefetch);
+///     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker_codec(broker, codec, |b| {
+///         b.include(ship);
+///     })
+/// }
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct SchemaPrefetch {
@@ -1201,16 +1264,36 @@ impl SchemaPrefetch {
 ///
 /// # Examples
 ///
-/// ```no_run
+/// ```
 /// use ruststream::codec::JsonCodec;
+/// use ruststream_rdkafka::prelude::*;
 /// use ruststream_rdkafka::{SchemaFramed, SchemaPrefetch, SchemaRegistry};
+/// use schemars::JsonSchema;
+/// use serde::{Deserialize, Serialize};
 ///
-/// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-/// // Confluent-framed JSON: the core's own codec, under the envelope of a registered subject.
-/// # #[derive(serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
-/// # struct Order { id: i64 }
-/// let codec = SchemaFramed::new(&prefetch, JsonCodec).register::<Order>("orders-value");
-/// # let _ = codec;
+/// #[derive(Serialize, Deserialize, JsonSchema, Outgoing)]
+/// #[outgoing(name = "invoices")]
+/// struct Invoice {
+///     order_id: i64,
+/// }
+///
+/// #[subscriber("orders", publish)]
+/// async fn invoice(order: &Invoice) -> Invoice {
+///     Invoice { order_id: order.order_id }
+/// }
+///
+/// fn app() -> RustStream {
+///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+///     // Confluent-framed JSON: the core's own codec, under the envelope of a registered subject.
+///     let codec = SchemaFramed::new(&prefetch, JsonCodec).register::<Invoice>("invoices-value");
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("billing-svc")
+///         .schema_prefetch(prefetch);
+///     RustStream::new(AppInfo::new("billing", "0.1.0")).with_broker_codec(broker, codec, |b| {
+///         b.include(invoice);
+///     })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone)]
 pub struct SchemaFramed<C> {
@@ -1475,13 +1558,39 @@ impl SubjectMap {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// use ruststream::runtime::{AppInfo, RustStream};
+/// ```
+/// use ruststream_rdkafka::prelude::*;
 /// use ruststream_rdkafka::{SchemaFrame, SchemaRegistry};
+/// use serde::{Deserialize, Serialize};
 ///
-/// let registry = SchemaRegistry::new("http://localhost:8081");
-/// let app = RustStream::new(AppInfo::new("orders", "1.0.0"))
-///     .publish_layer(SchemaFrame::new(registry.clone()));
+/// #[derive(Deserialize)]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "confirmations")]
+/// struct Confirmation {
+///     id: u64,
+/// }
+///
+/// /// Returns plain JSON; the layer frames it for `confirmations-value` on the way out.
+/// #[subscriber("orders", publish)]
+/// async fn confirm(order: &Order) -> Confirmation {
+///     Confirmation { id: order.id }
+/// }
+///
+/// fn app() -> impl App {
+///     let registry = SchemaRegistry::new("http://localhost:8081");
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .publish_layer(SchemaFrame::new(registry))
+///         .with_broker(
+///             KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///             |b| {
+///                 b.include(confirm);
+///             },
+///         )
+/// }
 /// # let _ = app;
 /// ```
 #[derive(Clone)]
