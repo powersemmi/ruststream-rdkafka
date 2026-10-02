@@ -620,7 +620,7 @@ async fn batches_preserve_order_and_settle_per_message() {
             .expect("batch within timeout")
             .expect("stream has next")
             .expect("batch ok");
-        assert!(!batch.is_empty(), "a yielded batch must not be empty");
+        assert_ne!(batch.len(), 0, "a yielded batch must not be empty");
         assert!(
             batch.len() <= BATCH,
             "a batch must never exceed the size it was opened at, got {}",

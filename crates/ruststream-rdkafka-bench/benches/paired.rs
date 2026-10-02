@@ -861,7 +861,7 @@ struct Stats {
 
 impl Stats {
     fn of(rates: &[f64]) -> Self {
-        assert!(!rates.is_empty(), "no round was run");
+        assert_ne!(rates, [0.0_f64; 0], "no round was run");
         let mut sorted = rates.to_vec();
         sorted.sort_by(f64::total_cmp);
         let middle = sorted.len() / 2;

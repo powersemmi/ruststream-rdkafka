@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn a_descriptor_that_names_neither_a_group_nor_a_client_says_nothing() {
-        assert!(operation(None, &[]).is_empty());
+        assert_eq!(operation(None, &[]), Bindings::new());
     }
 
     #[test]

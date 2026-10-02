@@ -220,7 +220,10 @@ mod tests {
         let subscriptions = ["orders", "orders", "orders", "payments"];
         assert_eq!(routes.answer("orders", &subscriptions), [0, 1]);
         assert_eq!(routes.answer("payments", &subscriptions), [3]);
-        assert!(routes.answer("refunds", &subscriptions).is_empty());
+        assert_eq!(
+            routes.answer("refunds", &subscriptions),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
@@ -243,7 +246,7 @@ mod tests {
         );
         let subscriptions = ["^orders\\..*", "eu,us", "eu"];
         assert_eq!(routes.answer("orders.eu", &subscriptions), [0]);
-        assert!(routes.answer("orders", &subscriptions).is_empty());
+        assert_eq!(routes.answer("orders", &subscriptions), Vec::<usize>::new());
         assert_eq!(routes.answer("eu", &subscriptions), [1, 2]);
         assert_eq!(routes.answer("us", &subscriptions), [1]);
     }

@@ -457,7 +457,10 @@ async fn a_member_leaving_hands_its_partition_over_at_the_committed_offset() {
         .await
         .expect("ack");
     drop(stream);
-    assert!(drain(&mut Box::pin(second.stream())).await.is_empty());
+    assert_eq!(
+        drain(&mut Box::pin(second.stream())).await,
+        Vec::<Vec<u8>>::new()
+    );
     drop(first);
 
     // The rebalance hands the partition to the survivor, which resumes where the group committed.

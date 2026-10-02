@@ -932,7 +932,7 @@ message Order {
             let encoded = encode_indexes(&path);
             let (decoded, rest) = decode_indexes(&encoded).expect("decodes");
             assert_eq!(decoded, path);
-            assert!(rest.is_empty());
+            assert_eq!(rest, b"");
         }
         assert_eq!(
             encode_indexes(&[0]),
@@ -948,7 +948,7 @@ message Order {
             write_zigzag(&mut out, value);
             let (decoded, rest) = read_zigzag(&out).expect("decodes");
             assert_eq!(decoded, value);
-            assert!(rest.is_empty());
+            assert_eq!(rest, b"");
         }
     }
 
