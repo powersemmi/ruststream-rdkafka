@@ -34,13 +34,30 @@ const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// # Examples
 ///
-/// ```
-/// use ruststream_rdkafka::KafkaPosition;
+/// A read model rebuilt from the start of the retained log on every startup, whatever the group
+/// committed before:
 ///
-/// let replay_all = KafkaPosition::earliest();
-/// let skip_ahead = KafkaPosition::offset(3, 1_024);
-/// let since_noon = KafkaPosition::timestamp(1_767_000_000_000);
-/// # let _ = (replay_all, skip_ahead, since_noon);
+/// ```
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+///
+/// #[subscriber(
+///     KafkaTopic::new("orders").group("orders-projection"),
+///     start_at(KafkaPosition::earliest())
+/// )]
+/// async fn project(order: &Order) -> HandlerOutcome {
+///     println!("projecting order {}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("projection", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(project);
+///         })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

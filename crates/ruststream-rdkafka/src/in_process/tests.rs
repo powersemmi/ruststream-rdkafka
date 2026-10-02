@@ -191,8 +191,9 @@ async fn a_committed_reader_waits_for_a_transaction_and_never_sees_an_aborted_on
     cluster
         .produce("out", None, b"aborted", &HeaderMap::new(), Some(&producer))
         .expect("produce");
-    assert!(
-        drain(&reader).is_empty(),
+    assert_eq!(
+        drain(&reader),
+        Vec::<(i32, String)>::new(),
         "an open transaction is invisible"
     );
     cluster.abort(&producer).expect("abort");
@@ -208,8 +209,9 @@ async fn a_committed_reader_waits_for_a_transaction_and_never_sees_an_aborted_on
         )
         .expect("produce");
     produce(&cluster, "out", "plain", None);
-    assert!(
-        drain(&reader).is_empty(),
+    assert_eq!(
+        drain(&reader),
+        Vec::<(i32, String)>::new(),
         "a plain record behind an open transaction waits for it",
     );
     cluster.commit(&producer).expect("commit");

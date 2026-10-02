@@ -32,14 +32,28 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// # Examples
 ///
-/// A client that answers from a fixed table, which is all a test usually needs:
+/// A client that answers every question with one fixed schema, behind the registry a service
+/// consumes through:
 ///
 /// ```
 /// use std::sync::Arc;
 ///
 /// use futures::future::BoxFuture;
 /// use ruststream_rdkafka::KafkaError;
-/// use ruststream_rdkafka::schema_registry::{RegisteredSchema, RegistryClient, SchemaType};
+/// use ruststream_rdkafka::prelude::*;
+/// use ruststream_rdkafka::schema_registry::{
+///     RegisteredSchema, RegistryClient, SchemaRegistry, SchemaType,
+/// };
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[subscriber("orders")]
+/// # async fn place(order: &Order) -> HandlerOutcome {
+/// #     println!("order {}", order.id);
+/// #     HandlerOutcome::ack()
+/// # }
+///
+/// const ORDER_SCHEMA: &str =
+///     r#"{"type": "record", "name": "Order", "fields": [{"name": "id", "type": "long"}]}"#;
 ///
 /// struct Fixed(Arc<RegisteredSchema>);
 ///
@@ -76,10 +90,18 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 ///         self.register(subject, schema_type, definition)
 ///     }
 /// }
-/// # fn check() {
-/// let _ = Fixed(Arc::new(RegisteredSchema::new(1, SchemaType::Avro, "\"string\"")));
-/// # }
-/// # check();
+///
+/// fn app() -> RustStream {
+///     let schema = RegisteredSchema::new(1, SchemaType::Avro, ORDER_SCHEMA);
+///     let registry = SchemaRegistry::with_client(Arc::new(Fixed(Arc::new(schema))));
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("orders-svc")
+///         .schema_registry(registry);
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+///         b.include(place);
+///     })
+/// }
+/// # let _ = app;
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a schema registry client",

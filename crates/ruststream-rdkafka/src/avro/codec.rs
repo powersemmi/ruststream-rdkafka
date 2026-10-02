@@ -136,27 +136,35 @@ fn avro_record_name(schema: &Schema) -> Option<&'static str> {
 ///
 /// # Examples
 ///
+/// A topic with one fixed schema and no registry, consumed through an ordinary handler:
+///
 /// ```
 /// use apache_avro::AvroSchema;
-/// use ruststream::codec::Codec;
+/// use ruststream_rdkafka::KafkaError;
 /// use ruststream_rdkafka::avro::AvroCodec;
-/// use serde::{Deserialize, Serialize};
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::Deserialize;
 ///
-/// #[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
+/// #[derive(Deserialize, AvroSchema)]
 /// struct Order {
 ///     id: i64,
 ///     item: String,
 /// }
 ///
-/// # fn check() -> Result<(), Box<dyn std::error::Error>> {
-/// let codec = AvroCodec::local(Order::get_schema())?;
+/// #[subscriber("orders")]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     println!("order {} of {}", order.id, order.item);
+///     HandlerOutcome::ack()
+/// }
 ///
-/// let order = Order { id: 7, item: "anvil".to_owned() };
-/// let bytes = codec.encode(&order)?;
-/// assert_eq!(codec.decode::<Order>(&bytes)?, order);
-/// # Ok(())
-/// # }
-/// # check().unwrap();
+/// fn app() -> Result<RustStream, KafkaError> {
+///     let codec = AvroCodec::local(Order::get_schema())?;
+///     let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
+///     Ok(RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
+///         b.include(place);
+///     }))
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Clone)]
 pub struct AvroCodec {

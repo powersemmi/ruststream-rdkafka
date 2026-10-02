@@ -22,13 +22,22 @@ use super::RegisteredSchema;
 ///
 /// # Examples
 ///
-/// A cache that remembers ids and forgets subjects, in the three methods the trait asks for:
+/// A cache that remembers ids and forgets subjects, in the three methods the trait asks for,
+/// behind the registry a service consumes through:
 ///
 /// ```
 /// use std::collections::HashMap;
 /// use std::sync::{Arc, Mutex};
 ///
-/// use ruststream_rdkafka::schema_registry::{RegisteredSchema, SchemaCache};
+/// use ruststream_rdkafka::prelude::*;
+/// use ruststream_rdkafka::schema_registry::{RegisteredSchema, SchemaCache, SchemaRegistry};
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[subscriber("orders")]
+/// # async fn place(order: &Order) -> HandlerOutcome {
+/// #     println!("order {}", order.id);
+/// #     HandlerOutcome::ack()
+/// # }
 ///
 /// #[derive(Default)]
 /// struct IdsOnly(Mutex<HashMap<u32, Arc<RegisteredSchema>>>);
@@ -50,11 +59,18 @@ use super::RegisteredSchema;
 ///     }
 /// }
 ///
-/// # fn check() {
-/// let cache = IdsOnly::default();
-/// assert!(cache.schema(7).is_none());
-/// # }
-/// # check();
+///
+/// fn app() -> RustStream {
+///     let registry =
+///         SchemaRegistry::new("http://localhost:8081").with_cache(Arc::new(IdsOnly::default()));
+///     let broker = KafkaBroker::new(["localhost:9092"])
+///         .default_group("orders-svc")
+///         .schema_registry(registry);
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+///         b.include(place);
+///     })
+/// }
+/// # let _ = app;
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not a schema cache",
@@ -117,27 +133,41 @@ pub trait SchemaCache: Send + Sync + 'static {
 ///
 /// # Examples
 ///
+/// A producer that notices a newly registered version of a subject within five minutes, without
+/// a restart:
+///
 /// ```
-/// use std::num::NonZeroUsize;
 /// use std::time::Duration;
 ///
-/// use ruststream_rdkafka::{SchemaCachePolicy, SchemaRegistry};
+/// use ruststream_rdkafka::prelude::*;
+/// use ruststream_rdkafka::{SchemaCachePolicy, SchemaFrame, SchemaRegistry};
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+/// # #[derive(serde::Serialize, Outgoing)]
+/// # #[outgoing(name = "confirmations")]
+/// # struct Confirmation { id: u64 }
+/// # #[subscriber("orders", publish)]
+/// # async fn confirm(order: &Order) -> Confirmation {
+/// #     Confirmation { id: order.id }
+/// # }
 ///
-/// // The default: ids kept, up to a bound, and subjects never re-resolved.
-/// let registry = SchemaRegistry::new("http://localhost:8081");
-///
-/// // A producer that should notice a newly registered version without a restart.
-/// let refreshing = SchemaRegistry::new("http://localhost:8081").cache_policy(
-///     SchemaCachePolicy::Cached {
-///         capacity: NonZeroUsize::new(256).expect("non-zero"),
-///         subject_ttl: Some(Duration::from_secs(300)),
-///     },
-/// );
-///
-/// // Nothing remembered at all: every lookup reaches the registry.
-/// let uncached = SchemaRegistry::new("http://localhost:8081")
-///     .cache_policy(SchemaCachePolicy::Disabled);
-/// # let _ = (registry, refreshing, uncached);
+/// fn app() -> impl App {
+///     let registry = SchemaRegistry::new("http://localhost:8081").cache_policy(
+///         SchemaCachePolicy::Cached {
+///             capacity: nonzero!(256usize),
+///             subject_ttl: Some(Duration::from_secs(300)),
+///         },
+///     );
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .publish_layer(SchemaFrame::new(registry))
+///         .with_broker(
+///             KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///             |b| {
+///                 b.include(confirm);
+///             },
+///         )
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

@@ -50,11 +50,76 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// # Examples
 ///
-/// ```
-/// use ruststream_rdkafka::KafkaOptions;
+/// A test reading back the partition a handler's publish asked for:
 ///
-/// let options = KafkaOptions::default().partition(3);
-/// assert_eq!(options.partition_setting(), Some(3));
+/// ```
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # mod demo {
+/// use std::error::Error;
+///
+/// use ruststream::testing::TestApp;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Serialize, Deserialize, Outgoing)]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "audit")]
+/// struct Audit {
+///     id: u64,
+/// }
+///
+/// #[derive(OutSlot)]
+/// #[publishes(Audit)]
+/// struct Journal;
+///
+/// #[subscriber("orders")]
+/// async fn record(
+///     order: &Order,
+///     Out(journal): Out<impl Publisher<Options = KafkaOptions>, Journal>,
+/// ) -> HandlerOutcome {
+///     let sent = journal.message(&Audit { id: order.id }).partition(3).publish().await;
+///     if sent.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// pub fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+///         KafkaBroker::new(["kafka:9092"]).default_group("orders-svc"),
+///         |b| {
+///             b.include(record).out(Journal, Publish::default()).build();
+///         },
+///     )
+/// }
+///
+/// pub async fn audits_go_to_partition_three() -> Result<(), Box<dyn Error + Send + Sync>> {
+///     let tb = TestApp::start(app()).await?;
+///
+///     tb.broker::<KafkaBroker>()
+///         .message(&Order { id: 7 })
+///         .to("orders")
+///         .publish()
+///         .await?;
+///
+///     tb.out::<Journal>()
+///         .assert_called(1)
+///         .with_options(&KafkaOptions::default().partition(3));
+///     tb.shutdown().await?;
+///     Ok(())
+/// }
+/// # }
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// #     demo::audits_go_to_partition_three().await
+/// # }
+/// # #[cfg(not(all(feature = "json", feature = "testing")))]
+/// # fn main() {}
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[must_use]
@@ -97,7 +162,7 @@ impl KafkaOptions {
 /// # #[publishes(Audit)]
 /// # struct Journal;
 ///
-/// #[ruststream::subscriber("orders")]
+/// #[subscriber("orders")]
 /// async fn record(
 ///     order: &Order,
 ///     Out(journal): Out<impl Publisher<Options = KafkaOptions>, Journal>,
@@ -149,10 +214,35 @@ where
 /// ```
 /// use std::time::Duration;
 ///
-/// use ruststream_rdkafka::KafkaPublish;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
 ///
-/// let policy = KafkaPublish::default().queue_timeout(Duration::from_secs(5));
-/// # let _ = policy;
+/// #[derive(Deserialize)]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "confirmations")]
+/// struct Confirmation {
+///     id: u64,
+/// }
+///
+/// #[subscriber("orders", publish)]
+/// async fn confirm(order: &Order) -> Confirmation {
+///     Confirmation { id: order.id }
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///         |b| {
+///             b.include(confirm)
+///                 .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
+///         },
+///     )
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[must_use]
@@ -180,10 +270,52 @@ impl KafkaPublish {
     /// # Examples
     ///
     /// ```
-    /// use ruststream_rdkafka::KafkaPublish;
+    /// use ruststream_rdkafka::prelude::*;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Deserialize)]
+    /// # struct Refund { order_id: u64, lines: u64 }
+    /// # #[derive(Serialize, Outgoing)]
+    /// # #[outgoing(name = "refund-lines")]
+    /// # struct RefundLine { order_id: u64, line: u64 }
+    /// # #[derive(OutSlot)]
+    /// # #[publishes(RefundLine)]
+    /// # struct Lines;
+    /// #
+    /// #[subscriber("refunds")]
+    /// async fn refund(
+    ///     order: &Refund,
+    ///     Out(lines): Out<impl TransactionalPublisher, Lines>,
+    /// ) -> HandlerOutcome {
+    ///     if lines.begin_transaction().await.is_err() {
+    ///         return HandlerOutcome::retry();
+    ///     }
+    ///     for line in 0..order.lines {
+    ///         let entry = RefundLine {
+    ///             order_id: order.order_id,
+    ///             line,
+    ///         };
+    ///         if lines.message(&entry).publish().await.is_err() {
+    ///             lines.abort().await.ok();
+    ///             return HandlerOutcome::retry();
+    ///         }
+    ///     }
+    ///     if lines.commit().await.is_err() {
+    ///         return HandlerOutcome::retry();
+    ///     }
+    ///     HandlerOutcome::ack()
+    /// }
     ///
-    /// let policy = KafkaPublish::default().transactional_id("orders-svc-1");
-    /// # let _ = policy;
+    /// fn app() -> RustStream {
+    ///     RustStream::new(AppInfo::new("refunds", "0.1.0")).with_broker(
+    ///         KafkaBroker::new(["localhost:9092"]).default_group("refunds-svc"),
+    ///         |b| {
+    ///             b.include(refund)
+    ///                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
+    ///                 .build();
+    ///         },
+    ///     )
+    /// }
+    /// # let _ = app;
     /// ```
     pub fn transactional_id(self, id: impl Into<String>) -> KafkaTransactionalPublish {
         KafkaTransactionalPublish {
@@ -211,11 +343,39 @@ impl KafkaPublish {
     /// # Examples
     ///
     /// ```
-    /// use ruststream_rdkafka::{KafkaPublish, SchemaRegistry};
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::SchemaRegistry;
     ///
-    /// let registry = SchemaRegistry::new("http://localhost:8081");
-    /// let policy = KafkaPublish::framed(&registry);
-    /// # let _ = policy;
+    /// #[derive(Clone, PartialEq, prost::Message, Deserialized)]
+    /// #[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
+    /// struct Order {
+    ///     #[prost(int64, tag = "1")]
+    ///     id: i64,
+    /// }
+    ///
+    /// #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
+    /// #[wire(encode = ::prost::Message::encode)]
+    /// #[outgoing(name = "confirmations")]
+    /// struct Confirmation {
+    ///     #[prost(int64, tag = "1")]
+    ///     id: i64,
+    /// }
+    ///
+    /// #[subscriber("orders", publish)]
+    /// async fn confirm(order: &Order) -> Confirmation {
+    ///     Confirmation { id: order.id }
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     let registry = SchemaRegistry::new("http://localhost:8081");
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+    ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+    ///         |b| {
+    ///             b.include(confirm).out_reply(Publish::framed(&registry));
+    ///         },
+    ///     )
+    /// }
+    /// # let _ = app;
     /// ```
     #[cfg(feature = "protobuf")]
     pub fn framed(registry: &crate::SchemaRegistry) -> crate::protobuf::KafkaFramedPublish {
@@ -374,12 +534,53 @@ fn produce_in_process(
 /// ```
 /// use std::time::Duration;
 ///
-/// use ruststream_rdkafka::KafkaPublish;
+/// use ruststream_rdkafka::prelude::*;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Deserialize)]
+/// # struct Refund { order_id: u64, lines: u64 }
+/// # #[derive(Serialize, Outgoing)]
+/// # #[outgoing(name = "refund-lines")]
+/// # struct RefundLine { order_id: u64, line: u64 }
+/// # #[derive(OutSlot)]
+/// # #[publishes(RefundLine)]
+/// # struct Lines;
+/// #
+/// #[subscriber("refunds")]
+/// async fn refund(
+///     order: &Refund,
+///     Out(lines): Out<impl TransactionalPublisher, Lines>,
+/// ) -> HandlerOutcome {
+///     if lines.begin_transaction().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     for line in 0..order.lines {
+///         let entry = RefundLine {
+///             order_id: order.order_id,
+///             line,
+///         };
+///         if lines.message(&entry).publish().await.is_err() {
+///             lines.abort().await.ok();
+///             return HandlerOutcome::retry();
+///         }
+///     }
+///     if lines.commit().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
 ///
-/// let policy = KafkaPublish::default()
-///     .transactional_id("orders-svc-1")
-///     .transaction_timeout(Duration::from_secs(10));
-/// # let _ = policy;
+/// fn app() -> RustStream {
+///     let lines = Publish::default()
+///         .transactional_id("refunds-svc-1")
+///         .transaction_timeout(Duration::from_secs(10));
+///     RustStream::new(AppInfo::new("refunds", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("refunds-svc"),
+///         |b| {
+///             b.include(refund).out(Lines, lines).build();
+///         },
+///     )
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -412,12 +613,53 @@ impl KafkaTransactionalPublish {
     /// # Examples
     ///
     /// ```
-    /// use ruststream_rdkafka::KafkaPublish;
+    /// use ruststream_rdkafka::prelude::*;
+    /// # use serde::{Deserialize, Serialize};
+    /// # #[derive(Deserialize)]
+    /// # struct Invoice { id: u64, lines: u64 }
+    /// # #[derive(Serialize, Outgoing)]
+    /// # #[outgoing(name = "invoice-lines")]
+    /// # struct InvoiceLine { invoice_id: u64, line: u64 }
+    /// # #[subscriber(KafkaTopic::new("invoices").commit(Commit::Tracked), workers(4, by_key))]
+    /// # async fn bill(
+    /// #     invoice: &Invoice,
+    /// #     Ctx(partition): Ctx<Partition>,
+    /// #     Out(lanes): Out<impl PartitionLanes>,
+    /// # ) -> HandlerOutcome {
+    /// #     let Ok(lane) = lanes.for_partition(partition).await else {
+    /// #         return HandlerOutcome::retry();
+    /// #     };
+    /// #     if lane.begin_transaction().await.is_err() {
+    /// #         return HandlerOutcome::retry();
+    /// #     }
+    /// #     for line in 0..invoice.lines {
+    /// #         let entry = InvoiceLine { invoice_id: invoice.id, line };
+    /// #         if lane.message(&entry).publish().await.is_err() {
+    /// #             lane.abort().await.ok();
+    /// #             return HandlerOutcome::retry();
+    /// #         }
+    /// #     }
+    /// #     if lane.commit().await.is_err() {
+    /// #         return HandlerOutcome::retry();
+    /// #     }
+    /// #     HandlerOutcome::ack()
+    /// # }
     ///
-    /// let policy = KafkaPublish::default()
-    ///     .transactional_id("billing-svc-1")
-    ///     .per_partition();
-    /// # let _ = policy;
+    /// fn app() -> RustStream {
+    ///     RustStream::new(AppInfo::new("billing", "0.1.0")).with_broker(
+    ///         KafkaBroker::new(["localhost:9092"]).default_group("billing-svc"),
+    ///         |b| {
+    ///             // One transactional id per source partition: "billing-svc-1-p0", "-p1", ...
+    ///             b.include(bill)
+    ///                 .out(
+    ///                     DefaultSlot,
+    ///                     Publish::default().transactional_id("billing-svc-1").per_partition(),
+    ///                 )
+    ///                 .build();
+    ///         },
+    ///     )
+    /// }
+    /// # let _ = app;
     /// ```
     pub fn per_partition(self) -> KafkaPartitionedPublish {
         KafkaPartitionedPublish { template: self }
@@ -470,18 +712,37 @@ impl ConnectedKafkaBroker {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use ruststream::Broker;
-    /// use ruststream_rdkafka::{KafkaBroker, KafkaPublish};
+    /// A migration tool that copies a batch of records all-or-nothing:
     ///
-    /// # async fn demo() -> Result<(), ruststream_rdkafka::KafkaError> {
-    /// let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
-    /// let publisher = connected
-    ///     .transactional_publisher(KafkaPublish::default().transactional_id("orders-svc-1"))
-    ///     .await?;
-    /// # let _ = publisher;
-    /// # Ok(())
-    /// # }
+    /// ```no_run
+    /// use std::error::Error;
+    ///
+    /// use ruststream::Broker;
+    /// use ruststream_rdkafka::prelude::*;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize, Outgoing)]
+    /// #[outgoing(name = "accounts-v2")]
+    /// struct Account {
+    ///     id: u64,
+    /// }
+    ///
+    /// async fn migrate(accounts: &[Account]) -> Result<(), Box<dyn Error + Send + Sync>> {
+    ///     let connected = KafkaBroker::new(["localhost:9092"]).connect().await?;
+    ///     let publisher = connected
+    ///         .transactional_publisher(Publish::default().transactional_id("accounts-migration"))
+    ///         .await?;
+    ///     publisher.begin_transaction().await?;
+    ///     for account in accounts {
+    ///         if let Err(err) = publisher.message(account).publish().await {
+    ///             publisher.abort().await?;
+    ///             return Err(err.into());
+    ///         }
+    ///     }
+    ///     publisher.commit().await?;
+    ///     Ok(())
+    /// }
+    /// # let _ = migrate;
     /// ```
     pub async fn transactional_publisher(
         &self,
@@ -851,12 +1112,53 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
 /// # Examples
 ///
 /// ```
-/// use ruststream_rdkafka::KafkaPublish;
+/// use ruststream_rdkafka::prelude::*;
+/// # use serde::{Deserialize, Serialize};
+/// # #[derive(Deserialize)]
+/// # struct Invoice { id: u64, lines: u64 }
+/// # #[derive(Serialize, Outgoing)]
+/// # #[outgoing(name = "invoice-lines")]
+/// # struct InvoiceLine { invoice_id: u64, line: u64 }
+/// # #[subscriber(KafkaTopic::new("invoices").commit(Commit::Tracked), workers(4, by_key))]
+/// # async fn bill(
+/// #     invoice: &Invoice,
+/// #     Ctx(partition): Ctx<Partition>,
+/// #     Out(lanes): Out<impl PartitionLanes>,
+/// # ) -> HandlerOutcome {
+/// #     let Ok(lane) = lanes.for_partition(partition).await else {
+/// #         return HandlerOutcome::retry();
+/// #     };
+/// #     if lane.begin_transaction().await.is_err() {
+/// #         return HandlerOutcome::retry();
+/// #     }
+/// #     for line in 0..invoice.lines {
+/// #         let entry = InvoiceLine { invoice_id: invoice.id, line };
+/// #         if lane.message(&entry).publish().await.is_err() {
+/// #             lane.abort().await.ok();
+/// #             return HandlerOutcome::retry();
+/// #         }
+/// #     }
+/// #     if lane.commit().await.is_err() {
+/// #         return HandlerOutcome::retry();
+/// #     }
+/// #     HandlerOutcome::ack()
+/// # }
 ///
-/// let policy = KafkaPublish::default()
-///     .transactional_id("billing-svc-1")
-///     .per_partition();
-/// # let _ = policy;
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("billing", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("billing-svc"),
+///         |b| {
+///             // One transactional id per source partition: "billing-svc-1-p0", "-p1", ...
+///             b.include(bill)
+///                 .out(
+///                     DefaultSlot,
+///                     Publish::default().transactional_id("billing-svc-1").per_partition(),
+///                 )
+///                 .build();
+///         },
+///     )
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
@@ -983,12 +1285,47 @@ impl TransactionalPartitions {
 /// # Examples
 ///
 /// ```
-/// use ruststream::TransactionalPublisher;
-/// use ruststream_rdkafka::{KafkaError, PartitionLanes};
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
 ///
-/// async fn ping<L: PartitionLanes>(lanes: &L, partition: i32) -> Result<(), KafkaError> {
-///     let publisher = lanes.for_partition(partition).await?;
-///     publisher.begin_transaction().await
+/// #[derive(Deserialize)]
+/// struct Invoice {
+///     id: u64,
+///     lines: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "invoice-lines")]
+/// struct InvoiceLine {
+///     invoice_id: u64,
+///     line: u64,
+/// }
+///
+/// /// Each lane runs the transactions of its own source partition, so four workers never share
+/// /// one producer.
+/// #[subscriber(KafkaTopic::new("invoices").commit(Commit::Tracked), workers(4, by_key))]
+/// async fn bill(
+///     invoice: &Invoice,
+///     Ctx(partition): Ctx<Partition>,
+///     Out(lanes): Out<impl PartitionLanes>,
+/// ) -> HandlerOutcome {
+///     let Ok(lane) = lanes.for_partition(partition).await else {
+///         return HandlerOutcome::retry();
+///     };
+///     if lane.begin_transaction().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     for line in 0..invoice.lines {
+///         let entry = InvoiceLine { invoice_id: invoice.id, line };
+///         if lane.message(&entry).publish().await.is_err() {
+///             lane.abort().await.ok();
+///             return HandlerOutcome::retry();
+///         }
+///     }
+///     if lane.commit().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
 /// }
 /// ```
 #[diagnostic::on_unimplemented(

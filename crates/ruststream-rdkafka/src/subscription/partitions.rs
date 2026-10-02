@@ -24,12 +24,27 @@ use crate::subscriber::KafkaSubscriber;
 ///
 /// # Examples
 ///
-/// ```
-/// use ruststream_rdkafka::{KafkaPartitions, StartOffset};
+/// An inspection reader pinned to partition 0, with no group side effects:
 ///
-/// // An inspection reader pinned to partition 0, no group side effects.
-/// let reader = KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest);
-/// assert_eq!(reader.topic(), "orders");
+/// ```
+/// use ruststream_rdkafka::context::keys::Offset;
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+///
+/// #[subscriber(KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest))]
+/// async fn inspect(order: &Order, Ctx(offset): Ctx<Offset>) -> HandlerOutcome {
+///     println!("partition 0, offset {offset}: order {}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("inspector", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(inspect);
+///         })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaPartitions {

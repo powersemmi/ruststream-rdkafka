@@ -27,15 +27,30 @@ use crate::subscriber::KafkaSubscriber;
 /// # Examples
 ///
 /// ```
-/// use ruststream_rdkafka::{Assignment, Commit, KafkaTopic, StartOffset};
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
 ///
-/// let topic = KafkaTopic::new("orders")
-///     .group("orders-svc")
-///     .start(StartOffset::Earliest)
-///     .commit(Commit::Tracked)
-///     .assignment(Assignment::CooperativeSticky)
-///     .config("fetch.min.bytes", "1024");
-/// assert_eq!(topic.topic(), "orders");
+/// #[subscriber(
+///     KafkaTopic::new("orders")
+///         .group("orders-svc")
+///         .start(StartOffset::Earliest)
+///         .commit(Commit::Tracked)
+///         .assignment(Assignment::CooperativeSticky)
+///         .config("fetch.min.bytes", "1024")
+/// )]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     println!("order {}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(place);
+///         })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaTopic {
@@ -88,15 +103,33 @@ impl KafkaTopic {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use ruststream_rdkafka::{KafkaTopic, LaneKey};
+    /// Per-record-key lanes: one tenant's orders never run concurrently, different tenants in
+    /// one partition do.
     ///
-    /// // Opt into finer, per-record-key lanes: one tenant never processes concurrently,
-    /// // different tenants in one partition do.
-    /// let topic = KafkaTopic::new("orders")
-    ///     .group("orders-svc")
-    ///     .lane_key(LaneKey::RecordKey);
-    /// # let _ = topic;
+    /// ```
+    /// use ruststream_rdkafka::prelude::*;
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Order { id: u64 }
+    ///
+    /// #[subscriber(
+    ///     KafkaTopic::new("orders")
+    ///         .group("orders-svc")
+    ///         .commit(Commit::Tracked)
+    ///         .lane_key(LaneKey::RecordKey),
+    ///     workers(8, by_key)
+    /// )]
+    /// async fn place(order: &Order) -> HandlerOutcome {
+    ///     println!("order {}", order.id);
+    ///     HandlerOutcome::ack()
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+    ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+    ///             b.include(place);
+    ///         })
+    /// }
+    /// # let _ = app;
     /// ```
     #[must_use]
     pub fn lane_key(mut self, lane_key: LaneKey) -> Self {

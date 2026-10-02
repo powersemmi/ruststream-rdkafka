@@ -52,10 +52,23 @@ impl Subscribed {
 /// # Examples
 ///
 /// ```
-/// use ruststream_rdkafka::KafkaTopics;
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
 ///
-/// let both = KafkaTopics::new(["orders", "cancellations"]).group("orders-svc");
-/// assert_eq!(both.topics(), "orders,cancellations");
+/// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
+/// async fn place(order: &Order, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
+///     println!("order {} from {topic}", order.id);
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(place);
+///         })
+/// }
+/// # let _ = app;
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaTopics {
@@ -109,10 +122,23 @@ impl KafkaTopics {
     /// # Examples
     ///
     /// ```
-    /// use ruststream_rdkafka::KafkaTopics;
+    /// use ruststream_rdkafka::prelude::*;
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Event { kind: String }
     ///
-    /// let audit = KafkaTopics::pattern("^audit\\..*").group("audit-svc");
-    /// assert_eq!(audit.topics(), "^audit\\..*");
+    /// #[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-svc"))]
+    /// async fn archive(event: &Event, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
+    ///     println!("{} on {topic}", event.kind);
+    ///     HandlerOutcome::ack()
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     RustStream::new(AppInfo::new("audit", "0.1.0"))
+    ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+    ///             b.include(archive);
+    ///         })
+    /// }
+    /// # let _ = app;
     /// ```
     #[must_use]
     pub fn pattern(pattern: impl Into<String>) -> Self {

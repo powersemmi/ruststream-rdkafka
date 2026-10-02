@@ -32,20 +32,38 @@
 //!
 //! ```
 //! use ruststream_rdkafka::prelude::*;
+//! use serde::{Deserialize, Serialize};
 //!
-//! fn broker() -> KafkaBroker {
-//!     KafkaBroker::new(["localhost:9092"]).default_group("orders-svc")
+//! #[derive(Deserialize)]
+//! struct Order {
+//!     id: u64,
 //! }
 //!
-//! let orders = KafkaTopic::new("orders")
-//!     .commit(Commit::Tracked)
-//!     .start(StartOffset::Earliest);
+//! #[derive(Serialize, Outgoing)]
+//! #[outgoing(name = "confirmations")]
+//! struct Confirmation {
+//!     id: u64,
+//! }
 //!
-//! let replies = Publish::default();
-//! let shipments: TransactionalPublish = Publish::default().transactional_id("shipments-svc-1");
-//! let lanes: PartitionedPublish = shipments.clone().per_partition();
-//! let pipeline = EosPublish::new("enrich-svc-1");
-//! # let _ = (broker, orders, replies, shipments, lanes, pipeline);
+//! #[subscriber(
+//!     KafkaTopic::new("orders")
+//!         .commit(Commit::Tracked)
+//!         .start(StartOffset::Earliest),
+//!     publish
+//! )]
+//! async fn confirm(order: &Order) -> Confirmation {
+//!     Confirmation { id: order.id }
+//! }
+//!
+//! fn app() -> RustStream {
+//!     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+//!         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+//!         |b| {
+//!             b.include(confirm).out_reply(Publish::default());
+//!         },
+//!     )
+//! }
+//! # let _ = app;
 //! ```
 
 pub use ruststream::prelude::*;
