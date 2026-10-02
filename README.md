@@ -9,7 +9,7 @@
   <a href="https://crates.io/crates/ruststream-rdkafka"><img src="https://img.shields.io/crates/v/ruststream-rdkafka.svg" alt="crates.io"></a>
   <a href="https://crates.io/crates/ruststream-rdkafka"><img src="https://img.shields.io/crates/dr/ruststream-rdkafka" alt="Recent downloads"></a>
   <a href="https://docs.rs/ruststream-rdkafka"><img src="https://img.shields.io/docsrs/ruststream-rdkafka" alt="docs.rs"></a>
-  <img src="https://img.shields.io/badge/MSRV-1.88-blue.svg" alt="MSRV 1.88">
+  <img src="https://img.shields.io/badge/MSRV-1.95-blue.svg" alt="MSRV 1.95">
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License">
 </p>
 
@@ -141,7 +141,7 @@ tb.broker::<KafkaBroker>()
 
 ## Minimum supported Rust version
 
-The MSRV is **1.88**, edition 2024.
+The MSRV is **1.95**, edition 2024.
 
 ## Contributing
 
