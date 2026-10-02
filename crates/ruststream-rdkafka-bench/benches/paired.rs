@@ -142,7 +142,7 @@ const IN_FLIGHT: usize = 65_536;
 /// How often the producer checks that ceiling.
 const CHECK_EVERY: usize = 512;
 /// How long a run may go without a delivery before it is called stuck.
-const STALL: Duration = Duration::from_secs(60);
+const STALL: Duration = Duration::from_mins(1);
 /// How long a consumer group is given to report its member before a run gives up waiting.
 const JOIN: Duration = Duration::from_secs(30);
 /// How long a librdkafka metadata or admin call may block.

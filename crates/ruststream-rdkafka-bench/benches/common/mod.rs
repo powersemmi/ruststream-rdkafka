@@ -100,10 +100,10 @@ pub const MESSAGES: usize = 1_000;
 
 /// How long a region may wait for its deliveries before the run is called stuck. Valgrind slows
 /// the client down by an order of magnitude or more, and a reply waits for its acknowledgement.
-const STALL: Duration = Duration::from_secs(600);
+const STALL: Duration = Duration::from_mins(10);
 
 /// How long a librdkafka admin call or a producer flush may block.
-const CALL: Duration = Duration::from_secs(120);
+const CALL: Duration = Duration::from_mins(2);
 
 /// How many percent more instructions than the run it compares with a run may take before it
 /// fails: the previous run on the machine, or `main` with `--baseline=main`.
