@@ -24,8 +24,9 @@ testing = ["ruststream-rdkafka/testing"]
 # service does. `ruststream-rdkafka`'s own dev-dependencies pull `ruststream/conformance`, which
 # enables `ruststream/testing`, and a benchmark inside that package would be built against it.
 [dev-dependencies]
-# The code-cost benchmarks: callgrind and DHAT through the runner the core pins.
-gungraun = "=0.19.4"
+# The code-cost benchmarks: callgrind and DHAT through gungraun, the release the core uses.
+# `just bench-code` installs the runner of the release the lock file pins.
+gungraun = "=0.20.0"
 ruststream-rdkafka.workspace = true
 ruststream = { workspace = true, features = ["macros", "json"] }
 rdkafka.workspace = true

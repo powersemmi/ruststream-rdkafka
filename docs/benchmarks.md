@@ -79,9 +79,10 @@ thread finds librdkafka's queue empty, or waits for a delivery report, depends o
 wait costs a wakeup. Three runs of one binary made exactly the same allocations and agreed on
 instructions per message within a hundredth of a percent for consume and batch; a reply moved by up
 to three percent. `just bench-code` fails on an allocation above the floor a scenario declares (the
-highest count of three runs plus 0.1 percent), and on more than five percent more instructions than
-the run it compares with: the previous run, or `main` with `--baseline=main`. A pull request that
-changes the cost cites its numbers.
+highest count of three runs plus 0.1 percent). Against a named baseline it also fails on more than
+five percent more instructions than the baseline: `just bench-code --save-baseline=main` on `main`
+records one, and `just bench-code --baseline=main` on a branch compares with it. A pull request
+that changes the cost cites its numbers.
 
 ## The machine
 
@@ -125,5 +126,7 @@ just bench-code
 ```
 
 The recipe starts the same stand, counts the code table under valgrind, stops the stand and
-rewrites the `code` section of the same document. It takes a minute or two and needs valgrind and
-the benchmark runner: `cargo install --locked gungraun-runner --version =0.19.4`.
+rewrites the `code` section of the same document. It takes a minute or two and needs valgrind; the
+recipe installs the benchmark runner itself, at the release `Cargo.lock` pins. A leading number sets
+the deliveries per run: `just bench-code 5000` gives a steadier number over a longer run, and the
+published document is measured at 1000.
