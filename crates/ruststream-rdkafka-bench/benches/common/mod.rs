@@ -43,7 +43,10 @@
 //!
 //! The broker is real, so how often the service thread finds librdkafka's queue empty and waits
 //! depends on timing, and every wait costs a wakeup. That is what moves a count between runs of
-//! one binary.
+//! one binary. Across three runs of one binary, the reply scenario's run of a thousand deliveries
+//! moved by 2.3 percent, because it also parks on delivery reports; consume and batch moved by
+//! less than a hundredth of a percent. So the instruction limit sits at five percent rather than
+//! the core's two, and it holds a run to a named baseline rather than to the run before it.
 
 // Each benchmark target compiles this module on its own and uses the part it needs; what another
 // target uses looks unused here.
@@ -57,7 +60,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gungraun::{Callgrind, Dhat, DhatMetric, EntryPoint, EventKind, LibraryBenchmarkConfig};
+use gungraun::{Callgrind, Dhat, DhatMetric, EntryPoint, LibraryBenchmarkConfig};
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::{ClientContext, DefaultClientContext};
@@ -93,10 +96,43 @@ pub struct Order {
     pub quantity: u32,
 }
 
-/// Deliveries per measured run after the primer: large enough that entering and leaving the
-/// region is lost in the per-message number, small enough that a scenario stays within a minute of
-/// valgrind time. `scripts/bench_results.py` divides by the same count.
-pub const MESSAGES: usize = 1_000;
+/// Deliveries per measured run after the primer.
+///
+/// The default is large enough that entering and leaving the region is lost in the per-message
+/// number and small enough that a scenario stays within a minute of valgrind time.
+/// `RUSTSTREAM_BENCH_MESSAGES` at build time overrides it (`just bench-code 5000`) for a steadier
+/// number at the price of a longer run; the published document is measured at the default, and the
+/// allocation limits scale with the count through [`config`]. `scripts/bench_results.py` divides
+/// by the same count, which the recipe hands it.
+pub const MESSAGES: usize = messages(option_env!("RUSTSTREAM_BENCH_MESSAGES"));
+
+/// The count a run measures when nothing names one.
+const DEFAULT_MESSAGES: usize = 1_000;
+
+/// The configured count, or the default; a value that is not a positive number is a build error
+/// naming the variable, so a typo cannot silently measure the default.
+const fn messages(configured: Option<&str>) -> usize {
+    let Some(text) = configured else {
+        return DEFAULT_MESSAGES;
+    };
+    let bytes = text.as_bytes();
+    let mut count = 0usize;
+    let mut index = 0;
+    while index < bytes.len() {
+        let digit = bytes[index];
+        assert!(
+            digit.is_ascii_digit(),
+            "RUSTSTREAM_BENCH_MESSAGES must be a positive number of deliveries"
+        );
+        count = count * 10 + (digit - b'0') as usize;
+        index += 1;
+    }
+    assert!(
+        count > 0,
+        "RUSTSTREAM_BENCH_MESSAGES must be a positive number of deliveries"
+    );
+    count
+}
 
 /// How long a region may wait for its deliveries before the run is called stuck. Valgrind slows
 /// the client down by an order of magnitude or more, and a reply waits for its acknowledgement.
@@ -105,15 +141,6 @@ const STALL: Duration = Duration::from_mins(10);
 /// How long a librdkafka admin call or a producer flush may block.
 const CALL: Duration = Duration::from_mins(2);
 
-/// How many percent more instructions than the run it compares with a run may take before it
-/// fails: the previous run on the machine, or `main` with `--baseline=main`.
-///
-/// Five rather than the core's two, because the broker is real: across three runs of one binary
-/// the reply scenario's run of a thousand deliveries moved by 2.3 percent, since how often the
-/// service's thread parks on a delivery report depends on timing. Consume and batch moved by less
-/// than a hundredth of a percent.
-const INSTRUCTION_LIMIT_PERCENT: f64 = 5.0;
-
 /// The measurement configuration every gated scenario shares.
 ///
 /// `steady` is what one delivery allocates in the steady state and `cold` what starting the
@@ -121,8 +148,9 @@ const INSTRUCTION_LIMIT_PERCENT: f64 = 5.0;
 /// longest run of the scenario (twice [`MESSAGES`] deliveries after the primer) is held to, so
 /// the run fails when the path allocates more than it does today. Both are floors the code is
 /// held to, so a number that goes down is lowered here in the same change. The instruction limit
-/// is relative, [`INSTRUCTION_LIMIT_PERCENT`]: `just bench-code --save-baseline=main` records a
-/// baseline and `just bench-code --baseline=main` compares against it.
+/// is relative, and `just bench-code` sets it only for a run against a named baseline:
+/// `just bench-code --save-baseline=main` records one, and `just bench-code --baseline=main`
+/// fails on five percent more instructions than it.
 pub fn config(steady: u64, cold: u64) -> LibraryBenchmarkConfig {
     config_every(steady, 1, cold)
 }
@@ -133,7 +161,7 @@ pub fn config_every(steady: u64, per: u64, cold: u64) -> LibraryBenchmarkConfig 
     let mut config = LibraryBenchmarkConfig::default();
     config
         .pass_through_env("KAFKA_TEST_URL")
-        .tool(callgrind().soft_limits([(EventKind::Ir, INSTRUCTION_LIMIT_PERCENT)]))
+        .tool(callgrind())
         .tool(dhat().hard_limits([(DhatMetric::TotalBlocks, blocks(steady, per, cold))]));
     config
 }

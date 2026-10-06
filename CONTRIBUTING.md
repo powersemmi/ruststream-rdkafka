@@ -40,6 +40,7 @@ git clone https://github.com/powersemmi/ruststream-rdkafka.git
 | `just typo`, `just zizmor` | uv | the uv documentation |
 | rendering the scaffold under `templates/` | cargo-generate | `cargo install cargo-generate --locked` |
 | `just bench` | Python 3 | the system package manager |
+| `just bench-code` | valgrind and Python 3 | the system package manager; the recipe installs the benchmark runner itself, at the release `Cargo.lock` pins |
 | the documentation site | Python 3.12 | `pip install -r docs/requirements.txt`, then `properdocs serve` |
 
 ## Checking a change
@@ -66,6 +67,12 @@ CI's lint job whenever it or the crate changes. `cargo generate --path templates
 `just bench` measures what this crate and the framework's runtime cost over the raw `rdkafka`
 client on the same stand and rewrites `docs/benchmarks/results.json`. It takes minutes and wants
 the machine to itself.
+
+`just bench-code` counts what a message costs in this crate's code, instructions and allocations
+under valgrind, and rewrites the `code` section of the same document. Every run fails on an
+allocation above a scenario's floor. Against a run saved on `main` with `--save-baseline=main`,
+`just bench-code --baseline=main` also fails on five percent more instructions. A pull request that
+changes the cost cites its numbers.
 
 ## Testing against a local core
 
