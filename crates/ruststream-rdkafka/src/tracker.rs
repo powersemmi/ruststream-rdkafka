@@ -582,9 +582,9 @@ impl ConsumerContext for TrackingContext {
                 "librdkafka did not apply the rebalance",
             );
         }
-        if kept {
+        if assigning {
             self.startup
-                .assigned(consumer, partitions, applied.as_ref().copied());
+                .assigned(consumer, partitions, applied.as_ref().copied(), kept);
         }
     }
 }
