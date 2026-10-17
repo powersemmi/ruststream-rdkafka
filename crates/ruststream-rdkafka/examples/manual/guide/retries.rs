@@ -72,6 +72,7 @@ struct Clients {
 const BACKOFF: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Refund {
     id: u64,
     card: String,

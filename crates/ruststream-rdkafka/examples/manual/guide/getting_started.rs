@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 // --8<-- [start:service]
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Order {
     id: u64,
     amount_cents: u64,

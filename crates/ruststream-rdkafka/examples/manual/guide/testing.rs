@@ -28,6 +28,7 @@ const INSTANT_LIMIT_CENTS: u64 = 100_000;
 const HOLD: Duration = Duration::from_secs(60);
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Payment {
     id: u64,
     amount_cents: u64,
@@ -50,6 +51,7 @@ impl MessageInfo for Payment {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Receipt {
     payment: u64,
     account: String,

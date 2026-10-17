@@ -51,6 +51,7 @@ fn broker(cluster: Cluster) -> KafkaBroker {
 // --8<-- [end:broker]
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Order {
     id: u64,
 }
@@ -72,6 +73,7 @@ impl MessageInfo for Order {
 }
 
 #[derive(Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Confirmation {
     id: u64,
 }

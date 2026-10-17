@@ -20,12 +20,14 @@ use serde::{Deserialize, Serialize};
 // --8<-- [start:post]
 /// The account a record belongs to, carried as the Kafka record key.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct AccountKey {
     #[serde(rename = "kafka-partition-key")]
     account: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Transfer {
     id: u64,
     amount_cents: i64,
@@ -33,6 +35,7 @@ struct Transfer {
 
 /// One line of an account's ledger, keyed by the account like the transfer it came from.
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Entry {
     transfer_id: u64,
     amount_cents: i64,
@@ -115,6 +118,7 @@ impl Handle<Transfer> for Screen {
 // --8<-- [start:archive]
 /// Where a record of one of the bank's topics sits.
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Archived {
     topic: String,
     partition: i32,
@@ -158,12 +162,14 @@ impl Handle<serde_json::Value, Archived, (), KafkaContext> for Archive {
 const URGENT: i32 = 2;
 
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Dispute {
     transfer_id: u64,
     urgent: bool,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Case {
     transfer_id: u64,
 }

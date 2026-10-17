@@ -67,12 +67,14 @@ struct Clients {
 
 // --8<-- [start:tracked]
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Payout {
     id: u64,
     amount_cents: u64,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct Paid {
     payout_id: u64,
 }
@@ -117,6 +119,7 @@ impl Handle<Payout, Paid, (), (), Clients> for PayOut {
 
 // --8<-- [start:auto]
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct PageView {
     page: String,
 }
@@ -142,6 +145,7 @@ impl Handle<PageView, (), (), (), Clients> for CountView {
 
 // --8<-- [start:batch]
 #[derive(Debug, PartialEq, Deserialize, JsonSchema)]
+#[schemars(crate = "ruststream::schemars")]
 struct StatementLine {
     payout_id: u64,
     amount_cents: u64,
