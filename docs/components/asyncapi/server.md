@@ -17,7 +17,7 @@ A `PLAINTEXT://` or `SASL_SSL://` prefix and any user info an address carries st
 The `protocol` is `kafka`.
 `protocolVersion` stays out: a Kafka client and the cluster agree on a version per request type, so no one number describes what clients speak.
 
-A broker with a [`SchemaRegistry`](api:ruststream_rdkafka::SchemaRegistry) adds the server binding.
+A broker with a [`SchemaRegistry`](api:ruststream_rdkafka::schema_registry::SchemaRegistry) adds the server binding.
 `schemaRegistryUrl` is the registry's address without user info, and `schemaRegistryVendor` is `confluent`, the envelope this crate writes.
 The SASL password and the registry's basic-auth credentials stay out of the document.
 
