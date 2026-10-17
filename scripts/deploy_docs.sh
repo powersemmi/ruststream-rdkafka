@@ -99,6 +99,10 @@ website="$repo/website"
 build_into() {
   local directory="$1"
   echo "Building /ruststream-rdkafka/$directory/"
+  # The bundler's persistent cache keys its entries by the source files, not by the base URL the
+  # environment sets, so a second build in this tree would reuse stylesheets whose font addresses
+  # point into the previous build's directory.
+  rm -rf "$website/node_modules/.cache"
   (cd "$website" &&
     DOCS_BASE_URL="/ruststream-rdkafka/$directory/" DOCS_VERSION_KIND="$kind" DOCS_LINE="$line" \
       DOCS_CONTENT_ROOT="$content" DOCS_SOURCE_REF="${source_ref:-main}" \
