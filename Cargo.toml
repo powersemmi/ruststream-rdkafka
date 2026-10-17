@@ -9,7 +9,7 @@ members = ["crates/ruststream-rdkafka", "crates/ruststream-rdkafka-bench"]
 exclude = ["templates"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
