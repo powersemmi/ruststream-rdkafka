@@ -762,6 +762,17 @@ test = true
 # guides: groups and ordering, commits, retries
 
 # guides: replay, exactly-once
+[[example]]
+name = "guide_replay"
+path = "examples/guide/replay.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_guide_replay"
+path = "examples/manual/guide/replay.rs"
+required-features = ["testing"]
+test = true
 
 # guides: schema registry, protobuf
 
