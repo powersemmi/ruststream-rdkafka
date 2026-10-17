@@ -45,7 +45,7 @@ test-brokers: brokers-up
 # What this crate costs over the rdkafka client it wraps, and what the runtime costs on top: two
 # scenarios, each run three times over - the client driven directly, this crate's own consumer,
 # and the whole service - against the stand the tests use. On demand only: it takes about fifteen
-# minutes and it wants the machine to itself. The page it feeds is docs/benchmarks.md.
+# minutes and it wants the machine to itself. It feeds the site's benchmarks pages.
 bench *ARGS: brokers-up
     #!/usr/bin/env bash
     set -euo pipefail
@@ -61,7 +61,7 @@ bench *ARGS: brokers-up
 # What a message costs in this crate's code and the framework above it, counted under valgrind:
 # instructions through callgrind and allocations through DHAT, each scenario a service on
 # `KafkaBroker` against the stand the tests use. What librdkafka does on its own threads is not
-# counted. It takes a minute or two. The page it feeds is the code table of docs/benchmarks.md.
+# counted. It takes a minute or two. It feeds the code table of the site's benchmarks pages.
 # RUSTFLAGS is cleared because valgrind aborts on the instructions a recent CPU advertises. Needs
 # valgrind.
 #

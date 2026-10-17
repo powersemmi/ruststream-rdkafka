@@ -47,7 +47,7 @@ const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
 ///     start_at(KafkaPosition::earliest())
 /// )]
 /// async fn project(order: &Order) -> HandlerOutcome {
-///     println!("projecting order {}", order.id);
+///     tracing::info!(order.id, "projecting");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -447,11 +447,17 @@ where
             for element in resolved.elements() {
                 // A partition with no record at or after the timestamp answers with no usable
                 // offset; the log end is the honest resume point (everything older is before
-                // the requested time).
+                // the requested time), pinned now for the reason the arm above pins it.
                 let offset = match element.offset() {
-                    Offset::Offset(offset) if offset >= 0 => Offset::Offset(offset),
-                    _ => Offset::End,
+                    Offset::Offset(offset) if offset >= 0 => offset,
+                    _ => {
+                        consumer
+                            .fetch_watermarks(element.topic(), element.partition(), SEEK_TIMEOUT)
+                            .map_err(KafkaError::consume)?
+                            .1
+                    }
                 };
+                let offset = Offset::Offset(offset);
                 targets
                     .add_partition_offset(element.topic(), element.partition(), offset)
                     .map_err(KafkaError::consume)?;

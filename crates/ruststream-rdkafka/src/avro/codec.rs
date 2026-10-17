@@ -153,7 +153,7 @@ fn avro_record_name(schema: &Schema) -> Option<&'static str> {
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {} of {}", order.id, order.item);
+///     tracing::info!(order.id, item = %order.item, "placed");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -216,22 +216,50 @@ impl AvroCodec {
     /// connects, and each delivery's writer schema on its consume path, both by the `prefetch`
     /// this is built from.
     ///
-    /// ```no_run
-    /// # use apache_avro::AvroSchema;
-    /// # use ruststream_rdkafka::avro::AvroCodec;
-    /// # use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
-    /// # use serde::{Deserialize, Serialize};
-    /// # #[derive(Serialize, Deserialize, AvroSchema)]
-    /// # struct Order { id: i64 }
-    /// # #[derive(Serialize, Deserialize, AvroSchema)]
-    /// # struct Shipment { id: i64 }
-    /// # fn check() {
-    /// let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-    /// let codec = AvroCodec::registry(&prefetch)
-    ///     .register::<Order>("orders-value")
-    ///     .register::<Shipment>("shipments-value");
-    /// # let _ = codec;
+    /// # Examples
+    ///
+    /// Each delivery decodes with the writer schema its envelope names, so a datum an older
+    /// producer wrote stays readable; each reply is framed with its subject's id:
+    ///
+    /// ```
+    /// # #[cfg(feature = "json")]
+    /// # mod demo {
+    /// use apache_avro::AvroSchema;
+    /// use ruststream_rdkafka::avro::AvroCodec;
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Serialize, Deserialize, AvroSchema)]
+    /// struct Order {
+    ///     id: i64,
+    /// }
+    ///
+    /// #[derive(Serialize, Deserialize, AvroSchema, Outgoing)]
+    /// struct Confirmation {
+    ///     id: i64,
+    /// }
+    ///
+    /// #[subscriber("orders", reply("confirmations"))]
+    /// async fn confirm(order: &Order) -> Confirmation {
+    ///     Confirmation { id: order.id }
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    ///     let codec = AvroCodec::registry(&prefetch).register::<Confirmation>("confirmations-value");
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .schema_prefetch(prefetch);
+    ///     // The scope's codec decodes every delivery; the reply names it again, at its own
+    ///     // position.
+    ///     let replies = codec.clone();
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
+    ///         b.include(confirm).out_reply(Publish::default()).codec(replies);
+    ///     })
+    /// }
     /// # }
+    /// # fn main() {}
     /// ```
     #[must_use]
     pub fn registry(prefetch: &SchemaPrefetch) -> Self {
@@ -267,6 +295,55 @@ impl AvroCodec {
     /// them per message and writing records under the wrong subject. Rename one with
     /// `#[serde(rename = "..")]`. Also panics when the prefetch's internal mutex is poisoned, or
     /// when `T`'s own schema cannot be serialized.
+    ///
+    /// # Examples
+    ///
+    /// Registration is the publish side: decoding needs none of it, since the writer schema
+    /// comes off the envelope's id. The registry is named once, building the prefetch every codec
+    /// is minted from:
+    ///
+    /// ```
+    /// # #[cfg(feature = "json")]
+    /// # mod demo {
+    /// use apache_avro::AvroSchema;
+    /// use ruststream_rdkafka::avro::AvroCodec;
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::schema_registry::{SchemaPrefetch, SchemaRegistry};
+    /// use serde::{Deserialize, Serialize};
+    ///
+    /// #[derive(Serialize, Deserialize, AvroSchema)]
+    /// pub struct Order {
+    ///     pub id: i64,
+    /// }
+    ///
+    /// #[derive(Serialize, Deserialize, AvroSchema, Outgoing)]
+    /// #[outgoing(name = "confirmations")]
+    /// pub struct Confirmation {
+    ///     pub id: i64,
+    /// }
+    ///
+    /// #[subscriber("orders", reply)]
+    /// async fn confirm(order: &Order) -> Confirmation {
+    ///     Confirmation { id: order.id }
+    /// }
+    ///
+    /// pub fn app() -> RustStream {
+    ///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    ///     let codec = AvroCodec::registry(&prefetch).register::<Confirmation>("confirmations-value");
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .schema_prefetch(prefetch);
+    ///     // The scope's codec decodes every delivery; the reply names it again, at its own
+    ///     // position.
+    ///     let replies = codec.clone();
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+    ///         .with_broker_codec(broker, codec, |b| {
+    ///             b.include(confirm).out_reply(Publish::default()).codec(replies);
+    ///         })
+    /// }
+    /// # }
+    /// # fn main() {}
+    /// ```
     #[must_use]
     pub fn register<T: Serialize + AvroSchema>(mut self, subject: impl Into<String>) -> Self {
         let subject = subject.into();

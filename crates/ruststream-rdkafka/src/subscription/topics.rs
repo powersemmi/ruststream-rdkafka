@@ -59,7 +59,7 @@ impl Subscribed {
 ///
 /// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
 /// async fn place(order: &Order, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
-///     println!("order {} from {topic}", order.id);
+///     tracing::info!(order.id, %topic, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -129,7 +129,7 @@ impl KafkaTopics {
     ///
     /// #[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-svc"))]
     /// async fn archive(event: &Event, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
-    ///     println!("{} on {topic}", event.kind);
+    ///     tracing::info!(kind = %event.kind, %topic, "recorded");
     ///     HandlerOutcome::ack()
     /// }
     ///
@@ -202,7 +202,7 @@ impl KafkaTopics {
     /// [`KafkaTopic::config`](crate::KafkaTopic::config).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.settings.config.push((key.into(), value.into()));
+        self.settings.config.set(key.into(), value.into());
         self
     }
 

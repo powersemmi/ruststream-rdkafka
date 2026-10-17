@@ -1,176 +1,149 @@
-//! Transactional publishing from a handler: an order fans out into per-item shipment commands,
-//! published all-or-nothing through a transactional publisher the runtime injects into the
-//! handler (an `Out` parameter paired from the policy the include site names). Readers on
-//! Kafka's default `read_committed` isolation see the whole fan-out or none of it, and the
-//! transactional id fences a zombie instance the moment its replacement initializes.
+//! A transactional slot: an order fans out into one shipment per item, and the shipments become
+//! visible together at the commit, or not at all. The scenarios are tests.
 //!
 //! ```text
-//! just brokers-up
-//! cargo run --example kafka_transactions -- run
+//! cargo test --example kafka_transactions --features testing
 //! ```
 
-// The fan-out below encodes and addresses its own records, so this file names the codec and the
-// message type on top of the prelude; the error type is named where it is handled.
-use ruststream::OutgoingMessage;
-use ruststream::codec::{Codec, JsonCodec};
-use ruststream_rdkafka::KafkaError;
+// A plain build compiles the service; the tests that use it exist only in the test build.
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
+
+use std::time::Duration;
+
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-// An order is read on one topic and relayed onto another, so it declares no topic of its own:
-// the enrichment's mount site names where the relayed copy lands.
-#[derive(Debug, Clone, Serialize, Deserialize, Outgoing)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+#[outgoing(name = "orders")]
 struct Order {
     id: u64,
     items: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct ItemShipment {
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing)]
+#[outgoing(name = "shipments")]
+struct Shipment {
     order_id: u64,
     item: String,
 }
 
-// --8<-- [start:fanout]
-/// Publishes one shipment command per item, all-or-nothing: `commit` makes the whole batch
-/// visible atomically to `read_committed` readers, and any failure aborts so shipments are
-/// never half-visible.
-async fn dispatch<P: TransactionalPublisher>(publisher: &P, order: &Order) -> Result<(), P::Error> {
-    publisher.begin_transaction().await?;
+// --8<-- [start:handler]
+#[derive(OutSlot)]
+#[publishes(Shipment)]
+struct Shipments;
+
+/// One shipment per item, published in one transaction.
+#[subscriber("orders")]
+async fn ship(
+    order: &Order,
+    Out(shipments): Out<impl TransactionalPublisher, Shipments>,
+) -> HandlerOutcome {
+    if shipments.begin_transaction().await.is_err() {
+        return HandlerOutcome::retry();
+    }
     for item in &order.items {
-        let command = ItemShipment {
+        if item.is_empty() {
+            // The shipments already sent belong to the transaction, so the abort discards them.
+            if shipments.abort().await.is_err() {
+                return HandlerOutcome::retry();
+            }
+            tracing::warn!(
+                order = order.id,
+                "an item has no name, the order ships nothing"
+            );
+            return HandlerOutcome::drop();
+        }
+        let shipment = Shipment {
             order_id: order.id,
             item: item.clone(),
         };
-        let payload = JsonCodec.encode(&command).expect("serializable");
-        let outgoing = OutgoingMessage::new("shipments", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing, None).await {
-            publisher.abort().await.ok();
-            return Err(err);
+        if shipments.message(&shipment).publish().await.is_err() {
+            shipments.abort().await.ok();
+            return HandlerOutcome::retry();
         }
     }
-    publisher.commit().await
-}
-// --8<-- [end:fanout]
-
-// --8<-- [start:handler]
-// The publisher is a handler parameter, not application state: `Out` pairs the policy attached
-// at the include site once the subscription opens, before the first delivery, so the handler
-// holds a live, already-fenced producer by construction.
-#[subscriber("orders")]
-async fn ship(order: &Order, Out(shipments): Out<impl TransactionalPublisher>) -> HandlerOutcome {
-    if dispatch(shipments, order).await.is_err() {
-        // Nothing became visible; ask for redelivery and try the whole fan-out again.
+    if shipments.commit().await.is_err() {
         return HandlerOutcome::retry();
     }
     HandlerOutcome::ack()
 }
 // --8<-- [end:handler]
 
-// --8<-- [start:partitions]
-// Concurrent transactional handlers: one producer runs one transaction at a time, so a worker
-// pool cannot share one publisher (a second `begin_transaction` is a `TransactionBusy` error,
-// not a silent merge). Under the default partition lanes a partition processes serially on one
-// lane, so a publisher per source partition gives every lane its own independent transaction -
-// and the id set follows the topic's partitions, not the worker count, so zombie fencing
-// survives `workers(n)` changes.
-async fn issue<L: PartitionLanes>(
-    publishers: &L,
-    order: &Order,
-    partition: i32,
-) -> Result<(), KafkaError> {
-    let publisher = publishers.for_partition(partition).await?;
-    publisher.begin_transaction().await?;
-    for item in &order.items {
-        let line = ItemShipment {
-            order_id: order.id,
-            item: item.clone(),
-        };
-        let payload = JsonCodec.encode(&line).expect("serializable");
-        let outgoing = OutgoingMessage::new("invoice-lines", payload.as_ref());
-        if let Err(err) = publisher.publish(outgoing, None).await {
-            publisher.abort().await.ok();
-            return Err(err);
-        }
-    }
-    publisher.commit().await
-}
-
-#[subscriber(
-    KafkaTopic::new("billing").group("billing-svc").commit(Commit::Tracked),
-    workers(4, by_key)
-)]
-async fn bill(
-    order: &Order,
-    // The delivery's source partition picks the lane's publisher; the key injects it as a
-    // plain argument (the DI form of `ctx.context(keys::Partition)`).
-    Ctx(partition): Ctx<Partition>,
-    Out(invoices): Out<impl PartitionLanes>,
-) -> HandlerOutcome {
-    if issue(invoices, order, partition).await.is_err() {
-        return HandlerOutcome::retry();
-    }
-    HandlerOutcome::ack()
-}
-// --8<-- [end:partitions]
-
-// --8<-- [start:eos]
-// Exactly-once: every lane publishes into one shared EOS pipeline, and the pipeline commits
-// the consumed offsets inside the producer transaction (send_offsets_to_transaction), so
-// source positions move atomically with the published records. A crash or an aborted window
-// rewinds both - the output topic never sees a duplicate. The subscription's
-// `Commit::Transactional` names the pipeline id; the consumer stops committing on its own.
-//
-// A publishing handler just returns the value: the runtime encodes it, and the pipeline's
-// reply publisher (wired below) pairs it with this delivery's consumed offset automatically.
-#[subscriber(
-    KafkaTopic::new("raw-orders")
-        .group("enrich-svc")
-        .commit(Commit::Transactional("enrich-svc-1".into())),
-    reply("enriched-orders"),
-    workers(4, by_key)
-)]
-async fn enrich(order: &Order) -> Order {
-    order.clone()
-}
-// --8<-- [end:eos]
-
-#[ruststream::app]
+// --8<-- [start:app]
 fn app() -> impl App {
-    let broker = KafkaBroker::new(["localhost:9092"]).default_group("shipments-svc");
-    RustStream::new(AppInfo::new("shipments", "0.1.0")).with_broker(broker, |b| {
-        // --8<-- [start:id]
-        // A publish policy is pure declaration - it holds no connection, so it is written at
-        // the include site and the runtime pairs it into a live publisher after the broker
-        // connects. The transactional id must be stable and unique per concurrent producer:
-        // it is what fences a zombie instance. One id per service replica (pod ordinal,
-        // instance id) is the usual scheme.
-        b.include(ship)
-            .out(
-                DefaultSlot,
-                Publish::default().transactional_id("shipments-svc-1"),
-            )
-            .build();
-        // --8<-- [end:id]
-        // `per_partition` makes the id the base of one id per source partition
-        // ("billing-svc-1-p{partition}"), pairing into `TransactionalPartitions`.
-        b.include(bill)
-            .out(
-                DefaultSlot,
-                Publish::default()
-                    .transactional_id("billing-svc-1")
-                    .per_partition(),
-            )
-            .build();
-        // --8<-- [start:eos_wiring]
-        // Every reply of `enrich` rides the pipeline's window, paired with its offset. The
-        // pipeline id doubles as the producer's transactional id, and the `enrich`
-        // subscription names the same id in its `Commit::Transactional` mode. `EosReplies` is
-        // what relays the delivery's source coordinates onto the reply, which is how the
-        // pipeline pairs the two.
-        b.include(enrich)
-            .out_reply(EosPublish::new("enrich-svc-1"))
-            .transform(EosReplies);
-        // --8<-- [end:eos_wiring]
-    })
+    let shipments = Publish::default()
+        .transactional_id("shipments-svc-1")
+        .transaction_timeout(Duration::from_secs(10));
+    RustStream::new(AppInfo::new("shipments", "0.1.0")).with_broker(
+        KafkaBroker::new(["localhost:9092"]).default_group("shipments-svc"),
+        |b| {
+            b.include(ship).out(Shipments, shipments).build();
+        },
+    )
+}
+// --8<-- [end:app]
+
+// The scenarios are the tests below; the command in the header runs them.
+fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+
+    use super::{Order, Shipment, Shipments, app};
+
+    #[tokio::test]
+    async fn an_order_ships_every_item_at_the_commit() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+        let broker = tb.broker::<KafkaBroker>();
+        broker
+            .message(&Order {
+                id: 1,
+                items: vec!["anvil".to_owned(), "rope".to_owned()],
+            })
+            .publish()
+            .await?;
+
+        broker
+            .published::<Shipment>("shipments")
+            .assert_called(2)
+            .with(&Shipment {
+                order_id: 1,
+                item: "rope".to_owned(),
+            });
+        broker
+            .subscriber("orders")
+            .assert_called_once()
+            .settled(HandlerOutcome::ack());
+        tb.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_aborted_order_ships_nothing() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+        let broker = tb.broker::<KafkaBroker>();
+        broker
+            .message(&Order {
+                id: 2,
+                items: vec!["anvil".to_owned(), String::new()],
+            })
+            .publish()
+            .await?;
+
+        // The first shipment went into the transaction, and the abort discarded it.
+        tb.out::<Shipments>().assert_called_once();
+        broker
+            .published::<Shipment>("shipments")
+            .assert_not_called();
+        broker
+            .subscriber("orders")
+            .assert_called_once()
+            .settled(HandlerOutcome::drop());
+        tb.shutdown().await?;
+        Ok(())
+    }
 }

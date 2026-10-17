@@ -16,6 +16,7 @@ pub use topics::KafkaTopics;
 use rdkafka::error::KafkaError as RdKafkaError;
 
 use crate::error::KafkaError;
+use crate::properties::Properties;
 
 /// Where a consumer group starts reading when it has no valid committed offset.
 ///
@@ -86,6 +87,55 @@ pub enum LaneKey {
 }
 
 /// How processed deliveries are committed back to the consumer group.
+///
+/// # Examples
+///
+/// A tracked subscription with one lane per record key, a cap on deliveries and a dead-letter
+/// topic:
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Payment {
+///     id: u64,
+/// }
+///
+/// /// One lane per record key, so payments of one account stay ordered while others run
+/// /// concurrently.
+/// #[subscriber(
+///     KafkaTopic::new("payments")
+///         .group("payments-svc")
+///         .commit(Commit::Tracked)
+///         .start(StartOffset::Earliest)
+///         .lane_key(LaneKey::RecordKey),
+///     workers(8, by_key)
+/// )]
+/// async fn charge(payment: &Payment) -> HandlerOutcome {
+///     if payment.id == 0 {
+///         return HandlerOutcome::drop();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]),
+///         |b| {
+///             // Five deliveries of one payment, the first included; the sixth goes to the
+///             // dead-letter topic instead, payload and headers as they arrived.
+///             b.include(charge)
+///                 .max_attempts(nonzero!(5u32))
+///                 .dead_letter("payments.dlq");
+///         },
+///     )
+/// }
+/// # }
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Commit {
@@ -124,7 +174,7 @@ pub(crate) struct GroupSettings {
     pub(crate) commit: Commit,
     pub(crate) assignment: Option<Assignment>,
     pub(crate) lane_key: LaneKey,
-    pub(crate) config: Vec<(String, String)>,
+    pub(crate) config: Properties,
 }
 
 /// How the consumer takes its partitions: through the group protocol, or by naming them.

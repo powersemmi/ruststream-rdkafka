@@ -28,13 +28,15 @@ use tokio::sync::OnceCell;
 use tokio::task;
 
 #[cfg(feature = "testing")]
+use rdkafka::types::RDKafkaType;
+#[cfg(feature = "testing")]
 use ruststream::Str;
 
 use crate::broker::{ConnState, ConnectedKafkaBroker};
 use crate::convert;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
-use crate::in_process::{Cluster, ProducerId};
+use crate::in_process::{Cluster, ProducerId, create_offline};
 
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -154,14 +156,23 @@ impl KafkaOptions {
 /// # #[cfg(feature = "json")]
 /// # mod demo {
 /// use ruststream_rdkafka::prelude::*;
-/// # #[derive(serde::Deserialize)]
-/// # struct Order { id: u64 }
-/// # #[derive(serde::Serialize, Outgoing)]
-/// # struct Audit { id: u64 }
-/// # #[derive(OutSlot)]
-/// # #[publishes(Audit)]
-/// # struct Journal;
+/// use serde::{Deserialize, Serialize};
 ///
+/// #[derive(Deserialize)]
+/// struct Order {
+///     id: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// struct Audit {
+///     id: u64,
+/// }
+///
+/// #[derive(OutSlot)]
+/// #[publishes(Audit)]
+/// struct Journal;
+///
+/// /// The slot is bounded on the options type, which is what puts `partition(..)` on its builder.
 /// #[subscriber("orders")]
 /// async fn record(
 ///     order: &Order,
@@ -178,7 +189,17 @@ impl KafkaOptions {
 ///     }
 ///     HandlerOutcome::ack()
 /// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
+///         |b| {
+///             b.include(record).out(Journal, Publish::default()).build();
+///         },
+///     )
+/// }
 /// # }
+/// # fn main() {}
 /// ```
 pub trait KafkaPublishSteps {
     /// Produces this one record to `partition`, ahead of the partitioner and the record key.
@@ -764,7 +785,7 @@ pub(crate) async fn open_transactional(
     if let Some(cluster) = state.in_process() {
         // The configuration is validated as the live producer's creation would validate it, and
         // the pairing fences every earlier one with this id, as `init_transactions` does.
-        config.create_native_config().map_err(KafkaError::publish)?;
+        create_offline(&config, RDKafkaType::RD_KAFKA_PRODUCER).map_err(KafkaError::publish)?;
         let producer = TxProducer::InProcess {
             cluster: Arc::clone(cluster),
             id: cluster.init_transactions(policy.id()),
@@ -824,6 +845,76 @@ struct TxInner {
 /// Its transactional producer is created and initialized when the
 /// [`KafkaTransactionalPublish`] policy pairs, so nothing is lazy here: the handle is fenced
 /// from the moment it exists. Clones share one producer and one transaction state.
+///
+/// Outside an open transaction the handle publishes like a plain one. A second
+/// `begin_transaction` reports [`KafkaError::TransactionBusy`], and a `commit` or `abort` with
+/// nothing open reports [`KafkaError::NoTransaction`].
+///
+/// # Examples
+///
+/// A handler receives the publisher through an `Out` slot bounded by the core's
+/// [`TransactionalPublisher`] capability, so its body names nothing of this crate's:
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Deserialize)]
+/// struct Refund {
+///     order_id: u64,
+///     lines: u64,
+/// }
+///
+/// #[derive(Serialize, Outgoing)]
+/// #[outgoing(name = "refund-lines")]
+/// struct RefundLine {
+///     order_id: u64,
+///     line: u64,
+/// }
+///
+/// #[derive(OutSlot)]
+/// #[publishes(RefundLine)]
+/// struct Lines;
+///
+/// #[subscriber("refunds")]
+/// async fn refund(
+///     order: &Refund,
+///     Out(lines): Out<impl TransactionalPublisher, Lines>,
+/// ) -> HandlerOutcome {
+///     if lines.begin_transaction().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     for line in 0..order.lines {
+///         let entry = RefundLine {
+///             order_id: order.order_id,
+///             line,
+///         };
+///         if lines.message(&entry).publish().await.is_err() {
+///             lines.abort().await.ok();
+///             return HandlerOutcome::retry();
+///         }
+///     }
+///     if lines.commit().await.is_err() {
+///         return HandlerOutcome::retry();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("refunds", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("refunds-svc"),
+///         |b| {
+///             b.include(refund)
+///                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
+///                 .build();
+///         },
+///     )
+/// }
+/// # }
+/// # fn main() {}
+/// ```
 #[derive(Clone)]
 pub struct KafkaTransactionalPublisher {
     inner: Arc<TxInner>,

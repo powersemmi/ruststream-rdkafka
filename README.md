@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <b><a href="https://powersemmi.github.io/ruststream-rdkafka/">Documentation</a></b>
+  <b><a href="https://powersemmi.github.io/ruststream-rdkafka/latest/">Documentation</a></b>
 </p>
 
 ---
@@ -131,13 +131,16 @@ tb.broker::<KafkaBroker>()
 
 ## Documentation
 
-- [Subscribing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#subscribing) - descriptors, start offsets, commit modes, keyed lanes,
-  retries, batches, repositioning.
-- [Publishing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#publishing) - policies, record keys, transactions, exactly-once pipelines.
-- [`schema_registry`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/schema_registry/index.html) - Confluent framing, with
-  [`avro`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/avro/index.html) and [`protobuf`](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/protobuf/index.html) beside it.
-- [Testing](https://docs.rs/ruststream-rdkafka/latest/ruststream_rdkafka/index.html#testing) - the production app under `TestApp`, in process and live.
-- The framework: <https://powersemmi.github.io/ruststream/latest>
+- [Getting started](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/getting-started/) - installation and a first service against a
+  local Kafka.
+- [Guides](https://powersemmi.github.io/ruststream-rdkafka/latest/) - consumer groups and ordering, commits, retries, replay, exactly-once, Schema
+  Registry, Protobuf, testing and a production cluster.
+- [Components](https://powersemmi.github.io/ruststream-rdkafka/latest/components/) - one page per part of the crate: the broker, subscriptions,
+  settlement, publishing, transactions, the registry formats and testing.
+- [Architecture](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/) - how the crate sits between librdkafka and the runtime.
+- [Benchmarks](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/benchmarks/) - what the crate costs over the raw client.
+- [API reference](https://docs.rs/ruststream-rdkafka) - every item on docs.rs.
+- The framework: <https://powersemmi.github.io/ruststream/latest/>
 
 ## Minimum supported Rust version
 

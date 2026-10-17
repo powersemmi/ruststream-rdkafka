@@ -1,35 +1,21 @@
-//! Protobuf with nothing manual in the handler: a generated message arrives as itself, the
-//! handler returns its reply, and the Confluent envelope is put on and taken off around the body.
-//!
-//! Two halves make that work, and they are asymmetric on purpose. Reading needs no registry at
-//! all - Protobuf is tag-addressed, so a delivery decodes against the reader's own type - so the
-//! type names this crate's `decode_confluent` on its decode lane and the envelope never reaches
-//! the signature. Writing does need one number, the subject's schema id, and a value cannot
-//! fetch it: `Serialized::wire_bytes` is synchronous and has only `&self`. The publish path can,
-//! because it knows the destination topic, so the value writes bare Protobuf through `prost` and
-//! the reply's publisher puts the id and the message-index path in front of it.
-//!
-//! To set framing once for a whole app instead of per mount site, add `ProtobufFrame` as a
-//! `publish_layer`; it covers every publish that leaves through a slot or a publisher the mount
-//! never named. The two compose - whichever runs first frames the payload, and the other leaves
-//! the envelope it finds alone.
+//! Protobuf on the byte lanes: a `prost` message arrives as itself, past its Confluent envelope,
+//! and the handler returns its reply. No registry takes part. The scenarios are tests.
 //!
 //! ```text
-//! just brokers-up
-//! cargo run --example kafka_protobuf_plain --features protobuf -- run
+//! cargo test --example kafka_protobuf_plain --features protobuf,testing
 //! ```
 
-use ruststream::prelude::*;
-use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream_rdkafka::{KafkaBroker, KafkaPublish, SchemaRegistry};
+// A plain build compiles the service; the tests that use it exist only in the test build.
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
+
+use ruststream_rdkafka::prelude::*;
+use ruststream_rdkafka::protobuf::decode_confluent;
 
 // --8<-- [start:types]
-// What `prost-build` emits, plus the lane derives. `#[wire(..)]` names the two halves
-// separately, because they are not symmetric: `prost` owns the bytes on the way out, and reading
-// has an envelope to step over first. The reply topic is a property of the confirmation itself,
-// so the type declares it next to its encode half and the subscriber's clause names none.
+// What `prost-build` emits, plus the lane derives: the order decodes past the envelope, and the
+// confirmation encodes itself through `prost`.
 #[derive(Clone, PartialEq, prost::Message, Deserialized)]
-#[wire(decode = ruststream_rdkafka::protobuf::decode_confluent)]
+#[wire(decode = decode_confluent)]
 struct Order {
     #[prost(int64, tag = "1")]
     id: i64,
@@ -38,7 +24,7 @@ struct Order {
 }
 
 #[derive(Clone, PartialEq, prost::Message, Serialized, Outgoing)]
-#[wire(encode = ::prost::Message::encode)]
+#[wire(encode = prost::Message::encode)]
 #[outgoing(name = "confirmations")]
 struct Confirmation {
     #[prost(int64, tag = "1")]
@@ -49,10 +35,10 @@ struct Confirmation {
 // --8<-- [end:types]
 
 // --8<-- [start:handler]
-// An ordinary function over ordinary types: nothing about the wire in the signature, and no
-// publish call. The delivery arrived past its envelope, and the reply leaves before one.
+/// Confirms an order that names an item.
 #[subscriber("orders", reply)]
 async fn confirm(order: &Order) -> Confirmation {
+    tracing::info!(order = order.id, item = %order.item, "confirming");
     Confirmation {
         id: order.id,
         accepted: !order.item.is_empty(),
@@ -60,20 +46,90 @@ async fn confirm(order: &Order) -> Confirmation {
 }
 // --8<-- [end:handler]
 
-#[ruststream::app]
+// --8<-- [start:app]
 fn app() -> impl App {
-    // --8<-- [start:wiring]
-    let registry = SchemaRegistry::new("http://localhost:8081");
-
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
         |b| {
-            // The framing is named where the reply's publisher is named. The message index
-            // defaults to the schema's first top-level message, which Confluent optimises to a
-            // single zero byte; `.message(topic, "pkg.Message")` pins another.
-            b.include(confirm)
-                .out_reply(KafkaPublish::framed(&registry));
+            b.include(confirm);
         },
     )
-    // --8<-- [end:wiring]
+}
+// --8<-- [end:app]
+
+// The scenarios are the tests below; the command in the header runs them.
+fn main() {}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use prost::Message as _;
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+    use ruststream_rdkafka::schema_registry::encode_envelope;
+
+    use super::{Confirmation, Order};
+
+    /// A record exactly as a producer wrote it.
+    #[derive(Serialized, Outgoing)]
+    #[outgoing(name = "orders")]
+    struct Record(Vec<u8>);
+
+    fn order() -> Order {
+        Order {
+            id: 42,
+            item: "anvil".to_owned(),
+        }
+    }
+
+    /// The reply's bytes on the topic: the bare message `prost` writes.
+    fn confirmed() -> Vec<u8> {
+        Confirmation {
+            id: 42,
+            accepted: true,
+        }
+        .encode_to_vec()
+    }
+
+    #[tokio::test]
+    async fn a_framed_order_is_read_past_its_envelope() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(super::app()).await?;
+        let broker = tb.broker::<KafkaBroker>();
+        // Schema id 7, then the index path of the schema's first message (a single zero byte).
+        let mut datum = vec![0];
+        datum.extend(order().encode_to_vec());
+        broker
+            .message(&Record(encode_envelope(7, &datum)))
+            .publish()
+            .await?;
+
+        broker
+            .published::<()>("confirmations")
+            .assert_called_once()
+            .with_raw(&confirmed());
+        broker
+            .subscriber("orders")
+            .assert_called_once()
+            .settled(HandlerOutcome::ack());
+        tb.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_bare_order_is_read_as_it_is() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(super::app()).await?;
+        let broker = tb.broker::<KafkaBroker>();
+        broker
+            .message(&Record(order().encode_to_vec()))
+            .publish()
+            .await?;
+
+        broker
+            .published::<()>("confirmations")
+            .assert_called_once()
+            .with_raw(&confirmed());
+        tb.shutdown().await?;
+        Ok(())
+    }
 }

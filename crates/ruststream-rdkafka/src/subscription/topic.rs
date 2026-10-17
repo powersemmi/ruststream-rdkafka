@@ -41,7 +41,7 @@ use crate::subscriber::KafkaSubscriber;
 ///         .config("fetch.min.bytes", "1024")
 /// )]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -120,7 +120,7 @@ impl KafkaTopic {
     ///     workers(8, by_key)
     /// )]
     /// async fn place(order: &Order) -> HandlerOutcome {
-    ///     println!("order {}", order.id);
+    ///     tracing::info!(order.id, "accepted");
     ///     HandlerOutcome::ack()
     /// }
     ///
@@ -149,7 +149,7 @@ impl KafkaTopic {
     /// refuses to open instead. [`Commit::Auto`](Commit::Auto) owns neither and takes both.
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.settings.config.push((key.into(), value.into()));
+        self.settings.config.set(key.into(), value.into());
         self
     }
 

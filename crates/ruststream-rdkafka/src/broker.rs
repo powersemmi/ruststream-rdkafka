@@ -33,6 +33,7 @@ use crate::eos::EosSource;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::{Cluster, MemberSpec, ProducerSettings};
+use crate::properties::Properties;
 use crate::publisher::{KafkaPublish, KafkaPublisher};
 #[cfg(feature = "schema-registry")]
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
@@ -223,7 +224,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -237,12 +238,76 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 /// }
 /// # let _ = app;
 /// ```
+///
+/// A test runs the app `main` runs. With the `testing` feature, `TestApp::start` connects this
+/// broker to an in-process Kafka cluster, and the test addresses it by its production type:
+///
+/// ```
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # mod demo {
+/// use std::error::Error;
+///
+/// use ruststream::testing::TestApp;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+/// #[outgoing(name = "payments")]
+/// pub struct Payment {
+///     pub amount: u64,
+/// }
+///
+/// #[subscriber(KafkaTopic::new("payments").commit(Commit::Tracked))]
+/// async fn accept(payment: &Payment) -> HandlerOutcome {
+///     if payment.amount == 0 {
+///         return HandlerOutcome::drop();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// /// The app `main` runs.
+/// pub fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
+///         KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
+///         |b| {
+///             b.include(accept);
+///         },
+///     )
+/// }
+///
+/// pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn Error>> {
+///     let tb = TestApp::start(app()).await?;
+///
+///     // The publish returns once the handler it woke has settled.
+///     tb.broker::<KafkaBroker>()
+///         .message(&Payment { amount: 0 })
+///         .publish()
+///         .await?;
+///
+///     tb.broker::<KafkaBroker>()
+///         .subscriber("payments")
+///         .assert_called(1)
+///         .with(&Payment { amount: 0 })
+///         .settled(HandlerOutcome::drop());
+///
+///     tb.shutdown().await?;
+///     Ok(())
+/// }
+/// # }
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// #     demo::zero_amounts_are_dropped().await
+/// # }
+/// # #[cfg(not(all(feature = "json", feature = "testing")))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct KafkaBroker {
     servers: Vec<String>,
     default_group: Option<String>,
-    client_config: Vec<(String, String)>,
-    producer_config: Vec<(String, String)>,
+    client_config: Properties,
+    producer_config: Properties,
     connect_timeout: Duration,
     flush_timeout: Duration,
     assignment_timeout: Duration,
@@ -265,8 +330,8 @@ impl KafkaBroker {
         Self {
             servers: servers.into_iter().map(Into::into).collect(),
             default_group: None,
-            client_config: Vec::new(),
-            producer_config: Vec::new(),
+            client_config: Properties::default(),
+            producer_config: Properties::default(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
             assignment_timeout: DEFAULT_ASSIGNMENT_TIMEOUT,
@@ -292,10 +357,11 @@ impl KafkaBroker {
 
     /// Raw librdkafka property passthrough applied to every client this broker creates
     /// (consumers and the producer). Keys that only apply to one side are ignored by the other,
-    /// exactly as librdkafka does.
+    /// exactly as librdkafka does. The broker's `Debug` output names every key and hides the
+    /// values librdkafka marks sensitive (`sasl.password`, `ssl.key.pem` and the like).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.client_config.push((key.into(), value.into()));
+        self.client_config.set(key.into(), value.into());
         self
     }
 
@@ -303,7 +369,7 @@ impl KafkaBroker {
     /// [`config`](Self::config) (for example `acks` or `message.timeout.ms`).
     #[must_use]
     pub fn producer_config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.producer_config.push((key.into(), value.into()));
+        self.producer_config.set(key.into(), value.into());
         self
     }
 
@@ -347,7 +413,7 @@ impl KafkaBroker {
     ///
     /// #[subscriber("orders")]
     /// async fn place(order: &Order) -> HandlerOutcome {
-    ///     println!("order {}", order.id);
+    ///     tracing::info!(order.id, "accepted");
     ///     HandlerOutcome::ack()
     /// }
     ///
@@ -489,8 +555,8 @@ impl Broker for KafkaBroker {
 /// an in-process cluster instead of librdkafka and carrying every setting of this broker.
 ///
 /// It refuses what [`connect`](Broker::connect) refuses before it reaches the network: no
-/// bootstrap server, a producer property librdkafka does not accept, and a registry subject a
-/// schema prefetch cannot resolve.
+/// bootstrap server, a producer configuration librdkafka refuses to create a client from, and a
+/// registry subject a schema prefetch cannot resolve.
 #[cfg(feature = "testing")]
 impl InProcess for KafkaBroker {
     fn connect_in_process(
@@ -629,7 +695,7 @@ impl KafkaBroker {
 ///     }
 ///     let closed = connected.shutdown().await?;
 ///     if closed.unflushed_records() > 0 {
-///         eprintln!("{} records were not flushed", closed.unflushed_records());
+///         tracing::warn!(unflushed = closed.unflushed_records(), "records were not flushed");
 ///     }
 ///     Ok(())
 /// }
@@ -717,7 +783,7 @@ impl ConnectedKafkaBroker {
     ///     while let Some(record) = records.next().await {
     ///         let record = record?;
     ///         let (partition, offset) = (record.partition(), record.offset());
-    ///         println!("{partition}@{offset}: {} bytes", record.payload().len());
+    ///         tracing::info!(%partition, %offset, bytes = record.payload().len(), "read");
     ///         record.ack().await?;
     ///     }
     ///     Ok(())
