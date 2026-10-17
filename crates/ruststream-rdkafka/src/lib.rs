@@ -12,6 +12,7 @@ mod error;
 #[cfg(feature = "testing")]
 mod in_process;
 mod message;
+mod properties;
 mod publisher;
 mod record;
 mod redelivery;

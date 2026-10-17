@@ -33,6 +33,7 @@ use crate::eos::EosSource;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::{Cluster, MemberSpec, ProducerSettings};
+use crate::properties::Properties;
 use crate::publisher::{KafkaPublish, KafkaPublisher};
 #[cfg(feature = "schema-registry")]
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
@@ -241,8 +242,8 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 pub struct KafkaBroker {
     servers: Vec<String>,
     default_group: Option<String>,
-    client_config: Vec<(String, String)>,
-    producer_config: Vec<(String, String)>,
+    client_config: Properties,
+    producer_config: Properties,
     connect_timeout: Duration,
     flush_timeout: Duration,
     assignment_timeout: Duration,
@@ -265,8 +266,8 @@ impl KafkaBroker {
         Self {
             servers: servers.into_iter().map(Into::into).collect(),
             default_group: None,
-            client_config: Vec::new(),
-            producer_config: Vec::new(),
+            client_config: Properties::default(),
+            producer_config: Properties::default(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             flush_timeout: DEFAULT_FLUSH_TIMEOUT,
             assignment_timeout: DEFAULT_ASSIGNMENT_TIMEOUT,
@@ -292,10 +293,11 @@ impl KafkaBroker {
 
     /// Raw librdkafka property passthrough applied to every client this broker creates
     /// (consumers and the producer). Keys that only apply to one side are ignored by the other,
-    /// exactly as librdkafka does.
+    /// exactly as librdkafka does. The broker's `Debug` output names every key and hides the
+    /// values librdkafka marks sensitive (`sasl.password`, `ssl.key.pem` and the like).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.client_config.push((key.into(), value.into()));
+        self.client_config.set(key.into(), value.into());
         self
     }
 
@@ -303,7 +305,7 @@ impl KafkaBroker {
     /// [`config`](Self::config) (for example `acks` or `message.timeout.ms`).
     #[must_use]
     pub fn producer_config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.producer_config.push((key.into(), value.into()));
+        self.producer_config.set(key.into(), value.into());
         self
     }
 
