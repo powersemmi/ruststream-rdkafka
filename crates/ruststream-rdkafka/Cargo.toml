@@ -96,9 +96,22 @@ tikv-jemalloc-ctl = { version = "0.7", features = ["stats"] }
 [package.metadata.docs.rs]
 features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 
-# The kafka_* examples are the docs-site snippet sources; keep them runnable and snippet-checked.
+# The examples are the sources of the documentation site's code blocks: each one compiles, and
+# the ones a page shows carry the tests that prove what the page says.
+
+# --- examples: broker ---
+
 [[example]]
 name = "kafka_quickstart"
+
+[[example]]
+name = "kafka_producer"
+
+[[example]]
+name = "kafka_testing"
+required-features = ["testing"]
+
+# --- examples: subscriptions ---
 
 [[example]]
 name = "kafka_topics"
@@ -107,25 +120,40 @@ name = "kafka_topics"
 name = "kafka_keys"
 
 [[example]]
-name = "kafka_producer"
-
-[[example]]
-name = "kafka_distribution"
-
-[[example]]
 name = "kafka_multi_topic"
 
 [[example]]
 name = "kafka_batches"
 
 [[example]]
+name = "kafka_seek"
+
+# --- examples: settlement ---
+
+[[example]]
 name = "kafka_retries"
 
 [[example]]
-name = "kafka_seek"
+name = "kafka_distribution"
+
+# --- examples: transactions ---
 
 [[example]]
 name = "kafka_transactions"
+
+[[example]]
+name = "kafka_protobuf"
+required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_protobuf_plain"
+required-features = ["protobuf"]
+
+[[example]]
+name = "kafka_protobuf_testing"
+required-features = ["protobuf", "testing"]
+
+# --- examples: registry ---
 
 [[example]]
 name = "kafka_schema_registry"
@@ -143,18 +171,6 @@ required-features = ["avro"]
 name = "kafka_avro_codec"
 required-features = ["avro"]
 
-[[example]]
-name = "kafka_protobuf"
-required-features = ["protobuf"]
+# --- examples: guides ---
 
-[[example]]
-name = "kafka_protobuf_plain"
-required-features = ["protobuf"]
-
-[[example]]
-name = "kafka_protobuf_testing"
-required-features = ["protobuf", "testing"]
-
-[[example]]
-name = "kafka_testing"
-required-features = ["testing"]
+# --- examples: architecture ---
