@@ -70,6 +70,8 @@ just bench
 The recipe starts the stand from `docker-compose.test.yml`, runs both comparison scenarios, stops
 the stand and rewrites `docs/benchmarks/results.json`. It takes about fifteen minutes and wants the
 machine to itself. It clears `RUSTFLAGS`, so the binary is not tied to the CPU it was built on.
+Both recipes build the benchmarks the way a release is built, with fat link-time optimization
+across crates, so the numbers describe the code a service ships.
 
 ```bash
 just bench-code
