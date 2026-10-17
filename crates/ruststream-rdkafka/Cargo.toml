@@ -315,6 +315,28 @@ path = "examples/manual/kafka_batches.rs"
 required-features = ["testing"]
 test = true
 
+[[example]]
+name = "kafka_seek"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_seek"
+path = "examples/manual/kafka_seek.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_positions_timestamp"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_positions_timestamp"
+path = "examples/manual/kafka_positions_timestamp.rs"
+required-features = ["testing"]
+test = true
+
 # --- examples: settlement ---
 
 [[example]]
