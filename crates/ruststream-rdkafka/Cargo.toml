@@ -719,4 +719,26 @@ test = true
 
 # --- examples: guides ---
 
+# Each guide is one service: `guide_<slug>` the form with the macros, `manual_guide_<slug>` the
+# same service written by hand. Each pair carries the tests that prove what its page says.
+
+# guides: getting started, testing, production
+[[example]]
+name = "guide_getting_started"
+path = "examples/guide/getting_started.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_guide_getting_started"
+path = "examples/manual/guide/getting_started.rs"
+required-features = ["testing"]
+test = true
+
+# guides: groups and ordering, commits, retries
+
+# guides: replay, exactly-once
+
+# guides: schema registry, protobuf
+
 # --- examples: architecture ---
