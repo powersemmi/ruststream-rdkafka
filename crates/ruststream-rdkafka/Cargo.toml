@@ -463,6 +463,17 @@ required-features = ["testing"]
 test = true
 
 [[example]]
+name = "kafka_transactions_partitions"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_transactions_partitions"
+path = "examples/manual/kafka_transactions_partitions.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
 name = "kafka_protobuf"
 required-features = ["protobuf"]
 
