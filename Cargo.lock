@@ -532,7 +532,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1690,7 +1690,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2015,7 +2015,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2038,9 +2038,9 @@ dependencies = [
 
 [[package]]
 name = "ruststream"
-version = "0.7.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99b143cfae828a90314d76db00092b52877a7599d684677d5a53961a1e5827cb"
+checksum = "d9ffd683ac3a21e9396260df1390909295c296db2a4f8738de205bb2c496ad46"
 dependencies = [
  "bytes",
  "bytes-utils",
@@ -2062,9 +2062,9 @@ dependencies = [
 
 [[package]]
 name = "ruststream-macros"
-version = "0.7.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "826fb5fac343948f07c1653cc6f3164086233d1d0b473605cfeb322218310ca9"
+checksum = "57cad28d048e6680053ef6e4361af0688c0902b18ed90c927f08e769cd786c19"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "ruststream-rdkafka"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "apache-avro",
  "bytes",
@@ -2100,7 +2100,7 @@ dependencies = [
 
 [[package]]
 name = "ruststream-rdkafka-bench"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "futures",
  "gungraun",
@@ -2893,7 +2893,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
