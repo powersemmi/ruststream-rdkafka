@@ -113,17 +113,17 @@ impl Handle<Parcel, Label> for PrintLabel {
 // --8<-- [end:handler]
 
 // --8<-- [start:service]
-fn service(broker: KafkaBroker, registry: SchemaRegistry) -> impl App {
+fn service(broker: KafkaBroker, registry: &SchemaRegistry) -> RustStream {
     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker(broker, |b| {
         b.include(subscriber("parcels", PrintLabel).reply().build())
-            .out_reply(KafkaPublish::framed(&registry));
+            .out_reply(KafkaPublish::framed(registry));
     })
 }
 
 fn app() -> impl App {
     service(
         KafkaBroker::new(["localhost:9092"]).default_group("shipping-svc"),
-        SchemaRegistry::new("http://localhost:8081"),
+        &SchemaRegistry::new("http://localhost:8081"),
     )
 }
 
@@ -238,7 +238,7 @@ message Label {
         let id = registry
             .register("labels-value", SchemaType::Protobuf, LABEL_PROTO)
             .await?;
-        let tb = TestApp::start(service(broker(), registry)).await?;
+        let tb = TestApp::start(service(broker(), &registry)).await?;
 
         tb.broker::<KafkaBroker>()
             .message(&framed(&Parcel {
@@ -274,7 +274,7 @@ message Label {
         let Some(registry) = registry("unregistered") else {
             return Ok(());
         };
-        let tb = TestApp::start(service(broker(), registry)).await?;
+        let tb = TestApp::start(service(broker(), &registry)).await?;
 
         tb.broker::<KafkaBroker>()
             .message(&framed(&Parcel {
