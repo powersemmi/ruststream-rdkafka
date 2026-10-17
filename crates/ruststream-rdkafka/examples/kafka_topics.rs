@@ -1,22 +1,25 @@
-//! Topic descriptors: consumer group, start offset, commit mode, and raw config passthrough,
-//! plus a publishing handler whose return value lands on another topic.
+//! A topic descriptor: `KafkaTopic` reads one topic in one consumer group and carries every
+//! other setting of the subscription. The scenario is a test.
 //!
 //! ```text
-//! just brokers-up
-//! cargo run --example kafka_topics -- run
+//! cargo test --example kafka_topics --features testing
 //! ```
+
+// A plain build compiles the service; the tests that use it exist only in the test build.
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Outgoing)]
+#[outgoing(name = "orders")]
 struct Order {
     id: u64,
 }
 
 // The reply topic is a property of the confirmation itself, so the type declares it and the
 // subscriber's clause names none.
-#[derive(Debug, Serialize, Outgoing)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Outgoing)]
 #[outgoing(name = "confirmations")]
 struct Confirmation {
     id: u64,
@@ -24,10 +27,7 @@ struct Confirmation {
 }
 
 // --8<-- [start:descriptor]
-// Everything besides the topic is optional: unset options mean the librdkafka defaults. The
-// group overrides the broker-wide `default_group`; `Commit::Tracked` turns `ack` into a precise
-// per-message acknowledgement backed by the stored position; `config` reaches any consumer
-// property this crate does not surface as a typed option.
+/// Confirms every order of the topic `orders`, as a member of the group `orders-workers`.
 #[subscriber(
     KafkaTopic::new("orders")
         .group("orders-workers")
@@ -45,28 +45,45 @@ async fn confirm(order: &Order) -> Confirmation {
 }
 // --8<-- [end:descriptor]
 
-// --8<-- [start:assign]
-// Manual assignment: consume exactly these partitions - no group membership, no rebalancing.
-// This reader names no group, so it cannot commit and the start offset must be explicit; add
-// `.group("...")` to commit positions into a group without joining it.
-#[subscriber(KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest))]
-async fn audit_partition_zero(order: &Order) -> HandlerOutcome {
-    println!("partition 0 saw order {}", order.id);
-    HandlerOutcome::ack()
-}
-// --8<-- [end:assign]
-
-// --8<-- [start:app]
-#[ruststream::app]
 fn app() -> impl App {
-    // `KafkaBroker::new` records configuration and does no I/O; the runtime connects it once
-    // at startup, then opens these subscriptions against the connected form.
     let broker = KafkaBroker::new(["localhost:9092"]);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        // `confirm` replies through the broker's default publish policy, so the include site
-        // names no publisher; the explicit spelling is `.out_reply(Publish::default())`.
         b.include(confirm);
-        b.include(audit_partition_zero);
     })
 }
-// --8<-- [end:app]
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::testing::TestApp;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn an_order_is_confirmed_by_the_group() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+
+        tb.broker::<KafkaBroker>()
+            .message(&Order { id: 7 })
+            .publish()
+            .await?;
+
+        tb.broker::<KafkaBroker>()
+            .subscriber("orders")
+            .assert_called_once()
+            .with(&Order { id: 7 })
+            .settled(HandlerOutcome::ack());
+        tb.broker::<KafkaBroker>()
+            .published::<Confirmation>("confirmations")
+            .assert_called_once()
+            .with(&Confirmation {
+                id: 7,
+                accepted: true,
+            });
+        Ok(())
+    }
+}
+
+// The scenario is the test above; the command in the header runs it.
+fn main() {}

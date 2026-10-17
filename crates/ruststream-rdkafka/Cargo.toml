@@ -217,19 +217,59 @@ test = true
 # --- examples: subscriptions ---
 
 [[example]]
-name = "kafka_topics"
+name = "kafka_subscriptions_name"
+required-features = ["testing"]
+test = true
 
 [[example]]
-name = "kafka_keys"
+name = "manual_kafka_subscriptions_name"
+path = "examples/manual/kafka_subscriptions_name.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_topics"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_topics"
+path = "examples/manual/kafka_topics.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
 name = "kafka_multi_topic"
+required-features = ["testing"]
+test = true
 
 [[example]]
-name = "kafka_batches"
+name = "manual_kafka_multi_topic"
+path = "examples/manual/kafka_multi_topic.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
-name = "kafka_seek"
+name = "kafka_subscriptions_partitions"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_subscriptions_partitions"
+path = "examples/manual/kafka_subscriptions_partitions.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_subscriptions_start_offset"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_subscriptions_start_offset"
+path = "examples/manual/kafka_subscriptions_start_offset.rs"
+required-features = ["testing"]
+test = true
 
 # --- examples: settlement ---
 
