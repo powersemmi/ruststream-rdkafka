@@ -52,6 +52,9 @@ fn app() -> impl App {
     })
 }
 
+// The scenario is the test above; the command in the header runs it.
+fn main() {}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -84,6 +87,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenario is the test above; the command in the header runs it.
-fn main() {}

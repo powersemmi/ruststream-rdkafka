@@ -33,6 +33,9 @@ fn app() -> impl App {
 }
 // --8<-- [end:name]
 
+// The scenarios are the tests above; the command in the header runs them.
+fn main() {}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -76,6 +79,3 @@ mod tests {
         );
     }
 }
-
-// The scenarios are the tests above; the command in the header runs them.
-fn main() {}

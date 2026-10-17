@@ -8,6 +8,8 @@
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+use std::future::{Future, ready};
+
 use ruststream::schemars::{self, JsonSchema};
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -50,16 +52,16 @@ impl MessageHeaders for Confirmation {
 struct Confirm;
 
 impl Handle<Order, Confirmation> for Confirm {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<Confirmation, HandlerOutcome> {
-        Ok(Confirmation {
+    ) -> impl Future<Output = Result<Confirmation, HandlerOutcome>> {
+        ready(Ok(Confirmation {
             id: order.id,
             accepted: true,
-        })
+        }))
     }
 }
 
@@ -82,6 +84,9 @@ fn app() -> impl App {
     })
 }
 // --8<-- [end:descriptor]
+
+// The scenario is the test above; the command in the header runs it.
+fn main() {}
 
 #[cfg(test)]
 mod tests {
@@ -115,6 +120,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenario is the test above; the command in the header runs it.
-fn main() {}

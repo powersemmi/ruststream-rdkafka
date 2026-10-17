@@ -13,10 +13,6 @@
 use ruststream::Outgoing;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-#[path = "support/kafka_subscriptions_live.rs"]
-mod live;
-
 #[derive(Debug, PartialEq, Deserialize, Serialize, Outgoing)]
 #[outgoing(name = "ledger.audit")]
 struct AuditEntry {
@@ -37,7 +33,9 @@ mod start_at {
     use ruststream::testing::TestApp;
     use ruststream_rdkafka::prelude::*;
 
-    use super::{AuditEntry, live};
+    use super::AuditEntry;
+    #[cfg(test)]
+    use super::live;
 
     // --8<-- [start:start_at]
     /// Rebuilds the audit projection from the oldest retained entry on every startup.
@@ -234,3 +232,7 @@ mod batch {
 
 // The scenarios are the tests above; the command in the header runs them.
 fn main() {}
+
+#[cfg(test)]
+#[path = "support/kafka_subscriptions_live.rs"]
+mod live;

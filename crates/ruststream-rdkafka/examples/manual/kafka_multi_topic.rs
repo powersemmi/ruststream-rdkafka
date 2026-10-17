@@ -30,6 +30,7 @@ impl MessageHeaders for OrderEvent {
 
 mod topics {
     use std::error::Error;
+    use std::future::{Future, ready};
 
     use ruststream::schemars::{self, JsonSchema};
     use ruststream::testing::TestApp;
@@ -62,16 +63,16 @@ mod topics {
     struct Record;
 
     impl Handle<OrderEvent, HistoryEntry, (), KafkaContext> for Record {
-        async fn handle(
+        fn handle(
             &self,
             event: &OrderEvent,
             _outs: &(),
             ctx: &mut Context<'_, KafkaContext>,
-        ) -> Result<HistoryEntry, HandlerOutcome> {
-            Ok(HistoryEntry {
+        ) -> impl Future<Output = Result<HistoryEntry, HandlerOutcome>> {
+            ready(Ok(HistoryEntry {
                 id: event.id,
                 topic: ctx.context(Topic).to_string(),
-            })
+            }))
         }
     }
 
@@ -135,6 +136,7 @@ mod topics {
 
 mod pattern {
     use std::error::Error;
+    use std::future::{Future, ready};
 
     use ruststream::testing::TestApp;
     use ruststream_rdkafka::context::KafkaContext;
@@ -147,14 +149,14 @@ mod pattern {
     struct Archive;
 
     impl Handle<OrderEvent, (), (), KafkaContext> for Archive {
-        async fn handle(
+        fn handle(
             &self,
             event: &OrderEvent,
             _outs: &(),
             ctx: &mut Context<'_, KafkaContext>,
-        ) -> Result<(), HandlerOutcome> {
+        ) -> impl Future<Output = Result<(), HandlerOutcome>> {
             tracing::info!(event.id, topic = %ctx.context(Topic), "archived");
-            Ok(())
+            ready(Ok(()))
         }
     }
 

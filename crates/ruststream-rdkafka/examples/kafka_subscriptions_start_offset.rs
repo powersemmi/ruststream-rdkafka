@@ -34,6 +34,9 @@ fn app(servers: &str, group: &str) -> impl App {
     })
 }
 
+// The scenario is the test above; the command in the header runs it.
+fn main() {}
+
 #[cfg(test)]
 #[path = "support/kafka_subscriptions_live.rs"]
 mod live;
@@ -81,6 +84,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenario is the test above; the command in the header runs it.
-fn main() {}

@@ -12,10 +12,6 @@ use ruststream::schemars::{self, JsonSchema};
 use ruststream::{CallerName, FixedName, MessageHeaders, NoHeaders, OutgoingDestination};
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-#[path = "../support/kafka_subscriptions_live.rs"]
-mod live;
-
 #[derive(Debug, PartialEq, Deserialize, Serialize, JsonSchema)]
 struct AuditEntry {
     id: u64,
@@ -51,25 +47,28 @@ impl MessageHeaders for Job {
 
 mod start_at {
     use std::error::Error;
+    use std::future::{Future, ready};
 
     use ruststream::testing::TestApp;
     use ruststream_rdkafka::prelude::*;
 
-    use super::{AuditEntry, live};
+    use super::AuditEntry;
+    #[cfg(test)]
+    use super::live;
 
     // --8<-- [start:start_at]
     /// Projects every audit entry it reads.
     struct Replay;
 
     impl Handle<AuditEntry> for Replay {
-        async fn handle(
+        fn handle(
             &self,
             entry: &AuditEntry,
             _outs: &(),
             _ctx: &mut Context<'_>,
-        ) -> Result<(), HandlerOutcome> {
+        ) -> impl Future<Output = Result<(), HandlerOutcome>> {
             tracing::info!(entry.id, "projected");
-            Ok(())
+            ready(Ok(()))
         }
     }
 
@@ -282,3 +281,7 @@ mod batch {
 
 // The scenarios are the tests above; the command in the header runs them.
 fn main() {}
+
+#[cfg(test)]
+#[path = "../support/kafka_subscriptions_live.rs"]
+mod live;

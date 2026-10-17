@@ -38,6 +38,9 @@ fn app(servers: &str, group: &str) -> impl App<State = ()> {
     })
 }
 
+// The scenarios are the tests above; the command in the header runs them.
+fn main() {}
+
 #[cfg(test)]
 #[path = "support/kafka_subscriptions_live.rs"]
 mod live;
@@ -106,6 +109,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenarios are the tests above; the command in the header runs them.
-fn main() {}

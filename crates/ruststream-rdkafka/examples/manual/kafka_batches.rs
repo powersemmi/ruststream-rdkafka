@@ -47,6 +47,7 @@ impl MessageHeaders for Payment {
 
 mod whole {
     use std::error::Error;
+    use std::future::{Future, ready};
 
     use futures::future::join_all;
     use ruststream::testing::TestApp;
@@ -59,14 +60,14 @@ mod whole {
     struct Store;
 
     impl Handle<[Order]> for Store {
-        async fn handle(
+        fn handle(
             &self,
             orders: &[Order],
             _outs: &(),
             _ctx: &mut Context<'_>,
-        ) -> Result<(), Vec<HandlerOutcome>> {
+        ) -> impl Future<Output = Result<(), Vec<HandlerOutcome>>> {
             tracing::info!(count = orders.len(), "stored in one round-trip");
-            Ok(())
+            ready(Ok(()))
         }
     }
 
@@ -111,6 +112,7 @@ mod whole {
 
 mod per_element {
     use std::error::Error;
+    use std::future::{Future, ready};
 
     use futures::future::join_all;
     use std::time::Duration;
@@ -128,13 +130,13 @@ mod per_element {
     struct Reconcile;
 
     impl Handle<[Payment]> for Reconcile {
-        async fn handle(
+        fn handle(
             &self,
             payments: &[Payment],
             _outs: &(),
             _ctx: &mut Context<'_>,
-        ) -> Result<(), Vec<HandlerOutcome>> {
-            Err(payments
+        ) -> impl Future<Output = Result<(), Vec<HandlerOutcome>>> {
+            ready(Err(payments
                 .iter()
                 .map(|payment| {
                     if payment.settled {
@@ -143,7 +145,7 @@ mod per_element {
                         HandlerOutcome::retry_after(RECHECK)
                     }
                 })
-                .collect())
+                .collect()))
         }
     }
 

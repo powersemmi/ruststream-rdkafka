@@ -8,6 +8,8 @@
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+use std::future::{Future, ready};
+
 use ruststream::schemars::{self, JsonSchema};
 use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::context::keys::Offset;
@@ -35,14 +37,14 @@ impl MessageHeaders for Order {
 struct Inspect;
 
 impl Handle<Order, (), (), KafkaContext> for Inspect {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         ctx: &mut Context<'_, KafkaContext>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(order.id, offset = ctx.context(Offset), "partition 0");
-        Ok(())
+        ready(Ok(()))
     }
 }
 
@@ -64,6 +66,9 @@ fn app() -> impl App {
     })
 }
 // --8<-- [end:reader]
+
+// The scenario is the test above; the command in the header runs it.
+fn main() {}
 
 #[cfg(test)]
 mod tests {
@@ -94,6 +99,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenario is the test above; the command in the header runs it.
-fn main() {}

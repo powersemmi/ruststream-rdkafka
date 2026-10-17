@@ -8,6 +8,8 @@
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+use std::future::{Future, ready};
+
 use ruststream::schemars::{self, JsonSchema};
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -33,14 +35,14 @@ impl MessageHeaders for Invoice {
 struct Archive;
 
 impl Handle<Invoice> for Archive {
-    async fn handle(
+    fn handle(
         &self,
         invoice: &Invoice,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(invoice.id, "archived");
-        Ok(())
+        ready(Ok(()))
     }
 }
 
@@ -57,6 +59,9 @@ fn app(servers: &str, group: &str) -> impl App {
     })
 }
 // --8<-- [end:start]
+
+// The scenario is the test above; the command in the header runs it.
+fn main() {}
 
 #[cfg(test)]
 #[path = "../support/kafka_subscriptions_live.rs"]
@@ -105,6 +110,3 @@ mod tests {
         Ok(())
     }
 }
-
-// The scenario is the test above; the command in the header runs it.
-fn main() {}
