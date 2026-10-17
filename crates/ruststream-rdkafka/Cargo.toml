@@ -774,6 +774,18 @@ path = "examples/manual/guide/replay.rs"
 required-features = ["testing"]
 test = true
 
+[[example]]
+name = "guide_exactly_once"
+path = "examples/guide/exactly_once.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_guide_exactly_once"
+path = "examples/manual/guide/exactly_once.rs"
+required-features = ["testing"]
+test = true
+
 # guides: schema registry, protobuf
 
 [[example]]
