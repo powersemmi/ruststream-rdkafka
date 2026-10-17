@@ -103,13 +103,116 @@ features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 
 [[example]]
 name = "kafka_quickstart"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_quickstart"
+path = "examples/manual/kafka_quickstart.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
 name = "kafka_producer"
 
 [[example]]
+name = "kafka_broker_config"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_config"
+path = "examples/manual/kafka_broker_config.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_broker_security"
+required-features = ["testing", "ssl"]
+test = true
+
+[[example]]
+name = "kafka_broker_startup"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_broker_shutdown"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_broker_prelude"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_broker_errors"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_prelude"
+path = "examples/manual/kafka_broker_prelude.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_security"
+path = "examples/manual/kafka_broker_security.rs"
+required-features = ["testing", "ssl"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_startup"
+path = "examples/manual/kafka_broker_startup.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_shutdown"
+path = "examples/manual/kafka_broker_shutdown.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_broker_errors"
+path = "examples/manual/kafka_broker_errors.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
 name = "kafka_testing"
 required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_testing"
+path = "examples/manual/kafka_testing.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_testing_live"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_testing_live"
+path = "examples/manual/kafka_testing_live.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_asyncapi"
+required-features = ["asyncapi", "schema-registry"]
+test = true
+
+[[example]]
+name = "manual_kafka_asyncapi"
+path = "examples/manual/kafka_asyncapi.rs"
+required-features = ["asyncapi", "schema-registry"]
+test = true
 
 # --- examples: subscriptions ---
 

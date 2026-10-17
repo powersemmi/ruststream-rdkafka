@@ -1,20 +1,15 @@
 //! Testing a service in process: the production app, `KafkaBroker` included, run by `TestApp`
-//! with no Kafka cluster.
-//!
-//! The app is the one `main` runs in production. `TestApp::start` connects its broker in
-//! process: the same handlers, descriptors, publish policies and consumer-group semantics, over
-//! an in-process cluster instead of the network. A publish through the harness returns once
-//! every handler it triggered has settled, so the assertions read finished state.
+//! with no Kafka cluster. A publish through the harness returns once every handler it woke has
+//! settled, so the assertions read finished state.
 //!
 //! ```text
-//! cargo run --example kafka_testing --features testing
+//! cargo run --example kafka_testing --features testing -- run
+//! cargo test --example kafka_testing --features testing
 //! ```
 
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, Out, RustStream};
-use ruststream::testing::TestApp;
-use ruststream::{OutSlot, Outgoing, TransactionalPublisher, subscriber};
-use ruststream_rdkafka::{KafkaBroker, KafkaPublish, KafkaTopic};
 use serde::{Deserialize, Serialize};
+
+use ruststream_rdkafka::prelude::*;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
 #[outgoing(name = "payments")]
@@ -22,7 +17,6 @@ struct Payment {
     amount: u64,
 }
 
-// --8<-- [start:handler]
 #[subscriber(KafkaTopic::new("payments").group("payments-svc"))]
 async fn accept(payment: &Payment) -> HandlerOutcome {
     if payment.amount == 0 {
@@ -30,9 +24,7 @@ async fn accept(payment: &Payment) -> HandlerOutcome {
     }
     HandlerOutcome::ack()
 }
-// --8<-- [end:handler]
 
-// --8<-- [start:transactions]
 #[derive(Debug, Serialize, Deserialize, Outgoing)]
 #[outgoing(name = "refunds")]
 struct Refund {
@@ -81,73 +73,86 @@ async fn refund(
     }
     HandlerOutcome::ack()
 }
-// --8<-- [end:transactions]
 
-// --8<-- [start:app]
 /// The app `main` runs in production, and the one a test hands the harness unchanged.
-fn app() -> impl App {
+#[ruststream::app]
+fn app() -> impl App<State = ()> {
     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("payments-svc"),
         |b| {
             b.include(accept);
             b.include(refund)
-                .out(
-                    Lines,
-                    KafkaPublish::default().transactional_id("refunds-svc-1"),
-                )
+                .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
                 .build();
         },
     )
 }
-// --8<-- [end:app]
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+
+    use super::{Payment, Refund, RefundLine, app};
+
     // --8<-- [start:testapp]
-    let tb = TestApp::start(app()).await?;
+    #[tokio::test]
+    async fn a_payment_is_accepted() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+        tb.broker::<KafkaBroker>()
+            .message(&Payment { amount: 100 })
+            .publish()
+            .await?;
 
-    tb.broker::<KafkaBroker>()
-        .message(&Payment { amount: 100 })
-        .publish()
-        .await?;
-
-    tb.broker::<KafkaBroker>()
-        .subscriber("payments")
-        .assert_called_once()
-        .with(&Payment { amount: 100 })
-        .settled(HandlerOutcome::ack());
+        tb.broker::<KafkaBroker>()
+            .subscriber("payments")
+            .assert_called_once()
+            .with(&Payment { amount: 100 })
+            .settled(HandlerOutcome::ack());
+        Ok(())
+    }
     // --8<-- [end:testapp]
 
-    // --8<-- [start:transaction_asserts]
-    // The abort discards the whole fan-out: the slot recorded what the handler sent through it,
-    // and the topic - what a `read_committed` reader sees - stayed empty.
-    tb.broker::<KafkaBroker>()
-        .message(&Refund {
+    // --8<-- [start:transactions]
+    #[tokio::test]
+    async fn an_aborted_refund_publishes_no_line() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+        let refund = Refund {
             order_id: 1,
             lines: 3,
             settle: false,
-        })
-        .publish()
-        .await?;
-    tb.broker::<KafkaBroker>()
-        .published::<RefundLine>("refund-lines")
-        .assert_not_called();
+        };
+        tb.broker::<KafkaBroker>()
+            .message(&refund)
+            .publish()
+            .await?;
 
-    // The commit makes all three visible at once.
-    tb.broker::<KafkaBroker>()
-        .message(&Refund {
+        // A `read_committed` reader, librdkafka's default, never sees an aborted transaction.
+        tb.broker::<KafkaBroker>()
+            .published::<RefundLine>("refund-lines")
+            .assert_not_called();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_committed_refund_publishes_every_line() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+        let refund = Refund {
             order_id: 2,
             lines: 3,
             settle: true,
-        })
-        .publish()
-        .await?;
-    tb.broker::<KafkaBroker>()
-        .published::<RefundLine>("refund-lines")
-        .assert_called(3);
-    // --8<-- [end:transaction_asserts]
+        };
+        tb.broker::<KafkaBroker>()
+            .message(&refund)
+            .publish()
+            .await?;
 
-    tb.shutdown().await?;
-    println!("all in-process checks passed");
-    Ok(())
+        tb.broker::<KafkaBroker>()
+            .published::<RefundLine>("refund-lines")
+            .assert_called(3);
+        Ok(())
+    }
+    // --8<-- [end:transactions]
 }
