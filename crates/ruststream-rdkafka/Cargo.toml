@@ -512,11 +512,14 @@ required-features = ["protobuf"]
 
 [[example]]
 name = "kafka_protobuf_plain"
-required-features = ["protobuf"]
+required-features = ["protobuf", "testing"]
+test = true
 
 [[example]]
-name = "kafka_protobuf_testing"
+name = "manual_kafka_protobuf_plain"
+path = "examples/manual/kafka_protobuf_plain.rs"
 required-features = ["protobuf", "testing"]
+test = true
 
 # --- examples: registry ---
 
