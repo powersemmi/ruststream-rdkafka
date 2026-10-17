@@ -1,33 +1,28 @@
-//! Protobuf as a self-serializing type, and the JSON transcode it replaces.
+//! Protobuf as a self-serializing type under the Confluent envelope.
 //!
-//! A `prost`-generated message already owns its byte layout, and unlike an Avro model it is not
-//! a serde type - so it can never reach the codec position, and it rides the core's byte lanes
-//! itself instead. The handler takes the generated message and returns the generated message;
-//! nothing about the wire appears in a signature.
+//! A `prost`-generated message owns its byte layout and rides the core's byte lanes itself: the
+//! handler takes the generated message and returns the generated message. The registry adds the
+//! envelope, a zero magic byte, the schema id and a message-index path ahead of the message.
 //!
-//! What the registry adds is the envelope: the zero magic byte, the schema id, a message-index
-//! path naming which message of the schema was written, and then the message. Its two ends are
-//! handled here, and they are asymmetric on purpose:
+//! - [Protobuf][protobuf]: [`decode_confluent`], named in `#[wire(decode = ..)]`, steps over the
+//!   envelope with no registry involved.
+//! - [framed][framed]: [`KafkaPublish::framed`](crate::KafkaPublish::framed) and
+//!   [`KafkaFramedPublish`] put the envelope on every reply, resolving the destination subject's
+//!   schema id.
+//! - [ProtobufFrame][frame]: [`ProtobufFrame`] frames byte-lane publishes app-wide.
+//! - [Protobuf transcode][transcode]:
+//!   [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) and
+//!   [`SchemaFrame`](crate::SchemaFrame) convert framed Protobuf to and from plain JSON through
+//!   descriptors compiled from the registry's `.proto` source.
 //!
-//! - [`decode_confluent`] is what an incoming type names in `#[wire(decode = ..)]`. It steps over
-//!   the envelope and hands the message bytes to `prost`, with no registry involved: a generated
-//!   type knows its own fields, and the index path only says which message of the schema this is,
-//!   which the reading type has already decided.
-//! - the publish side needs one number, the subject's schema id, and a value cannot fetch it, so
-//!   [`ProtobufFrame`] and [`KafkaFramedPublish`] put the envelope on where the destination topic
-//!   is known.
+//! A Protobuf subject is registered from its `.proto` text with
+//! [`SchemaRegistry::register`](crate::SchemaRegistry::register). The registry paths read schemas
+//! whose imports are the well-known types.
 //!
-//! # The JSON transcode
-//!
-//! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) and
-//! [`SchemaFrame`](crate::SchemaFrame) convert framed Protobuf to and from plain JSON at the
-//! broker's edges, through descriptors compiled from the registry's `.proto` source, so handlers
-//! keep plain serde structs and never generate code. That is the compatibility path, and it is
-//! the one to keep when a service must not carry generated types; it costs a JSON hop and a
-//! dynamic message per delivery, and it depends on the registry being reachable to decode
-//! anything at all. The two paths do not mix on one broker: a broker carrying
-//! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) transcodes every
-//! subscription it opens, so a generated type on it would be handed JSON.
+//! [protobuf]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/
+//! [framed]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/framed/
+//! [frame]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/protobuf-frame/
+//! [transcode]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/transcode/
 
 use std::collections::HashMap;
 use std::fmt;

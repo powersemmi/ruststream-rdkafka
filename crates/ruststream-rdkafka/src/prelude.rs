@@ -2,7 +2,9 @@
 //!
 //! `use ruststream_rdkafka::prelude::*;` carries the core's own prelude plus this crate's broker,
 //! subscription descriptor and its options, publish policies, reply transform, per-delivery
-//! context keys, and the capability traits a handler names.
+//! context keys, and the capability traits a handler names. The
+//! [Prelude](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/prelude/)
+//! page shows it in a service.
 //!
 //! # Two vocabularies, two files
 //!
