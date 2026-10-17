@@ -176,6 +176,9 @@ const config: Config = {
         docsDir: docsRoot,
         docsRouteBasePath: '/',
         highlightSearchTermsOnTargetPage: true,
+        // `next` and the archives ask search engines to leave their pages out; the site's own
+        // search still indexes them, or a reader of those versions would find nothing.
+        forceIgnoreNoIndex: true,
         askAi: {},
       },
     ],
