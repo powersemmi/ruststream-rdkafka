@@ -12,8 +12,7 @@ on:
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - "docs/**"
-      - "properdocs.yml"
-      - "overrides/**"
+      - "website/i18n/**"
       - "crates/ruststream-rdkafka/examples/**"
       - "scripts/lint_doc_fences.py"
       - "scripts/check_doc_i18n.py"
