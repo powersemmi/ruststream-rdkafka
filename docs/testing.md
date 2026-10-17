@@ -13,15 +13,13 @@ ruststream-rdkafka = { version = "0.6", features = ["testing"] }
 
 Never enable this feature in production builds.
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_testing.rs:handler"
+```rust reference="examples/kafka_testing.rs#handler"
 ```
 
 `TestApp::publish` waits until the handlers settle before returning, so assertions read
 finished state - no sleeps:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_testing.rs:testapp"
+```rust reference="examples/kafka_testing.rs#testapp"
 ```
 
 ## What the test broker does not simulate

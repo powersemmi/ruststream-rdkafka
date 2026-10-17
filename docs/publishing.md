@@ -33,8 +33,7 @@ The partition-key header becomes the record's native key on publish (and is not 
 wire header); consuming through this crate surfaces it back under the same name. Kafka routes
 every message for one key to one partition, which is what keeps per-key ordering:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_producer.rs:producer"
+```rust reference="examples/kafka_producer.rs#producer"
 ```
 
 Without the header, the configured partitioner picks a partition (the librdkafka default is a
@@ -48,8 +47,7 @@ partition explicitly. Precedence on publish: an explicit partition wins over the
 which wins over the configured partitioner. A malformed value fails the publish with a clear
 error, and a partition that does not exist fails delivery - no silent fallback either way:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_producer.rs:partition"
+```rust reference="examples/kafka_producer.rs#partition"
 ```
 
 On top of it, `RoundRobin` distributes publishing-handler replies evenly: librdkafka has no
@@ -58,8 +56,7 @@ may batch-stick to one partition, which turns long, near-constant per-message pr
 one hot consumer and idle peers. The transform stamps every keyless, unpinned reply with the
 next partition of the cycle:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_distribution.rs:round_robin"
+```rust reference="examples/kafka_distribution.rs#round_robin"
 ```
 
 The count is explicit and must match the destination topic: a smaller count just leaves the
@@ -97,22 +94,19 @@ consume-transform-produce exactly-once) is the
 
 One atomic fan-out per call, committing at the end and aborting on any failure:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:fanout"
+```rust reference="examples/kafka_transactions.rs#fanout"
 ```
 
 The handler receives the live publisher as an injected `Out` parameter - the runtime pairs it
 once, right after the subscription opens - and settles by the outcome: an abort left nothing
 visible, so a retry redelivers and reruns the whole fan-out:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:handler"
+```rust reference="examples/kafka_transactions.rs#handler"
 ```
 
 The id is picked at the include site, one per concurrent producer:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:id"
+```rust reference="examples/kafka_transactions.rs#id"
 ```
 
 ### Transaction scopes and worker pools
@@ -131,8 +125,7 @@ coordination. The id set follows the topic's partitions rather than the worker c
 changing `workers(n)` neither changes the ids nor weakens zombie fencing (the same scheme Kafka
 Streams uses for its per-task producers):
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:partitions"
+```rust reference="examples/kafka_transactions.rs#partitions"
 ```
 
 The include site names the base id:
@@ -156,15 +149,13 @@ handler side, as always), but the output topic never sees a duplicate.
 
 Three places name one id:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos"
+```rust reference="examples/kafka_transactions.rs#eos"
 ```
 
 A publishing handler needs no manual pairing at all: mount it with the pipeline's reply
 publisher, and every reply joins the window paired with its delivery's consumed offset -
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_transactions.rs:eos_wiring"
+```rust reference="examples/kafka_transactions.rs#eos_wiring"
 ```
 
 `KafkaEosPublish::replies()` is a plain `TypedPublisher` over the policy (the explicit spelling

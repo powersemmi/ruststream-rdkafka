@@ -7,8 +7,7 @@ integrates all of it as **middleware on the async edges** - the subscription's d
 on the way in, the app's publish pipeline on the way out - so handlers, codecs, and the whole
 runtime stay on plain JSON (the default codec).
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:wiring"
+```rust reference="examples/kafka_schema_registry.rs#wiring"
 ```
 
 ## The client
@@ -25,8 +24,7 @@ its envelope, Avro and Protobuf datums (with their features enabled) convert thr
 registry schema the envelope references. Handlers are ordinary subscribers on the default
 codec:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:handler"
+```rust reference="examples/kafka_schema_registry.rs#handler"
 ```
 
 Non-framed payloads pass through untouched, so mixed topics keep working. A registry outage
@@ -58,8 +56,7 @@ Subjects resolve **lazily on the async publish path** - when the subject already
 registry there is no startup ceremony at all. Producers that own their schemas register them
 once at startup:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_schema_registry.rs:types"
+```rust reference="examples/kafka_schema_registry.rs#types"
 ```
 
 `register` takes a raw definition (idempotent registry-side), `register_json::<T>` derives a
@@ -81,18 +78,16 @@ pipeline and publishes exactly what it is given.
   the registry schema; `register_avro::<T>` derives the schema from the type (the `AvroSchema`
   derive is re-exported):
 
-    ```rust
-    --8<-- "crates/ruststream-rdkafka/examples/kafka_avro.rs:wiring"
-    ```
+  ```rust reference="examples/kafka_avro.rs#wiring"
+  ```
 - **Protobuf** (`protobuf` feature): messages to JSON and back through descriptors compiled
   from the registry's `.proto` source (well-known types available; schema references beyond
   them are not resolved), message-indexes handled on both sides - nested and multi-message
   schemas included. Outgoing messages default to the schema's first top-level message; pin
   another per topic with `SchemaFrame::message("topic", "pkg.Message")`:
 
-    ```rust
-    --8<-- "crates/ruststream-rdkafka/examples/kafka_protobuf.rs:wiring"
-    ```
+  ```rust reference="examples/kafka_protobuf.rs#wiring"
+  ```
 
 The transcoding trade-off: one JSON hop per message on registry topics buys a
 single uniform handler model - the same struct, the same codec, any wire format.

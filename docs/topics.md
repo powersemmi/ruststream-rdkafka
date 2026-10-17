@@ -4,12 +4,10 @@ A subscription is one consumer joining one consumer group on one topic. `KafkaTo
 descriptor: everything besides the topic name is optional, and unset options mean the
 librdkafka defaults - this crate does not impose its own.
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_topics.rs:descriptor"
+```rust reference="examples/kafka_topics.rs#descriptor"
 ```
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_topics.rs:app"
+```rust reference="examples/kafka_topics.rs#app"
 ```
 
 ## Consumer groups
@@ -67,15 +65,13 @@ One subscription can consume several topics through one consumer and one group. 
 topics share the handler, and therefore its payload type; each delivery still reports the
 topic it came from:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:multi"
+```rust reference="examples/kafka_multi_topic.rs#multi"
 ```
 
 For open-ended sets, a librdkafka topic regex subscribes to every matching topic - the pattern
 must start with `^` (librdkafka's anchor for distinguishing patterns from literal names):
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_multi_topic.rs:pattern"
+```rust reference="examples/kafka_multi_topic.rs#pattern"
 ```
 
 The in-process test broker supports multi-topic subscriptions (exact-name routing per topic)
@@ -97,8 +93,7 @@ manual assignment (`assign`): the consumer takes exactly the named partitions of
 no group membership, no rebalancing. It covers consuming exactly these partitions: static
 pinning, inspection and replay readers, one-consumer-per-partition deployments.
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_topics.rs:assign"
+```rust reference="examples/kafka_topics.rs#assign"
 ```
 
 A group is optional and changes only offset handling. With one named, the consumer commits
@@ -139,16 +134,14 @@ There are two ways to use them. The `start_at(..)` clause opens the subscription
 on every startup, whatever the group committed before - unlike `StartOffset`, which only
 applies when the group has no committed offset for the partition:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:start_at"
+```rust reference="examples/kafka_seek.rs#start_at"
 ```
 
 A `Seek(seeker): Seek<KafkaSeeker>` handler parameter moves the subscription while it runs. The
 runtime mints the seeker off this subscription's own subscriber at startup, so it is live by
 construction:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_seek.rs:handler"
+```rust reference="examples/kafka_seek.rs#handler"
 ```
 
 The scope and the bookkeeping:
@@ -178,8 +171,7 @@ Kafka partitions by the native record key, and this crate surfaces it through
 `IncomingMessage::partition_key` (with the `Partitioned` capability mirroring it), so keyed
 lanes keep per-key ordering end to end:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:consumer"
+```rust reference="examples/kafka_keys.rs#consumer"
 ```
 
 `KafkaTopic::lane_key` picks what drives the lanes. The default, `LaneKey::Partition`, lanes
@@ -187,8 +179,7 @@ by the source partition - Kafka's native ordering unit, so everything one partit
 (keyless included) processes in order on one lane, and concurrency comes from consuming
 several partitions:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_keys.rs:partition_lanes"
+```rust reference="examples/kafka_keys.rs#partition_lanes"
 ```
 
 `LaneKey::RecordKey` opts into finer, per-record-key lanes (the first example above):
@@ -219,22 +210,19 @@ in-process test broker does not run these policies (`nack(true)` re-enqueues in 
 The usual pipeline puts the retry topic on the same subscription with `and_topic`, so retried
 copies come back to the same handler:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:retry_topic"
+```rust reference="examples/kafka_retries.rs#retry_topic"
 ```
 
 `Retry::SeekBack` trades throughput for strict partition order - nothing overtakes a failed
 message while it retries:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:seek_back"
+```rust reference="examples/kafka_retries.rs#seek_back"
 ```
 
 A dead-letter consumer is an ordinary subscription; the `kafka-dlq-source-*` headers carry the
 origin of the failed delivery:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_retries.rs:dead_letter"
+```rust reference="examples/kafka_retries.rs#dead_letter"
 ```
 
 ## Batches
@@ -244,16 +232,14 @@ and a page is one delivery plus everything librdkafka has already fetched - no a
 no crate-imposed knobs. Page size is bounded by librdkafka's own fetch-queue limits
 (`queued.max.messages.kbytes` and friends, reachable through the raw config passthrough):
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:handler"
+```rust reference="examples/kafka_batches.rs#handler"
 ```
 
 For an explicit page window, the core `Buffered` adapter wraps any source and closes a page at
 `max_size` deliveries or `max_wait` after the first one (see the second handler in the example
 below). Batch handlers mount with `include`, like every other handler:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:app"
+```rust reference="examples/kafka_batches.rs#app"
 ```
 
 ### How batch settlement maps onto Kafka
@@ -261,8 +247,7 @@ below). Batch handlers mount with `include`, like every other handler:
 A batch handler settles its page either uniformly (one `HandlerResult` for every element) or
 per element (`Vec<HandlerResult>` / `Vec<Settle>`, entry `i` settling element `i`):
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_batches.rs:selective"
+```rust reference="examples/kafka_batches.rs#selective"
 ```
 
 Kafka commits one position per partition, not per message, so the outcomes map as follows
