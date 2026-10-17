@@ -4,13 +4,15 @@
 // The guides of the earlier site moved to the crate's rustdoc, where each topic is a section of
 // the crate overview or a module of its own.
 const guides: Record<string, string> = {
-  topics: 'index.html#subscribing',
+  topics: 'index.html#subscriptions',
   publishing: 'index.html#publishing',
   'schema-registry': 'schema_registry/index.html',
 };
 
-// Pages that moved within the site.
+// Pages that moved within the site, and the address of the guides category, whose overview is the
+// front page of the version.
 const pages: Record<string, string> = {
+  guides: '/',
   testing: '/guides/testing/',
   // The benchmarks explain what the architecture costs.
   benchmarks: '/architecture/benchmarks/',
