@@ -271,7 +271,8 @@ test = true
 
 [[example]]
 name = "kafka_third_party_registry"
-required-features = ["avro"]
+required-features = ["avro", "testing"]
+test = true
 
 [[example]]
 name = "kafka_avro_codec"
@@ -382,6 +383,45 @@ test = true
 name = "manual_kafka_registry_cache"
 path = "examples/manual/kafka_registry_cache.rs"
 required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_client"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_client"
+path = "examples/manual/kafka_registry_client.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_custom_client"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_subject"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_subject"
+path = "examples/manual/kafka_registry_subject.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_custom_client"
+path = "examples/manual/kafka_registry_custom_client.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_third_party_registry"
+path = "examples/manual/kafka_third_party_registry.rs"
+required-features = ["avro", "testing"]
 test = true
 
 # --- examples: guides ---

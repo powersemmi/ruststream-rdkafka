@@ -1,128 +1,190 @@
-//! Bringing your own Schema Registry stack: `schema_registry_converter` (or
-//! `schema-registry-client`, or a hand-rolled one) doing the schema work, and this crate carrying
-//! the result.
+//! Bringing your own Schema Registry stack: `schema_registry_converter` doing the schema work,
+//! and this crate carrying the bytes it produces.
 //!
-//! # Why this works when depending on those crates would not
-//!
-//! Both of them pin their own `apache-avro` and `prost`, and those pins do not always match this
-//! crate's - which is why neither is a dependency here. It does not matter on this path, because
-//! **nothing but bytes crosses the boundary**. The converter turns a value into a
-//! Confluent-framed `Vec<u8>` and back; ruststream's byte lanes carry that `Vec<u8>` to and from
-//! the topic without looking inside it. A version skew becomes a type mismatch only where a type
-//! crosses, and here none does: `apache_avro::types::Value` in the handler below belongs to the
-//! converter's `apache-avro`, and is converted with the converter's, never with ours.
-//!
-//! The same shape works for any other client, including a binding to a non-Rust one: produce
-//! bytes, hand them over.
+//! Nothing but bytes crosses between the two: the converter turns a value into a
+//! Confluent-framed `Vec<u8>` and back, and the byte lanes carry that buffer to and from the topic
+//! without looking inside it. The converter's own `apache-avro` and `prost` versions therefore
+//! never meet this crate's types.
 //!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_third_party_registry --features avro -- run
+//! SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+//!     cargo test --example kafka_third_party_registry --features avro,testing
 //! ```
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use apache_avro::types::Value as AvroValue;
-use ruststream::prelude::*;
-use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream_rdkafka::KafkaBroker;
+use ruststream_rdkafka::prelude::*;
 use schema_registry_converter::async_impl::avro::{AvroDecoder, AvroEncoder};
 use schema_registry_converter::async_impl::schema_registry::SrSettings;
 use schema_registry_converter::schema_registry_common::SubjectNameStrategy;
+use serde::Serialize;
 
-// --8<-- [start:lanes]
-/// The delivery, as it arrived. This is the whole of ruststream's involvement with the wire
-/// format: a view of the bytes, handed straight to the converter.
+// --8<-- [start:app]
+/// The delivery as it arrived: a view of the bytes, handed straight to the converter.
 #[derive(Deserialized)]
 struct Framed<'a>(&'a [u8]);
 
-/// What the converter produced, on its way out. `#[derive(Serialized)]` over a byte buffer lends
-/// the bytes as they are, so nothing re-frames or re-encodes what the converter already wrote.
+/// What the converter produced; the lane sends the bytes as they are.
 #[derive(Serialized, Outgoing)]
-#[outgoing(name = "confirmations")]
+#[outgoing(name = "rental-confirmations")]
 struct Encoded(Vec<u8>);
-// --8<-- [end:lanes]
 
-// --8<-- [start:state]
-/// The user's own registry stack, injected like any other application state.
+#[derive(Serialize)]
+struct Confirmation {
+    id: i64,
+    accepted: bool,
+}
+
+/// The service's own registry stack, held as application state.
 #[derive(Clone)]
-struct Registry {
+struct Converter {
     decoder: Arc<AvroDecoder<'static>>,
     encoder: Arc<AvroEncoder<'static>>,
 }
 
 #[derive(FromRef)]
-struct Orders {
-    registry: Registry,
+struct Rentals {
+    converter: Converter,
 }
-// --8<-- [end:state]
 
-// --8<-- [start:handler]
-#[subscriber("orders", reply("confirmations"))]
-async fn relay(
+#[subscriber("rentals", reply)]
+async fn confirm(
     framed: &Framed<'_>,
-    State(registry): State<Registry>,
+    State(converter): State<Converter>,
 ) -> Result<Encoded, HandlerOutcome> {
-    // The converter resolves the schema the envelope names, through its own registry client and
-    // its own cache. It is async, and a handler is the right place for that.
-    let decoded = registry
+    // The converter resolves the schema the envelope names through its own client and cache.
+    let decoded = converter
         .decoder
         .decode(Some(framed.0))
         .await
-        .map_err(|_| HandlerOutcome::drop())?;
-
-    // `decoded.value` is the converter's `apache_avro::types::Value`, not ours. It never crosses
-    // into ruststream, so which `apache-avro` built it is the converter's business alone - read
-    // it with the one your converter depends on.
-    let id = match &decoded.value {
-        AvroValue::Record(fields) => fields
-            .iter()
-            .find(|(name, _)| name == "id")
-            .and_then(|(_, value)| match value {
-                AvroValue::Long(id) => Some(*id),
-                _ => None,
-            })
-            .unwrap_or_default(),
-        _ => return Err(HandlerOutcome::drop()),
+        .map_err(|error| {
+            tracing::warn!(topic = "rentals", %error, "the converter could not decode a record");
+            HandlerOutcome::drop()
+        })?;
+    let AvroValue::Record(fields) = &decoded.value else {
+        return Err(HandlerOutcome::drop());
     };
+    let id = fields
+        .iter()
+        .find_map(|(name, value)| match (name.as_str(), value) {
+            ("id", AvroValue::Long(id)) => Some(*id),
+            _ => None,
+        })
+        .ok_or(HandlerOutcome::drop())?;
+    tracing::info!(id, "rental confirmed");
 
-    let bytes = registry
+    let bytes = converter
         .encoder
         .encode_struct(
             Confirmation { id, accepted: true },
-            &SubjectNameStrategy::TopicNameStrategy("confirmations".to_owned(), false),
+            &SubjectNameStrategy::TopicNameStrategy("rental-confirmations".to_owned(), false),
         )
         .await
-        .map_err(|_| HandlerOutcome::drop())?;
+        .map_err(|error| {
+            tracing::warn!(topic = "rental-confirmations", %error, "the converter could not encode");
+            HandlerOutcome::retry()
+        })?;
     Ok(Encoded(bytes))
 }
 
-#[derive(serde::Serialize)]
-struct Confirmation {
-    id: i64,
-    accepted: bool,
-}
-// --8<-- [end:handler]
-
-// --8<-- [start:app]
-#[ruststream::app]
-fn app() -> impl App {
-    // No `schema_registry(..)` and no `schema_prefetch(..)`: this service's schemas are the
-    // converter's business, so the broker is a plain one.
-    let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
-
-    RustStream::new(AppInfo::new("orders", "0.1.0"))
+fn app(registry_url: String) -> impl App {
+    // A plain broker: the schemas are the converter's business.
+    let broker = KafkaBroker::new(["localhost:9092"]).default_group("rentals-svc");
+    RustStream::new(AppInfo::new("rentals", "0.1.0"))
         .on_startup(async move |()| {
-            let settings = SrSettings::new("http://localhost:8081".to_owned());
-            Ok::<_, std::io::Error>(Orders {
-                registry: Registry {
+            let settings = SrSettings::new(registry_url);
+            Ok::<_, Infallible>(Rentals {
+                converter: Converter {
                     decoder: Arc::new(AvroDecoder::new(settings.clone())),
                     encoder: Arc::new(AvroEncoder::new(settings)),
                 },
             })
         })
         .with_broker(broker, |b| {
-            b.include(relay);
+            b.include(confirm);
         })
 }
+
+#[ruststream::app]
+fn service() -> impl App {
+    app("http://localhost:8081".to_owned())
+}
 // --8<-- [end:app]
+
+#[cfg(test)]
+#[path = "../tests/live/mod.rs"]
+mod live;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::SchemaRegistry;
+    use ruststream_rdkafka::avro::{self, AvroSchema};
+    use ruststream_rdkafka::prelude::*;
+    use ruststream_rdkafka::schema_registry::{encode_envelope, parse_envelope};
+    use serde::{Deserialize, Serialize};
+
+    use super::{app, live};
+
+    /// Bytes published as they are: what a registry-backed producer puts on the topic.
+    #[derive(Serialized, Outgoing)]
+    struct Wire(Vec<u8>);
+
+    /// The producer's model of a rental, which owns the `rentals-value` subject.
+    #[derive(Serialize, AvroSchema)]
+    #[serde(rename = "Rental")]
+    struct Rental {
+        id: i64,
+    }
+
+    /// The model the confirmations subject holds.
+    #[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
+    #[serde(rename = "Confirmation")]
+    struct Confirmed {
+        id: i64,
+        accepted: bool,
+    }
+
+    #[tokio::test]
+    async fn the_converter_reads_and_writes_the_framed_records() -> Result<(), Box<dyn Error>> {
+        let Some(url) = live::url("SCHEMA_REGISTRY_TEST_URL") else {
+            return Ok(());
+        };
+        let registry = SchemaRegistry::new(&url);
+        let rentals = registry.register_avro::<Rental>("rentals-value").await?;
+        let confirmations = registry
+            .register_avro::<Confirmed>("rental-confirmations-value")
+            .await?;
+        let mut datum = BytesMut::new();
+        avro::encode(&Rental { id: 42 }, &mut datum)?;
+        let tb = TestApp::start(app(url)).await?;
+        let kafka = tb.broker::<KafkaBroker>();
+
+        kafka
+            .message(&Wire(encode_envelope(rentals, &datum)))
+            .to("rentals")
+            .publish()
+            .await?;
+
+        let published = kafka
+            .published::<()>("rental-confirmations")
+            .assert_called_once();
+        let (id, datum) = parse_envelope(published.messages()[0].payload())
+            .ok_or("the confirmation went out without an envelope")?;
+        assert_eq!(id, confirmations);
+        assert_eq!(
+            avro::decode::<Confirmed>(datum)?,
+            Confirmed {
+                id: 42,
+                accepted: true,
+            },
+        );
+        Ok(())
+    }
+}
