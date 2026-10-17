@@ -765,4 +765,28 @@ test = true
 
 # guides: schema registry, protobuf
 
+[[example]]
+name = "guide_schema_registry"
+path = "examples/guide/schema_registry.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_guide_schema_registry"
+path = "examples/manual/guide/schema_registry.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "guide_protobuf"
+path = "examples/guide/protobuf.rs"
+required-features = ["protobuf", "testing"]
+test = true
+
+[[example]]
+name = "manual_guide_protobuf"
+path = "examples/manual/guide/protobuf.rs"
+required-features = ["protobuf", "testing"]
+test = true
+
 # --- examples: architecture ---
