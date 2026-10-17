@@ -271,6 +271,28 @@ path = "examples/manual/kafka_subscriptions_start_offset.rs"
 required-features = ["testing"]
 test = true
 
+[[example]]
+name = "kafka_subscriptions_assignment"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_subscriptions_assignment"
+path = "examples/manual/kafka_subscriptions_assignment.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_keys"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_keys"
+path = "examples/manual/kafka_keys.rs"
+required-features = ["testing"]
+test = true
+
 # --- examples: settlement ---
 
 [[example]]
