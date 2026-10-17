@@ -396,8 +396,6 @@ mod tests {
     /// Three starts of the service on the stand. The third starts the review between payout 1
     /// and payout 2, so it replays payout 2, which the group has committed, and skips payout 1.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    #[ignore = "the first start loses the payout published after an empty partition is \
-                assigned: a timestamp no record matches resolves to the logical end of the log"]
     async fn live_the_review_starts_at_its_moment() {
         let Some(url) = live::url("KAFKA_TEST_URL") else {
             return;

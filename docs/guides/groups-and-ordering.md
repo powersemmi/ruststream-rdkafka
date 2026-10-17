@@ -81,7 +81,7 @@ Startup waits until the group has assigned this member its partitions, up to [`a
 After that, every record published to the topic reaches the subscription.
 Give each subscription of a service its own group.
 Two subscriptions of different topics in one group rebalance each other: when the second joins, the first loses its partitions for a moment.
-A record published during that moment is read from where `auto.offset.reset` puts the first member back, which under `latest` is past the record.
+The first member reads nothing until the group has assigned the partitions again, and then continues where it stopped.
 
 ## Several topics and a pattern
 
