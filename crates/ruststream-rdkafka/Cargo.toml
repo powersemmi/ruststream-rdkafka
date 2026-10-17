@@ -293,6 +293,28 @@ path = "examples/manual/kafka_keys.rs"
 required-features = ["testing"]
 test = true
 
+[[example]]
+name = "kafka_subscriptions_passthrough"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_subscriptions_passthrough"
+path = "examples/manual/kafka_subscriptions_passthrough.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_batches"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_batches"
+path = "examples/manual/kafka_batches.rs"
+required-features = ["testing"]
+test = true
+
 # --- examples: settlement ---
 
 [[example]]
