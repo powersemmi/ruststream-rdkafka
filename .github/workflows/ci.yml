@@ -20,6 +20,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every example is a test binary that links librdkafka, and one runner builds them for three
+# toolchains; with full debug info they outgrow its disk. Line tables keep file and line in a
+# backtrace.
+env:
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+
 jobs:
   changes:
     name: Detect changes
@@ -300,6 +307,11 @@ jobs:
             --all-features
           cargo check --locked -p ruststream-rdkafka-bench --all-targets
 
+      # The previous toolchain's test binaries are never run again; the disk needs their room.
+      - name: Free the previous toolchain's test binaries
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        run: find target/debug/deps target/debug/examples -maxdepth 1 -type f -executable -delete
+
       - name: cargo test (beta)
         if: "!cancelled() && steps.stable.outcome == 'success'"
         env:
@@ -320,6 +332,11 @@ jobs:
           cargo check --locked --workspace --exclude ruststream-rdkafka-bench --all-targets \
             --all-features
           cargo check --locked -p ruststream-rdkafka-bench --all-targets
+
+      # The previous toolchain's test binaries are never run again; the disk needs their room.
+      - name: Free the previous toolchain's test binaries
+        if: "!cancelled() && steps.stable.outcome == 'success'"
+        run: find target/debug/deps target/debug/examples -maxdepth 1 -type f -executable -delete
 
       - name: cargo test (1.95)
         if: "!cancelled() && steps.stable.outcome == 'success'"
