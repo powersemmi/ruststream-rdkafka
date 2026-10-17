@@ -251,8 +251,11 @@ impl AvroCodec {
     ///     let broker = KafkaBroker::new(["localhost:9092"])
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
+    ///     // The scope's codec decodes every delivery; the reply names it again, at its own
+    ///     // position.
+    ///     let replies = codec.clone();
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-    ///         b.include(confirm);
+    ///         b.include(confirm).out_reply(Publish::default()).codec(replies);
     ///     })
     /// }
     /// # }
@@ -330,9 +333,12 @@ impl AvroCodec {
     ///     let broker = KafkaBroker::new(["localhost:9092"])
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
+    ///     // The scope's codec decodes every delivery; the reply names it again, at its own
+    ///     // position.
+    ///     let replies = codec.clone();
     ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
     ///         .with_broker_codec(broker, codec, |b| {
-    ///             b.include(confirm);
+    ///             b.include(confirm).out_reply(Publish::default()).codec(replies);
     ///         })
     /// }
     /// # }

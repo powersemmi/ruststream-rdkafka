@@ -879,8 +879,10 @@ fn outgoing_json_to_datum(
 ///     let broker = KafkaBroker::new(["localhost:9092"])
 ///         .default_group("shipping-svc")
 ///         .schema_prefetch(prefetch);
+///     // The scope's codec decodes every delivery; the reply names it again, at its own position.
+///     let replies = codec.clone();
 ///     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker_codec(broker, codec, |b| {
-///         b.include(ship);
+///         b.include(ship).out_reply(Publish::default()).codec(replies);
 ///     })
 /// }
 /// # }
@@ -1187,8 +1189,10 @@ impl SchemaPrefetch {
 ///     let broker = KafkaBroker::new(["localhost:9092"])
 ///         .default_group("billing-svc")
 ///         .schema_prefetch(prefetch);
+///     // The scope's codec decodes every delivery; the reply names it again, at its own position.
+///     let replies = codec.clone();
 ///     RustStream::new(AppInfo::new("billing", "0.1.0")).with_broker_codec(broker, codec, |b| {
-///         b.include(invoice);
+///         b.include(invoice).out_reply(Publish::default()).codec(replies);
 ///     })
 /// }
 /// # let _ = app;
