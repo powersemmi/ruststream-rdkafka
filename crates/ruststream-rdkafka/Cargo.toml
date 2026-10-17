@@ -496,6 +496,17 @@ required-features = ["testing"]
 test = true
 
 [[example]]
+name = "kafka_eos_pipeline"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_eos_pipeline"
+path = "examples/manual/kafka_eos_pipeline.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
 name = "kafka_protobuf"
 required-features = ["protobuf"]
 
