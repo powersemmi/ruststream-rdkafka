@@ -143,6 +143,14 @@ test = true
 
 [[example]]
 name = "kafka_distribution"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_distribution"
+path = "examples/manual/kafka_distribution.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
 name = "kafka_settlement_commit"
@@ -185,6 +193,50 @@ test = true
 [[example]]
 name = "manual_kafka_context_batch"
 path = "examples/manual/kafka_context_batch.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_publishing_publish"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_publishing_publish"
+path = "examples/manual/kafka_publishing_publish.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_publishing_durability"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_publishing_durability"
+path = "examples/manual/kafka_publishing_durability.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_publishing_keys"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_publishing_keys"
+path = "examples/manual/kafka_publishing_keys.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_publishing_partition"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_publishing_partition"
+path = "examples/manual/kafka_publishing_partition.rs"
 required-features = ["testing"]
 test = true
 
