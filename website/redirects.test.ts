@@ -8,7 +8,7 @@ const moved = redirects('https://docs.rs/ruststream-rdkafka/0.8/');
 
 // Targets whose pages land in a later change; the redirect is written now so the old address
 // keeps a home. Once the page exists, its entry here goes.
-const awaited = new Set(['/architecture/benchmarks/', '/guides/testing/']);
+const awaited = new Set(['/guides/testing/']);
 
 // The page a site address is built from, if there is one: `a/b/` comes from `a/b.md` or
 // `a/b/index.md`. A page no locale translated is served from the English file, so an address
