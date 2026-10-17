@@ -11,6 +11,7 @@ import publishFilesPlugin from './plugins/publishFiles';
 import redirectsPlugin from './plugins/redirects';
 import {siteRelativeVcs} from './plugins/siteRelativeVcs';
 import {redirects as guideRedirects} from './redirects';
+import {searchLanguages} from './search';
 import {translatableLabels} from './sidebarItems';
 import {coreLanding, readBuildVersion, siteRoot} from './versioning';
 
@@ -151,10 +152,13 @@ const config: Config = {
   i18n: {
     defaultLocale: 'en',
     locales,
+    // Each language is built in a process of its own (`build.mjs`), and Docusaurus leaves the
+    // language segment out of the base URL of a build that names a single language; the segment
+    // is therefore written here.
     localeConfigs: {
-      en: {label: 'English', htmlLang: 'en'},
-      ru: {label: 'Русский', htmlLang: 'ru', path: 'ru'},
-      zh: {label: '中文', htmlLang: 'zh-CN', path: 'zh'},
+      en: {label: 'English', htmlLang: 'en', baseUrl},
+      ru: {label: 'Русский', htmlLang: 'ru', path: 'ru', baseUrl: `${baseUrl}ru/`},
+      zh: {label: '中文', htmlLang: 'zh-CN', path: 'zh', baseUrl: `${baseUrl}zh/`},
     },
   },
 
@@ -171,7 +175,7 @@ const config: Config = {
       '@easyops-cn/docusaurus-search-local',
       {
         hashed: true,
-        language: locales,
+        language: searchLanguages(buildLocale),
         indexBlog: false,
         docsDir: docsRoot,
         docsRouteBasePath: '/',
