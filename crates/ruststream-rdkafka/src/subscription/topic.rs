@@ -4,6 +4,7 @@ use std::future::{Future, ready};
 
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
+use ruststream::runtime::IntoSource;
 use ruststream::{AddressedCopies, RedeliveryAddress, RedeliveryAddressed, SubscriptionSource};
 
 use super::{Assignment, Commit, GroupSettings, LaneKey, Reader, StartOffset, SubscriptionPlan};
@@ -181,6 +182,16 @@ impl KafkaTopic {
             reader: Reader::Subscribed(vec![self.topic]),
             settings: self.settings,
         })
+    }
+}
+
+// The manual path binds a `Handle` body to its source with `subscriber(source, body)`, which
+// takes the descriptor as it is, the way the `#[subscriber(..)]` attribute does.
+impl IntoSource for KafkaTopic {
+    type Source = Self;
+
+    fn into_source(self) -> Self {
+        self
     }
 }
 
