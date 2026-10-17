@@ -55,7 +55,6 @@ mod tests {
         amount_cents: u64,
     }
 
-    // --8<-- [start:first_test]
     #[tokio::test]
     async fn an_order_without_an_amount_is_dropped() -> Result<(), Box<dyn Error>> {
         let tb = TestApp::start(app()).await?;
@@ -79,7 +78,6 @@ mod tests {
         tb.shutdown().await?;
         Ok(())
     }
-    // --8<-- [end:first_test]
 
     #[tokio::test]
     async fn an_order_with_an_amount_is_taken() -> Result<(), Box<dyn Error>> {
