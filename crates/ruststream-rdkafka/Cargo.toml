@@ -132,9 +132,39 @@ name = "kafka_seek"
 
 [[example]]
 name = "kafka_retries"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_retries"
+path = "examples/manual/kafka_retries.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
 name = "kafka_distribution"
+
+[[example]]
+name = "kafka_settlement_commit"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_settlement_commit"
+path = "examples/manual/kafka_settlement_commit.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_settlement_source_topic"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_settlement_source_topic"
+path = "examples/manual/kafka_settlement_source_topic.rs"
+required-features = ["testing"]
+test = true
 
 # --- examples: transactions ---
 
