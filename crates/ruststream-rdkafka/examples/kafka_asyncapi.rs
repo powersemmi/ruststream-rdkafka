@@ -1,4 +1,4 @@
-//! The AsyncAPI document of a Kafka service: the `kafka` bindings say where the cluster and its
+//! The `AsyncAPI` document of a Kafka service: the `kafka` bindings say where the cluster and its
 //! schema registry are, which topic stands behind each channel, and which consumer group each
 //! operation reads in. The tests read the document the app generates.
 //!
@@ -54,7 +54,7 @@ async fn ledger(order: &Order) -> HandlerOutcome {
 // --8<-- [end:channels]
 
 // --8<-- [start:server]
-/// The production cluster over SASL_SSL, with its schema registry.
+/// The production cluster over `SASL_SSL`, with its schema registry.
 fn broker(password: &str) -> KafkaBroker {
     let registry =
         SchemaRegistry::new("https://registry.internal:8081").basic_auth("orders-svc", password);

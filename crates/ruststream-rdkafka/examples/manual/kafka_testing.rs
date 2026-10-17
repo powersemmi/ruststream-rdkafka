@@ -7,6 +7,7 @@
 //! cargo test --example manual_kafka_testing --features testing
 //! ```
 
+use std::future::{Future, ready};
 use std::process::ExitCode;
 
 use ruststream::runtime::cli::run_main;
@@ -34,16 +35,16 @@ impl MessageHeaders for Payment {
 struct Accept;
 
 impl Handle<Payment> for Accept {
-    async fn handle(
+    fn handle(
         &self,
         payment: &Payment,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         if payment.amount == 0 {
-            return Err(HandlerOutcome::drop());
+            return ready(Err(HandlerOutcome::drop()));
         }
-        Ok(())
+        ready(Ok(()))
     }
 }
 

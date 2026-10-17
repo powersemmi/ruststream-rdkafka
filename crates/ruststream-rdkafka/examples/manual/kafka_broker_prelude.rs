@@ -5,6 +5,7 @@
 //! cargo test --example manual_kafka_broker_prelude --features testing
 //! ```
 
+use std::future::{Future, ready};
 use std::process::ExitCode;
 
 use ruststream::runtime::cli::run_main;
@@ -17,13 +18,13 @@ use ruststream_rdkafka::prelude::*;
 struct Confirm;
 
 impl Handle<Order, Confirmation> for Confirm {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<Confirmation, HandlerOutcome> {
-        Ok(Confirmation { id: order.id })
+    ) -> impl Future<Output = Result<Confirmation, HandlerOutcome>> {
+        ready(Ok(Confirmation { id: order.id }))
     }
 }
 

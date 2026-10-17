@@ -6,6 +6,7 @@
 //! ```
 
 use std::env;
+use std::future::{Future, ready};
 use std::process::ExitCode;
 
 use ruststream::runtime::cli::run_main;
@@ -17,19 +18,19 @@ use ruststream_rdkafka::prelude::*;
 struct Place;
 
 impl Handle<Order> for Place {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(order.id, "order placed");
-        Ok(())
+        ready(Ok(()))
     }
 }
 
 // --8<-- [start:broker]
-/// The cluster's SASL_SSL listener, with the service's own credentials.
+/// The cluster's `SASL_SSL` listener, with the service's own credentials.
 fn broker(password: &str) -> KafkaBroker {
     KafkaBroker::new(["kafka-1.internal:9093", "kafka-2.internal:9093"])
         .default_group("orders-svc")

@@ -9,6 +9,7 @@
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+use std::future::{Future, ready};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -25,14 +26,14 @@ mod live;
 struct Place;
 
 impl Handle<Order> for Place {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(order.id, "order placed");
-        Ok(())
+        ready(Ok(()))
     }
 }
 

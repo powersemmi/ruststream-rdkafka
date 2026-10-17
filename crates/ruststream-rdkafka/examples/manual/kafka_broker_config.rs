@@ -5,6 +5,7 @@
 //! cargo test --example manual_kafka_broker_config --features testing
 //! ```
 
+use std::future::{Future, ready};
 use std::process::ExitCode;
 
 use ruststream::runtime::cli::run_main;
@@ -16,18 +17,18 @@ use ruststream_rdkafka::prelude::*;
 struct Ship;
 
 impl Handle<Order, Shipment> for Ship {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<Shipment, HandlerOutcome> {
-        Ok(Shipment {
+    ) -> impl Future<Output = Result<Shipment, HandlerOutcome>> {
+        ready(Ok(Shipment {
             order_id: order.id,
             labels: (1..=order.parcels)
                 .map(|parcel| format!("{}-{parcel:05}", order.id))
                 .collect(),
-        })
+        }))
     }
 }
 

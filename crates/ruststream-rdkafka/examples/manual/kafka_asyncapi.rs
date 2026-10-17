@@ -11,6 +11,7 @@
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 use std::env;
+use std::future::{Future, ready};
 use std::process::ExitCode;
 
 use ruststream::runtime::cli::run_main;
@@ -44,46 +45,46 @@ impl MessageHeaders for Confirmation {
 struct Confirm;
 
 impl Handle<Order, Confirmation> for Confirm {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<Confirmation, HandlerOutcome> {
-        Ok(Confirmation { id: order.id })
+    ) -> impl Future<Output = Result<Confirmation, HandlerOutcome>> {
+        ready(Ok(Confirmation { id: order.id }))
     }
 }
 
 struct Audit;
 
 impl Handle<Order> for Audit {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(order.id, "audited");
-        Ok(())
+        ready(Ok(()))
     }
 }
 
 struct Ledger;
 
 impl Handle<Order> for Ledger {
-    async fn handle(
+    fn handle(
         &self,
         order: &Order,
         _outs: &(),
         _ctx: &mut Context<'_>,
-    ) -> Result<(), HandlerOutcome> {
+    ) -> impl Future<Output = Result<(), HandlerOutcome>> {
         tracing::info!(order.id, "booked");
-        Ok(())
+        ready(Ok(()))
     }
 }
 
 // --8<-- [start:server]
-/// The production cluster over SASL_SSL, with its schema registry.
+/// The production cluster over `SASL_SSL`, with its schema registry.
 fn broker(password: &str) -> KafkaBroker {
     let registry =
         SchemaRegistry::new("https://registry.internal:8081").basic_auth("orders-svc", password);

@@ -18,7 +18,7 @@ async fn place(order: &Order) -> HandlerOutcome {
 }
 
 // --8<-- [start:broker]
-/// The cluster's SASL_SSL listener, with the service's own credentials.
+/// The cluster's `SASL_SSL` listener, with the service's own credentials.
 fn broker(password: &str) -> KafkaBroker {
     KafkaBroker::new(["kafka-1.internal:9093", "kafka-2.internal:9093"])
         .default_group("orders-svc")
