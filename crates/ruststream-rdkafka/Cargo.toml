@@ -275,7 +275,8 @@ required-features = ["avro"]
 
 [[example]]
 name = "kafka_avro_codec"
-required-features = ["avro"]
+required-features = ["avro", "testing"]
+test = true
 
 [[example]]
 name = "kafka_registry_envelope"
@@ -297,6 +298,34 @@ test = true
 [[example]]
 name = "manual_kafka_avro"
 path = "examples/manual/kafka_avro.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_avro_codec"
+path = "examples/manual/kafka_avro_codec.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "kafka_avro_local"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_avro_local"
+path = "examples/manual/kafka_avro_local.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "kafka_avro_resolve"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_avro_resolve"
+path = "examples/manual/kafka_avro_resolve.rs"
 required-features = ["avro", "testing"]
 test = true
 
