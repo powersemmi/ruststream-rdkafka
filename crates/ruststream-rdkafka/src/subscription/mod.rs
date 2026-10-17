@@ -16,6 +16,7 @@ pub use topics::KafkaTopics;
 use rdkafka::error::KafkaError as RdKafkaError;
 
 use crate::error::KafkaError;
+use crate::properties::Properties;
 
 /// Where a consumer group starts reading when it has no valid committed offset.
 ///
@@ -124,7 +125,7 @@ pub(crate) struct GroupSettings {
     pub(crate) commit: Commit,
     pub(crate) assignment: Option<Assignment>,
     pub(crate) lane_key: LaneKey,
-    pub(crate) config: Vec<(String, String)>,
+    pub(crate) config: Properties,
 }
 
 /// How the consumer takes its partitions: through the group protocol, or by naming them.

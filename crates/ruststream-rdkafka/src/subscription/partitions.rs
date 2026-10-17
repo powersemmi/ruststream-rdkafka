@@ -105,7 +105,7 @@ impl KafkaPartitions {
     /// [`KafkaTopic::config`](crate::KafkaTopic::config).
     #[must_use]
     pub fn config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.settings.config.push((key.into(), value.into()));
+        self.settings.config.set(key.into(), value.into());
         self
     }
 
