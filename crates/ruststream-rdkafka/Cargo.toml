@@ -41,8 +41,8 @@ asyncapi = ["ruststream/asyncapi", "dep:serde"]
 # user-facing feature.
 testing = ["ruststream/testing", "dep:regex"]
 # TLS and compression backends, mapped 1:1 onto rdkafka's cargo features. Only the backends
-# that build hermetically everywhere are surfaced here (SASL PLAIN/SCRAM/OAUTHBEARER need no
-# feature at all - librdkafka implements them built-in); anything else (gssapi, cmake-build,
+# that build hermetically everywhere are surfaced here (SASL PLAIN is built in; SCRAM and
+# OAUTHBEARER come with either TLS feature); anything else (gssapi, cmake-build,
 # dynamic-linking, ...) can be enabled by depending on `rdkafka` directly, since cargo features
 # are additive across the dependency graph.
 ssl = ["rdkafka/ssl"]

@@ -622,8 +622,10 @@ librdkafka, and so do its subscribers, its publishers, its seeker and its delive
 descriptors and publish policies of the routes file are the production ones, `EosPublish`
 included. The cluster has no settings of its own. It reads what librdkafka would read: the
 broker's `config` and `producer_config`, each descriptor's typed options and passthrough, and
-librdkafka's defaults for everything left unset. A property librdkafka refuses fails the connect
-or the subscription the same way.
+librdkafka's defaults for everything left unset. A configuration librdkafka refuses to create a
+client from (a property it does not know, a SASL mechanism the build has no provider for, two
+settings that contradict each other) fails the connect, the subscription or the first transaction
+the same way.
 
 It models Kafka's semantics rather than a queue:
 
@@ -659,9 +661,10 @@ retention, and the timing of a real group join. The crate's live suites run agai
 
 - Addresses. [`KafkaBroker::new`] takes the bootstrap servers; a `PLAINTEXT://` or `SASL_SSL://`
   prefix is accepted and trimmed for the generated document.
-- Authentication. SASL `PLAIN`, `SCRAM` and `OAUTHBEARER` are built into librdkafka and need no
-  cargo feature: set `security.protocol`, `sasl.mechanism`, `sasl.username` and `sasl.password`
-  through [`KafkaBroker::config`]. Kerberos (`gssapi`) needs a system library and is reached by
+- Authentication. Set `security.protocol`, `sasl.mechanism`, `sasl.username` and `sasl.password`
+  through [`KafkaBroker::config`]. SASL `PLAIN` is built into librdkafka; `SCRAM` and
+  `OAUTHBEARER` need its OpenSSL support, the `ssl` or `ssl-vendored` feature, and without it the
+  connect fails naming the mechanism. Kerberos (`gssapi`) needs a system library and is reached by
   depending on `rdkafka` directly, cargo features being additive across the graph.
 - TLS. The `ssl` feature links the system OpenSSL, `ssl-vendored` builds it; either turns on
   `security.protocol=SSL` and the `ssl.*` properties. `zstd` adds that compression codec, the

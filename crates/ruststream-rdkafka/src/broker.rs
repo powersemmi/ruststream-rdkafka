@@ -489,8 +489,8 @@ impl Broker for KafkaBroker {
 /// an in-process cluster instead of librdkafka and carrying every setting of this broker.
 ///
 /// It refuses what [`connect`](Broker::connect) refuses before it reaches the network: no
-/// bootstrap server, a producer property librdkafka does not accept, and a registry subject a
-/// schema prefetch cannot resolve.
+/// bootstrap server, a producer configuration librdkafka refuses to create a client from, and a
+/// registry subject a schema prefetch cannot resolve.
 #[cfg(feature = "testing")]
 impl InProcess for KafkaBroker {
     fn connect_in_process(
