@@ -532,6 +532,17 @@ path = "examples/manual/kafka_protobuf_framed.rs"
 required-features = ["protobuf", "testing"]
 test = true
 
+[[example]]
+name = "kafka_protobuf_frame"
+required-features = ["protobuf", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_protobuf_frame"
+path = "examples/manual/kafka_protobuf_frame.rs"
+required-features = ["protobuf", "testing"]
+test = true
+
 # --- examples: registry ---
 
 [[example]]
