@@ -7,20 +7,28 @@
 use std::collections::HashSet;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::{StreamExt, stream};
 use rdkafka::ClientConfig;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::error::RDKafkaErrorCode;
+#[cfg(feature = "testing")]
+use ruststream::runtime::{AppInfo, HandlerOutcome, RustStream, SubscriberSettings as _};
+#[cfg(feature = "testing")]
+use ruststream::testing::TestApp;
 use ruststream::{
     Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
 };
+#[cfg(feature = "testing")]
+use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::{
-    ConnectedKafkaBroker, KafkaBroker, KafkaOptions, KafkaPartitions, KafkaPublish, KafkaTopic,
-    StartOffset,
+    ConnectedKafkaBroker, KafkaBroker, KafkaOptions, KafkaPartitions, KafkaPosition, KafkaPublish,
+    KafkaTopic, StartOffset,
 };
+#[cfg(feature = "testing")]
+use serde::{Deserialize, Serialize};
 
 mod live;
 
@@ -165,4 +173,59 @@ async fn named_partitions_at_the_end_receive_what_follows() {
     drop(stream);
     drop(subscriber);
     broker.shutdown().await.expect("shutdown");
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+struct Order {
+    id: u64,
+}
+
+#[cfg(feature = "testing")]
+#[subscriber(KafkaTopic)]
+async fn take_order(order: &Order) -> HandlerOutcome {
+    let _ = order.id;
+    HandlerOutcome::ack()
+}
+
+/// A subscription that starts at a timestamp no record has reached yet starts at the end of the
+/// log, and the end is where the log ends when the service is up: a record published right
+/// after startup is read.
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timestamp_past_the_log_receives_what_follows() {
+    let Some(url) = kafka_url() else { return };
+    let topic = unique("start-timestamp");
+    create_topic(&url, &topic, 1).await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock is past the epoch");
+    let now = i64::try_from(now.as_millis()).expect("milliseconds fit an i64");
+    let source = KafkaTopic::new(&topic).group(unique("start-timestamp-group"));
+    let app = RustStream::new(AppInfo::new("timestamp", "0.1.0")).with_broker(
+        KafkaBroker::new([url.clone()]).assignment_timeout(ASSIGNMENT),
+        |b| {
+            b.include(
+                take_order
+                    .map_source(move |_| source)
+                    .start_at(KafkaPosition::timestamp(now)),
+            );
+        },
+    );
+    let tb = TestApp::start_live_within(app, WAIT)
+        .await
+        .expect("start live");
+
+    tb.broker::<KafkaBroker>()
+        .message(&Order { id: 1 })
+        .to(&topic)
+        .publish()
+        .await
+        .expect("publish");
+    tb.broker::<KafkaBroker>()
+        .subscriber(&topic)
+        .assert_called_once()
+        .with(&Order { id: 1 })
+        .settled(HandlerOutcome::ack());
+    tb.shutdown().await.expect("shutdown");
 }
