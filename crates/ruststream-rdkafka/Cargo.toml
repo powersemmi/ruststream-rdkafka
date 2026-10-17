@@ -760,6 +760,17 @@ required-features = ["testing", "ssl"]
 test = true
 
 # guides: groups and ordering, commits, retries
+[[example]]
+name = "guide_groups_and_ordering"
+path = "examples/guide/groups_and_ordering.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_guide_groups_and_ordering"
+path = "examples/manual/guide/groups_and_ordering.rs"
+required-features = ["testing"]
+test = true
 
 # guides: replay, exactly-once
 [[example]]
