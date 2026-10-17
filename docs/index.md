@@ -13,12 +13,10 @@ serde = { version = "1", features = ["derive"] }
 
 A minimal service is one handler and one app function:
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_quickstart.rs:handler"
+```rust reference="examples/kafka_quickstart.rs#handler"
 ```
 
-```rust
---8<-- "crates/ruststream-rdkafka/examples/kafka_quickstart.rs:app"
+```rust reference="examples/kafka_quickstart.rs#app"
 ```
 
 ## The transport model
