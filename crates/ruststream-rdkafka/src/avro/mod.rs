@@ -1,55 +1,24 @@
-//! Avro behind the codec, and the JSON transcode it replaces.
+//! Avro behind the codec.
 //!
-//! [`AvroCodec`] is how a service reads and writes Avro: the schema sits where a serializer
-//! belongs, handlers stay ordinary functions over ordinary structs, and nothing about the wire
-//! reaches a signature. That is the only way to consume an Avro payload here, and it is enough
-//! for both kinds of topic.
+//! [`AvroCodec`] holds the schema where a serializer belongs, so handlers stay ordinary functions
+//! over ordinary serde structs and nothing about the wire reaches a signature.
 //!
-//! # A registry-backed topic
+//! - [Avro][avro]: [`AvroCodec::registry`] reads each delivery with its writer schema and frames
+//!   each value with the id of the subject [`AvroCodec::register`] names; [`AvroSchema`] derives
+//!   a type's schema.
+//! - [Local][local]: [`AvroCodec::local`] pins one schema and writes a bare datum, with no
+//!   registry and no I/O; [`encode`] and [`decode`] are the same conversion as free functions.
+//! - [resolve_onto][resolve-onto]: [`AvroCodec::resolve_onto`] reads every delivery onto a reader
+//!   schema.
+//! - [Avro transcode][transcode]:
+//!   [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) and
+//!   [`SchemaFrame`](crate::SchemaFrame) convert Avro to and from plain JSON at the broker's
+//!   edges, for handlers on the default codec.
 //!
-//! [`AvroCodec::registry`] speaks the Confluent wire format. Encoding frames each value with the
-//! id of its type's subject, and decoding reads every delivery with the writer schema that
-//! delivery's envelope names - which is what makes a datum written by an older producer readable
-//! by a newer consumer:
-//!
-//! ```no_run
-//! use apache_avro::AvroSchema;
-//! use ruststream::prelude::*;
-//! use serde::{Deserialize, Serialize};
-//!
-//! #[derive(Serialize, Deserialize, AvroSchema)]
-//! struct Order {
-//!     id: i64,
-//! }
-//!
-//! #[derive(Serialize, Deserialize, AvroSchema, Outgoing)]
-//! struct Confirmation {
-//!     id: i64,
-//! }
-//!
-//! #[subscriber("orders", reply("confirmations"))]
-//! async fn confirm(order: &Order) -> Confirmation {
-//!     Confirmation { id: order.id }
-//! }
-//! # let _ = confirm;
-//! ```
-//!
-//! # A topic with no registry
-//!
-//! [`AvroCodec::local`] pins one schema: a bare datum on the wire, no envelope, no registry, and
-//! no I/O anywhere on the path. [`encode`] and [`decode`] are that same conversion as free
-//! functions, for a tool that works on datum bytes outside an app's dispatch.
-//!
-//! # The JSON transcode
-//!
-//! [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry) and
-//! [`SchemaFrame`](crate::SchemaFrame) convert Avro to and from plain JSON at the broker's edges,
-//! leaving handlers on the default codec. That is the compatibility path, for services that
-//! deliberately keep plain serde models on registry-backed topics; it is no longer the only one.
-//! It costs a JSON hop per message, it cannot express the Avro types JSON has no shape for, and
-//! it resolves no writer schema onto a reader schema. The two paths do not mix on one broker: a
-//! broker carrying [`KafkaBroker::schema_registry`](crate::KafkaBroker::schema_registry)
-//! transcodes every subscription it opens, so a frame-reading handler on it would be handed JSON.
+//! [avro]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/
+//! [local]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/local/
+//! [resolve-onto]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/resolve-onto/
+//! [transcode]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/transcode/
 
 mod codec;
 
@@ -225,7 +194,7 @@ where
 /// fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
 ///     let datum = fs::read(path)?;
 ///     let order: Order = avro::decode(&datum)?;
-///     println!("{}: order {}", path.display(), order.id);
+///     tracing::info!(order.id, path = %path.display(), "decoded");
 ///     Ok(())
 /// }
 /// # let _ = inspect;

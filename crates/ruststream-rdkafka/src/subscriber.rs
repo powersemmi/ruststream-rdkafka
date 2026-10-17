@@ -102,6 +102,41 @@ impl DeliveredTopic {
 /// fetches slower; librdkafka's own fetch queue bounds (`queued.max.messages.kbytes` and
 /// friends, settable through [`KafkaTopic::config`](crate::KafkaTopic::config)) cap local
 /// buffering.
+///
+/// # Examples
+///
+/// A handler whose payload parameter is a slice reads batches, and the mount site names the
+/// largest one it accepts. A batch is one delivery plus what librdkafka has already fetched, so
+/// it is often smaller than that size:
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Event {
+///     id: u64,
+/// }
+///
+/// #[subscriber(KafkaTopic::new("events").group("indexer").commit(Commit::Tracked))]
+/// async fn index(events: &[Event]) -> HandlerOutcome {
+///     tracing::info!(count = events.len(), "indexing");
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("indexer", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]),
+///         |b| {
+///             b.include(index.batch(nonzero!(500usize)));
+///         },
+///     )
+/// }
+/// # }
+/// # fn main() {}
+/// ```
 pub struct KafkaSubscriber {
     /// What the subscription reads through.
     source: Source,

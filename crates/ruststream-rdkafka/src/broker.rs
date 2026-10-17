@@ -224,7 +224,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -237,6 +237,70 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///     })
 /// }
 /// # let _ = app;
+/// ```
+///
+/// A test runs the app `main` runs. With the `testing` feature, `TestApp::start` connects this
+/// broker to an in-process Kafka cluster, and the test addresses it by its production type:
+///
+/// ```
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # mod demo {
+/// use std::error::Error;
+///
+/// use ruststream::testing::TestApp;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+/// #[outgoing(name = "payments")]
+/// pub struct Payment {
+///     pub amount: u64,
+/// }
+///
+/// #[subscriber(KafkaTopic::new("payments").commit(Commit::Tracked))]
+/// async fn accept(payment: &Payment) -> HandlerOutcome {
+///     if payment.amount == 0 {
+///         return HandlerOutcome::drop();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// /// The app `main` runs.
+/// pub fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
+///         KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
+///         |b| {
+///             b.include(accept);
+///         },
+///     )
+/// }
+///
+/// pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn Error>> {
+///     let tb = TestApp::start(app()).await?;
+///
+///     // The publish returns once the handler it woke has settled.
+///     tb.broker::<KafkaBroker>()
+///         .message(&Payment { amount: 0 })
+///         .publish()
+///         .await?;
+///
+///     tb.broker::<KafkaBroker>()
+///         .subscriber("payments")
+///         .assert_called(1)
+///         .with(&Payment { amount: 0 })
+///         .settled(HandlerOutcome::drop());
+///
+///     tb.shutdown().await?;
+///     Ok(())
+/// }
+/// # }
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// #     demo::zero_amounts_are_dropped().await
+/// # }
+/// # #[cfg(not(all(feature = "json", feature = "testing")))]
+/// # fn main() {}
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaBroker {
@@ -349,7 +413,7 @@ impl KafkaBroker {
     ///
     /// #[subscriber("orders")]
     /// async fn place(order: &Order) -> HandlerOutcome {
-    ///     println!("order {}", order.id);
+    ///     tracing::info!(order.id, "accepted");
     ///     HandlerOutcome::ack()
     /// }
     ///
@@ -631,7 +695,7 @@ impl KafkaBroker {
 ///     }
 ///     let closed = connected.shutdown().await?;
 ///     if closed.unflushed_records() > 0 {
-///         eprintln!("{} records were not flushed", closed.unflushed_records());
+///         tracing::warn!(unflushed = closed.unflushed_records(), "records were not flushed");
 ///     }
 ///     Ok(())
 /// }
@@ -719,7 +783,7 @@ impl ConnectedKafkaBroker {
     ///     while let Some(record) = records.next().await {
     ///         let record = record?;
     ///         let (partition, offset) = (record.partition(), record.offset());
-    ///         println!("{partition}@{offset}: {} bytes", record.payload().len());
+    ///         tracing::info!(%partition, %offset, bytes = record.payload().len(), "read");
     ///         record.ack().await?;
     ///     }
     ///     Ok(())

@@ -47,7 +47,7 @@ const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
 ///     start_at(KafkaPosition::earliest())
 /// )]
 /// async fn project(order: &Order) -> HandlerOutcome {
-///     println!("projecting order {}", order.id);
+///     tracing::info!(order.id, "projecting");
 ///     HandlerOutcome::ack()
 /// }
 ///

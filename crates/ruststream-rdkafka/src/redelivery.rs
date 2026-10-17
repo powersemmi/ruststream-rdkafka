@@ -40,7 +40,7 @@ use crate::context::keys::Topic;
 /// /// is what the transform reads.
 /// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
 /// async fn place(order: &Order, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
-///     println!("order {} from {topic}", order.id);
+///     tracing::info!(order.id, %topic, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///

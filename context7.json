@@ -1,14 +1,32 @@
 {
+  "$schema": "https://context7.com/schema/context7.json",
+  "folders": [
+    "docs",
+    "crates/ruststream-rdkafka/src",
+    "crates/ruststream-rdkafka/examples",
+    "website/static"
+  ],
+  "excludeFolders": [
+    "docs/benchmarks",
+    "website/i18n",
+    "website/build",
+    "website/.docusaurus",
+    "website/node_modules",
+    "target"
+  ],
   "rules": [
     "Import `ruststream_rdkafka::prelude::*` at a mount site; a handler body imports `ruststream::prelude::*` and bounds an injected slot with a capability, the one exception being a body that writes a per-record setting.",
-    "Pick the descriptor by what the subscription reads: `KafkaTopic` for one topic, `KafkaTopics` for several or a `^`-anchored pattern, `KafkaPartitions` for an exact partition list with no group membership, and the bare `#[subscriber(\"orders\")]` form for the topic in the broker's `default_group`.",
+    "Pick the descriptor by what a subscription reads: `KafkaTopic` for one topic, `KafkaTopics` for several or a `^` pattern, `KafkaPartitions` for a fixed partition list without a group, or bare `#[subscriber(\"orders\")]` in the broker's `default_group`.",
+    "Keep per-key order under concurrency with `workers(n, by_key)`; the descriptor's `lane_key` picks the lane key: `LaneKey::Partition` (the default, keyless records included) or `LaneKey::RecordKey`.",
+    "Rebuild from the log with `start_at(KafkaPosition::earliest())` (or a timestamp) on every startup; move a running subscription from its handler with `Ctx<SeekHandle>`, a local seek that commits nothing and a rebalance discards.",
     "Name `Commit::Tracked` on the descriptor whenever a handler settles deliveries itself; under the default `Commit::Auto` librdkafka stores the position on delivery, so `ack` and `nack(false)` are advisory and a requeue reports `AckError::Unsupported`.",
-    "Cap redeliveries with `.max_attempts(n).dead_letter(topic)` right after `include`, since Kafka counts no deliveries of its own; a `KafkaTopics` or `KafkaPartitions` registration must also name where a copy goes, with `.out_retry(policy).to(topic)` or `.out_retry(policy).transform(ToSourceTopic)`.",
-    "Write the destination partition as the per-message setting `partition(n)` on the publish builder, bounding the slot `Out<impl Publisher<Options = KafkaOptions>, Marker>`; the record key travels as the framework's partition-key header and becomes Kafka's native key.",
-    "Give every concurrent transactional flow its own `transactional_id`, since a second producer on one id fences the first: use `per_partition()` with `Out<impl PartitionLanes>` for a worker pool, and `EosPublish` with `Commit::Transactional(id)` plus the `EosReplies` transform for consume-transform-produce.",
-    "Reach for a registry-backed codec first (`AvroCodec`, or `SchemaFramed` over `JsonCodec`) with `KafkaBroker::schema_prefetch`; `KafkaBroker::schema_registry` plus `SchemaFrame` is the JSON transcode compatibility path, and the two never sit on one broker.",
+    "Cap redeliveries with `.max_attempts(n).dead_letter(topic)` after `include` (Kafka counts none); a `KafkaTopics` or `KafkaPartitions` mount names the copy's topic: `.out_retry(policy).to(topic)` or `.out_retry(policy).transform(ToSourceTopic)`.",
+    "Set a record's partition with the per-message setting `partition(n)` on the publish builder, bounding the slot `Out<impl Publisher<Options = KafkaOptions>, Marker>`; the framework's partition-key header becomes Kafka's native record key.",
+    "Give each concurrent transactional flow its own `transactional_id` (a second producer on one id fences the first): `per_partition()` with `Out<impl PartitionLanes>` for a worker pool; `EosPublish`, `Commit::Transactional(id)` and `EosReplies` for EOS.",
+    "Prefer a registry-backed codec (`AvroCodec`, or `SchemaFramed` over `JsonCodec`) with `KafkaBroker::schema_prefetch`; `KafkaBroker::schema_registry` plus `SchemaFrame` is the JSON transcode compatibility path, and the two never sit on one broker.",
     "Carry a Protobuf message on the core's byte lanes with `#[wire(..)]` and frame it at publish time with `KafkaPublish::framed(&registry)` or the app-wide `ProtobufFrame` layer; a `prost` message can never be a codec's value.",
     "Test a service by handing the app `main` runs to `ruststream::testing::TestApp::start`, which connects `KafkaBroker` in process with the `testing` feature, and address it as `tb.broker::<KafkaBroker>()`; write no mocks and build no second app.",
+    "Run the in-process test body against a running cluster with `TestApp::start_live` for what only Kafka has; keep `TestApp::start` for the rest of the suite.",
     "Reach any librdkafka property this crate does not surface through `KafkaBroker::config`, `KafkaBroker::producer_config` or the descriptor's `config`, which is applied last and wins over the typed options."
   ]
 }

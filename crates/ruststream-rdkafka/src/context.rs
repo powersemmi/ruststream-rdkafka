@@ -1,17 +1,22 @@
 //! Per-delivery and per-batch context fields exposed to handlers.
 //!
-//! [`KafkaContext`] carries the Kafka delivery metadata that is not part of the payload or the
-//! headers, plus the subscription's reposition handle. Request it in a handler by typing the
-//! context parameter as `Context<'_, KafkaContext>` and read individual fields with the
-//! zero-sized keys in [`keys`], or bind one field as a parameter with the core's `Ctx<K>`
-//! extractor.
+//! A handler types its context parameter as `Context<'_, KafkaContext>`, or binds one field as a
+//! parameter with the core's `Ctx<K>` extractor and a key from [`keys`].
 //!
-//! A batch handler gets [`KafkaBatchContext`] instead: a batch spans many deliveries, so it
-//! carries only what the whole subscription shares - the reposition handle, under the same
-//! [`keys::SeekHandle`] key. Per-delivery coordinates ride the batch's elements instead (a
-//! `&[Message<H, T>]` batch reads them off each element's typed header contract), and the two
-//! being separate types is what keeps a batch body from naming a position that belongs to one
-//! record.
+//! - [Kafka context][context]: [`KafkaContext`], the record's topic, partition, offset, timestamp
+//!   and key, under the keys [`keys::Topic`], [`keys::Partition`], [`keys::Offset`],
+//!   [`keys::TimestampMillis`] and [`keys::Key`].
+//! - [KafkaBatchContext][batch]: [`KafkaBatchContext`], a batch handler's context, which carries
+//!   only the seek handle; each element of a `&[Message<H, T>]` batch carries its own
+//!   coordinates.
+//! - [Seek][seek]: [`keys::SeekHandle`] and [`keys::Position`] move a running subscription.
+//! - [EosPipeline][eos]: [`keys::Source`] gives a hand-written exactly-once publish its
+//!   coordinates.
+//!
+//! [context]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/context/
+//! [batch]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/context/batch-context/
+//! [seek]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/positions/seek/
+//! [eos]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-pipeline/
 
 use std::fmt;
 use std::sync::Arc;

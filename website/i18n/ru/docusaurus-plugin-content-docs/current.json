@@ -1,0 +1,10 @@
+{
+  "sidebar.components.doc.Overview": {
+    "message": "Обзор",
+    "description": "The label for the doc item 'Overview' in sidebar 'components', linking to the doc components/index"
+  },
+  "sidebar.architecture.category.Benchmarks": {
+    "message": "Бенчмарки",
+    "description": "The label for category 'Benchmarks' in sidebar 'architecture'"
+  }
+}

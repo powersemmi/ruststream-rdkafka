@@ -34,7 +34,7 @@ use crate::subscriber::KafkaSubscriber;
 ///
 /// #[subscriber(KafkaPartitions::new("orders", [0]).start(StartOffset::Earliest))]
 /// async fn inspect(order: &Order, Ctx(offset): Ctx<Offset>) -> HandlerOutcome {
-///     println!("partition 0, offset {offset}: order {}", order.id);
+///     tracing::info!(order.id, %offset, "read from partition 0");
 ///     HandlerOutcome::ack()
 /// }
 ///

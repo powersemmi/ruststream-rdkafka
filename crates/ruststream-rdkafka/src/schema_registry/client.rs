@@ -48,7 +48,7 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// # struct Order { id: u64 }
 /// # #[subscriber("orders")]
 /// # async fn place(order: &Order) -> HandlerOutcome {
-/// #     println!("order {}", order.id);
+/// #     tracing::info!(order.id, "accepted");
 /// #     HandlerOutcome::ack()
 /// # }
 ///

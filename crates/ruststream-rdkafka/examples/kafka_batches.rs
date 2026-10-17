@@ -1,95 +1,155 @@
-//! Batch consumption: the handler receives a whole decoded batch per invocation. librdkafka
-//! already fetches batches on the wire and hands them over without waiting, so a batch is one
-//! delivery plus everything already fetched, capped at the size the mount site names.
+//! Batch handlers: a body over a slice takes one fetched delivery plus whatever librdkafka
+//! already holds, up to the size the mount site names. Each scenario is a test.
 //!
 //! ```text
-//! just brokers-up
-//! cargo run --example kafka_batches -- run
+//! cargo test --example kafka_batches --features testing
 //! ```
 
-use std::time::Duration;
+// A plain build compiles the services; the tests that use them exist only in the test build.
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
-use ruststream::nonzero;
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, RustStream, SubscriberSettings as _};
-use ruststream::subscriber;
-use ruststream_rdkafka::{Commit, KafkaBroker, KafkaPublish as Publish, KafkaTopic};
-use serde::Deserialize;
+use ruststream::Outgoing;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Outgoing)]
+#[outgoing(name = "orders")]
 struct Order {
     id: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize, Serialize, Outgoing)]
+#[outgoing(name = "payments")]
 struct Payment {
     id: u64,
     settled: bool,
 }
 
-// --8<-- [start:handler]
-// The slice parameter is what says "a batch at a time"; nothing in the attribute repeats it.
-// Batching is native here - a batch is one delivery plus everything librdkafka has already
-// fetched, cut off at the size the mount site names. Returning one HandlerOutcome settles the
-// whole batch uniformly. `workers(4)` keeps up to four batches in flight at once; `by_key` does not
-// apply to batches (a keyed policy here behaves like a plain pool - per-key lanes exist for
-// single-message handlers, see the keyed lanes example).
-#[subscriber(
-    KafkaTopic::new("orders").group("orders-svc").commit(Commit::Tracked),
-    workers(4)
-)]
-async fn handle_batch(orders: &[Order]) -> HandlerOutcome {
-    let first = orders.first().map(|order| order.id);
-    println!(
-        "processing a batch of {} orders, first id {first:?}",
-        orders.len()
-    );
-    HandlerOutcome::ack()
-}
-// --8<-- [end:handler]
+mod whole {
+    use std::error::Error;
 
-// --8<-- [start:selective]
-// Per-element settlement: entry `i` settles batch element `i`. This works, but read the docs on
-// how it maps onto Kafka's one-position-per-partition commits: under `Commit::Tracked` the
-// committed position only advances up to the first non-acked element, and `retry_after` runs
-// through the runtime's deferred-republish fallback (`out_retry` below), not a native delay.
-#[subscriber(
-    KafkaTopic::new("payments")
-        .group("payments-svc")
-        .commit(Commit::Tracked)
-        // How much librdkafka keeps queued locally is a consumer setting, and it stays here in
-        // the descriptor's config passthrough; the batch size is the mount site's word.
-        .config("queued.max.messages.kbytes", "1024")
-)]
-async fn reconcile_batch(payments: &[Payment]) -> Vec<HandlerOutcome> {
-    payments
-        .iter()
-        .map(|payment| {
-            if payment.settled {
-                HandlerOutcome::ack()
-            } else {
-                println!("payment {} not settled yet; retrying later", payment.id);
-                HandlerOutcome::retry_after(Duration::from_secs(30))
-            }
+    use futures::future::join_all;
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+
+    use super::Order;
+
+    // --8<-- [start:handler]
+    /// Stores a batch of orders in one round-trip; one outcome settles the whole batch.
+    #[subscriber(
+        KafkaTopic::new("orders").group("orders-svc").commit(Commit::Tracked),
+        workers(4)
+    )]
+    async fn store(orders: &[Order]) -> HandlerOutcome {
+        tracing::info!(count = orders.len(), "stored in one round-trip");
+        HandlerOutcome::ack()
+    }
+
+    fn app() -> impl App<State = ()> {
+        let broker = KafkaBroker::new(["localhost:9092"]);
+        RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+            // At most 64 orders per call.
+            b.include(store.batch(nonzero!(64)));
         })
-        .collect()
-}
-// --8<-- [end:selective]
+    }
+    // --8<-- [end:handler]
 
-// --8<-- [start:app]
-#[ruststream::app]
-fn app() -> impl App {
-    let broker = KafkaBroker::new(["localhost:9092"]);
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        // --8<-- [start:size]
-        // `batch(n)` is the batch size, and a batch handler does not mount without it: it travels
-        // to the consumer's poll, which never hands the body more than `n` records at once.
-        b.include(handle_batch.batch(nonzero!(64)));
-        // Kafka has no native delayed redelivery: `retry_after` re-publishes a delayed copy
-        // through the publisher this registration names (and settles the original, so the
-        // committed position moves). Leave the position off and the delay is dropped.
-        b.include(reconcile_batch.batch(nonzero!(16)))
-            .out_retry(Publish::default());
-        // --8<-- [end:size]
-    })
+    #[tokio::test]
+    async fn three_waiting_orders_arrive_in_one_call() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+
+        let orders: Vec<Order> = (1..=3).map(|id| Order { id }).collect();
+        // Published at once, the three orders wait in the consumer's queue together.
+        let broker = tb.broker::<KafkaBroker>();
+        for published in join_all(orders.iter().map(|order| broker.message(order).publish())).await
+        {
+            published?;
+        }
+
+        tb.broker::<KafkaBroker>()
+            .subscriber("orders")
+            .assert_called_once()
+            .assert_batch_sizes(&[3])
+            .settled(HandlerOutcome::ack());
+        Ok(())
+    }
 }
-// --8<-- [end:app]
+
+mod per_element {
+    use std::error::Error;
+
+    use futures::future::join_all;
+    use std::time::Duration;
+
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+
+    use super::Payment;
+
+    /// How long an unsettled payment waits before it is checked again.
+    const RECHECK: Duration = Duration::from_secs(30);
+
+    // --8<-- [start:selective]
+    /// One outcome per payment, in slice order: only the unsettled ones come back.
+    #[subscriber(
+        KafkaTopic::new("payments")
+            .group("payments-svc")
+            .commit(Commit::Tracked)
+            .config("queued.max.messages.kbytes", "1024")
+    )]
+    async fn reconcile(payments: &[Payment]) -> Vec<HandlerOutcome> {
+        payments
+            .iter()
+            .map(|payment| {
+                if payment.settled {
+                    HandlerOutcome::ack()
+                } else {
+                    HandlerOutcome::retry_after(RECHECK)
+                }
+            })
+            .collect()
+    }
+
+    fn app() -> impl App<State = ()> {
+        let broker = KafkaBroker::new(["localhost:9092"]);
+        RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
+            // A delayed retry is a copy published back to the topic after the delay.
+            b.include(reconcile.batch(nonzero!(16)))
+                .out_retry(Publish::default());
+        })
+    }
+    // --8<-- [end:selective]
+
+    #[tokio::test(start_paused = true)]
+    async fn only_the_unsettled_payment_comes_back() -> Result<(), Box<dyn Error>> {
+        let tb = TestApp::start(app()).await?;
+
+        let payments: Vec<Payment> = [(1, true), (2, false), (3, true)]
+            .into_iter()
+            .map(|(id, settled)| Payment { id, settled })
+            .collect();
+        let broker = tb.broker::<KafkaBroker>();
+        for published in join_all(
+            payments
+                .iter()
+                .map(|payment| broker.message(payment).publish()),
+        )
+        .await
+        {
+            published?;
+        }
+        tb.advance(RECHECK).await?;
+
+        let ids: Vec<Vec<u64>> = tb
+            .broker::<KafkaBroker>()
+            .subscriber("payments")
+            .batches::<Payment>()
+            .iter()
+            .map(|batch| batch.iter().map(|payment| payment.id).collect())
+            .collect();
+        assert_eq!(ids, [vec![1, 2, 3], vec![2]]);
+        Ok(())
+    }
+}
+
+// The scenarios are the tests above; the command in the header runs them.
+fn main() {}

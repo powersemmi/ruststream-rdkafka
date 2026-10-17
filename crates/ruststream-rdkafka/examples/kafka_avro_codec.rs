@@ -1,97 +1,129 @@
 //! Avro as a codec: the schema lives in the codec, and handlers stay ordinary functions over
-//! ordinary structs.
-//!
-//! This is the path to reach for first on a registry-backed Avro topic. Nothing about Avro
-//! appears in a handler's signature, the models carry no derive of this crate's, and the wire
-//! form is the codec's business - which is what a codec is for.
+//! ordinary structs. Each delivery is read with the writer schema its envelope names, and each
+//! reply is framed with the id of its type's subject.
 //!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_avro_codec --features avro -- run
+//! SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+//!     cargo test --example kafka_avro_codec --features avro,testing
 //! ```
 
-use apache_avro::AvroSchema;
-use ruststream::runtime::{App, AppInfo, HandlerOutcome, Router, RustStream};
-use ruststream::subscriber;
-use ruststream_rdkafka::avro::AvroCodec;
-use ruststream_rdkafka::{KafkaBroker, SchemaPrefetch, SchemaRegistry};
+use ruststream_rdkafka::avro::{AvroCodec, AvroSchema};
+use ruststream_rdkafka::prelude::*;
+use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
 use serde::{Deserialize, Serialize};
 
-// --8<-- [start:types]
-// Plain serde structs. `AvroSchema` derives the schema the codec registers; nothing here knows
-// it will travel as Avro.
-#[derive(Debug, Serialize, Deserialize, AvroSchema)]
-struct Order {
+// --8<-- [start:app]
+#[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema)]
+struct Delivery {
     id: i64,
-    item: String,
+    address: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, AvroSchema)]
-struct Shipment {
+#[derive(Debug, PartialEq, Serialize, Deserialize, AvroSchema, Outgoing)]
+#[outgoing(name = "delivery-receipts")]
+struct Receipt {
     id: i64,
-    carrier: String,
-}
-// --8<-- [end:types]
-
-// --8<-- [start:handler]
-// Ordinary handlers, and one codec serves both: decoding needs no registration at all, because
-// the writer schema comes off each delivery's envelope.
-#[subscriber("orders")]
-async fn take_order(order: &Order) -> HandlerOutcome {
-    println!("order {} of {}", order.id, order.item);
-    HandlerOutcome::ack()
+    delivered: bool,
 }
 
-#[subscriber("shipments")]
-async fn take_shipment(shipment: &Shipment) -> HandlerOutcome {
-    println!("shipment {} via {}", shipment.id, shipment.carrier);
-    HandlerOutcome::ack()
+#[subscriber("deliveries", reply)]
+async fn deliver(delivery: &Delivery) -> Receipt {
+    tracing::info!(delivery.id, delivery.address, "delivered");
+    Receipt {
+        id: delivery.id,
+        delivered: true,
+    }
 }
-// --8<-- [end:handler]
 
-#[ruststream::app]
-fn app() -> impl App {
-    // --8<-- [start:wiring]
-    // The prefetch is the async half: `connect` resolves the subjects registered below, and each
-    // delivery's writer schema is resolved on the consume path - so the codec itself, which is
-    // synchronous, never reaches the network.
-    let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
-
-    // One codec for the whole scope. Registration is the publish side only: it says which subject
-    // a type's values are framed under, and captures that type's schema so a subject that has
-    // gone missing can be put back.
-    let codec = AvroCodec::registry(&prefetch).register::<Order>("orders-value");
-
-    // --8<-- [start:cascade]
-    // A reader schema applies to every delivery its codec decodes, so a codec carrying one can
-    // only serve a single reading type. This handler wants Avro's resolution to fill the fields
-    // older producers never wrote, so it gets its own codec, in its own router - and the scope's
-    // codec, which carries no reader schema, keeps serving everything else.
-    let shipments = AvroCodec::registry(&prefetch)
-        .register::<Shipment>("shipments-value")
-        .resolve_onto(Shipment::get_schema())
-        .expect("the reader schema resolves");
-    // --8<-- [end:cascade]
-
+fn app(registry: SchemaRegistry) -> impl App {
+    // The prefetch resolves subjects at connect and each writer schema before its decode.
+    let prefetch = SchemaPrefetch::new(registry);
+    // Registration is the publish side: the subject a type's values are framed under.
+    let codec = AvroCodec::registry(&prefetch).register::<Receipt>("delivery-receipts-value");
     let broker = KafkaBroker::new(["localhost:9092"])
-        .default_group("orders-svc")
+        .default_group("deliveries-svc")
         .schema_prefetch(prefetch);
 
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-        b.include(take_order);
-        // Most specific wins, exactly as for any other codec.
-        b.include_router(Router::new().with_codec(shipments).include(take_shipment));
+    // The scope's codec decodes every delivery; the reply names it again, at its own position.
+    let replies = codec.clone();
+    RustStream::new(AppInfo::new("deliveries", "0.1.0")).with_broker_codec(broker, codec, |b| {
+        b.include(deliver)
+            .out_reply(Publish::default())
+            .codec(replies);
     })
-    // --8<-- [end:wiring]
 }
 
-// --8<-- [start:local]
-/// A topic with no registry: one schema, pinned here, and a bare datum on the wire.
-#[allow(
-    dead_code,
-    reason = "the other schema source, shown rather than wired into this app"
-)]
-fn local_codec() -> AvroCodec {
-    AvroCodec::local(Order::get_schema()).expect("the schema resolves")
+#[ruststream::app]
+fn service() -> impl App {
+    app(SchemaRegistry::new("http://localhost:8081"))
 }
-// --8<-- [end:local]
+// --8<-- [end:app]
+
+#[cfg(test)]
+#[path = "../tests/live/mod.rs"]
+mod live;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::codec::Codec;
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::avro::{self, AvroCodec};
+    use ruststream_rdkafka::prelude::*;
+    use ruststream_rdkafka::schema_registry::parse_envelope;
+    use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+
+    use super::{Delivery, Receipt, app, live};
+
+    #[tokio::test]
+    async fn an_avro_delivery_is_answered_with_an_avro_receipt() -> Result<(), Box<dyn Error>> {
+        let Some(url) = live::url("SCHEMA_REGISTRY_TEST_URL") else {
+            return Ok(());
+        };
+        // The producers own both subjects; this service registers neither.
+        let registry = SchemaRegistry::new(&url);
+        let deliveries = registry
+            .register_avro::<Delivery>("deliveries-value")
+            .await?;
+        let receipts = registry
+            .register_avro::<Receipt>("delivery-receipts-value")
+            .await?;
+        let writer = AvroCodec::registry(&SchemaPrefetch::new(registry.clone()))
+            .register::<Delivery>("deliveries-value");
+        let framed = writer.encode(&Delivery {
+            id: 42,
+            address: "Baker Street 221B".to_owned(),
+        })?;
+        assert_eq!(parse_envelope(&framed).map(|(id, _)| id), Some(deliveries));
+        let tb = TestApp::start(app(registry)).await?;
+        let kafka = tb.broker::<KafkaBroker>();
+
+        kafka
+            .message(&Wire(framed.to_vec()))
+            .to("deliveries")
+            .publish()
+            .await?;
+
+        let published = kafka
+            .published::<()>("delivery-receipts")
+            .assert_called_once();
+        let (id, datum) = parse_envelope(published.messages()[0].payload())
+            .ok_or("the receipt went out without an envelope")?;
+        assert_eq!(id, receipts);
+        assert_eq!(
+            avro::decode::<Receipt>(datum)?,
+            Receipt {
+                id: 42,
+                delivered: true,
+            },
+        );
+        Ok(())
+    }
+
+    /// Bytes published as they are: what a registry-backed producer puts on the topic.
+    #[derive(Serialized, Outgoing)]
+    struct Wire(Vec<u8>);
+}

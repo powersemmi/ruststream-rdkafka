@@ -1,75 +1,133 @@
 //! Confluent Schema Registry as broker middleware: handlers and codecs stay plain JSON, the
-//! broker's edges transcode. Consuming strips (and, with the avro/protobuf features,
-//! converts) framed payloads on the subscription's async path; publishing frames the JSON
-//! payload for the wire through the app's publish pipeline, with the subject resolved
-//! lazily. No custom codecs anywhere.
+//! broker's edges transcode. Consuming strips the envelope of a framed payload; publishing frames
+//! the JSON payload for the wire through the app's publish pipeline.
 //!
 //! ```text
 //! just brokers-up
 //! cargo run --example kafka_schema_registry --features schema-registry -- run
+//! SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
+//!     cargo test --example kafka_schema_registry --features schema-registry,testing
 //! ```
 
-use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream::{Outgoing, subscriber};
+use ruststream_rdkafka::prelude::*;
 use ruststream_rdkafka::schema_registry::JsonSchema;
-use ruststream_rdkafka::{KafkaBroker, KafkaError, SchemaFrame, SchemaRegistry};
+use ruststream_rdkafka::{KafkaError, SchemaFrame, SchemaRegistry};
 use serde::{Deserialize, Serialize};
 
-// --8<-- [start:types]
-// Plain serde structs; `JsonSchema` (schemars, re-exported) is only needed to register a
-// subject straight from the type.
-#[derive(Debug, Deserialize, JsonSchema)]
-struct Order {
+// --8<-- [start:app]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Reservation {
     id: i64,
 }
 
-// The reply topic is a property of the confirmation itself, so the type declares it and the
-// subscriber's clause names none.
-#[derive(Debug, Serialize, Outgoing, JsonSchema)]
-#[outgoing(name = "confirmations")]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Outgoing, JsonSchema)]
+#[outgoing(name = "reservation-confirmations")]
 struct Confirmation {
     id: i64,
     accepted: bool,
 }
-// --8<-- [end:types]
 
-// --8<-- [start:handler]
-// An ordinary handler on the default JSON codec: the broker middleware already stripped the
-// Confluent envelope (and, with the avro/protobuf features, converted the datum to JSON).
-#[subscriber("orders", reply)]
-async fn confirm(order: &Order) -> Confirmation {
+// An ordinary handler on the default JSON codec: the broker already took the envelope off.
+#[subscriber("reservations", reply)]
+async fn confirm(reservation: &Reservation) -> Confirmation {
+    tracing::info!(reservation.id, "reservation confirmed");
     Confirmation {
-        id: order.id,
+        id: reservation.id,
         accepted: true,
     }
 }
-// --8<-- [end:handler]
 
-#[ruststream::app]
-fn app() -> impl App {
-    // --8<-- [start:wiring]
-    // One registry client, shared by the two edges: the broker transcodes incoming framed
-    // payloads to JSON, and the `SchemaFrame` publish middleware frames outgoing ones by
-    // their subject's registered flavor (subject = "{topic}-value" by default, resolved
-    // lazily on the first publish; topics without a subject publish plain).
-    let registry = SchemaRegistry::new("http://localhost:8081");
+fn app(registry: SchemaRegistry) -> impl App {
+    // Incoming: the broker transcodes framed payloads to plain JSON.
     let broker = KafkaBroker::new(["localhost:9092"])
-        .default_group("orders-svc")
+        .default_group("reservations-svc")
         .schema_registry(registry.clone());
 
-    RustStream::new(AppInfo::new("orders", "0.1.0"))
+    RustStream::new(AppInfo::new("reservations", "0.1.0"))
+        // Outgoing: the layer frames each publish by its topic's subject, `{topic}-value`.
         .publish_layer(SchemaFrame::new(registry.clone()))
-        // Producers own their schemas: register (or `warm`) the reply subject at startup.
         .on_startup(async move |()| {
             registry
-                .register_json::<Confirmation>("confirmations-value")
+                .register_json::<Confirmation>("reservation-confirmations-value")
                 .await?;
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {
-            // The reply rides the broker's default publish policy, so the include site names
-            // no publisher.
             b.include(confirm);
         })
-    // --8<-- [end:wiring]
+}
+
+#[ruststream::app]
+fn service() -> impl App {
+    app(SchemaRegistry::new("http://localhost:8081"))
+}
+// --8<-- [end:app]
+
+#[cfg(test)]
+#[path = "../tests/live/mod.rs"]
+mod live;
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use ruststream::testing::TestApp;
+    use ruststream_rdkafka::prelude::*;
+    use ruststream_rdkafka::schema_registry::{JsonSchema, encode_envelope, parse_envelope};
+    use ruststream_rdkafka::{SchemaRegistry, SchemaType};
+    use serde::Serialize;
+
+    use super::{Confirmation, Reservation, app, live};
+
+    /// Bytes published as they are: what a registry-backed producer puts on the topic.
+    #[derive(Serialized, Outgoing)]
+    struct Wire(Vec<u8>);
+
+    /// The producer's model of a reservation, which owns the `reservations-value` subject.
+    #[derive(Serialize, JsonSchema)]
+    #[serde(rename = "Reservation")]
+    struct Produced {
+        id: i64,
+    }
+
+    #[tokio::test]
+    async fn a_framed_reservation_is_answered_with_a_framed_confirmation()
+    -> Result<(), Box<dyn Error>> {
+        let Some(url) = live::url("SCHEMA_REGISTRY_TEST_URL") else {
+            return Ok(());
+        };
+        let registry = SchemaRegistry::new(&url);
+        let reservations = registry
+            .register_json::<Produced>("reservations-value")
+            .await?;
+        let tb = TestApp::start(app(registry.clone())).await?;
+        let kafka = tb.broker::<KafkaBroker>();
+
+        kafka
+            .message(&Wire(encode_envelope(reservations, br#"{"id":42}"#)))
+            .to("reservations")
+            .publish()
+            .await?;
+
+        kafka
+            .subscriber("reservations")
+            .assert_called_once()
+            .with(&Reservation { id: 42 });
+        let published = kafka
+            .published::<()>("reservation-confirmations")
+            .assert_called_once();
+        let (id, datum) = parse_envelope(published.messages()[0].payload())
+            .ok_or("the confirmation went out without an envelope")?;
+        let confirmations = registry.warm("reservation-confirmations-value").await?;
+        assert_eq!(confirmations.schema_type(), SchemaType::Json);
+        assert_eq!(id, confirmations.id());
+        assert_eq!(
+            serde_json::from_slice::<Confirmation>(datum)?,
+            Confirmation {
+                id: 42,
+                accepted: true,
+            },
+        );
+        Ok(())
+    }
 }

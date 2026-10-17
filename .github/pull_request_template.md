@@ -21,7 +21,8 @@ Please delete options that are not relevant.
 - [ ] My code follows the project's style guidelines (`just check` passes: rustfmt, clippy, and
       `cargo check` with all features and with `--no-default-features`)
 - [ ] I have performed a self-review of my own code
-- [ ] I have made the necessary changes to the documentation (rustdoc and/or the docs site)
+- [ ] I have made the necessary changes to the documentation (rustdoc and/or the site pages under
+      `docs/`, in every language)
 - [ ] My changes generate no new warnings (clippy runs with `-D warnings`)
 - [ ] I have added tests that validate my fix or new feature
 - [ ] New and existing tests pass locally (`just test`)

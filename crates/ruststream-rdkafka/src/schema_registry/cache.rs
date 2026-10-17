@@ -35,7 +35,7 @@ use super::RegisteredSchema;
 /// # struct Order { id: u64 }
 /// # #[subscriber("orders")]
 /// # async fn place(order: &Order) -> HandlerOutcome {
-/// #     println!("order {}", order.id);
+/// #     tracing::info!(order.id, "accepted");
 /// #     HandlerOutcome::ack()
 /// # }
 ///

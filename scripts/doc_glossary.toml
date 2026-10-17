@@ -119,9 +119,9 @@ zh = "编解码器"
 
 [[term]]
 en = "back-pressure"
-en_match = "back[- ]?pressure"
+en_match = "back[-\\s]?pressure"
 ru = "обратное давление"
-ru_match = "обратн\\w* давлени"
+ru_match = "обратн\\w*\\s+давлени"
 zh = "背压"
 
 [[term]]
@@ -135,12 +135,24 @@ ru = "at-most-once"
 zh = "至多一次"
 
 [[term]]
+en = "cancel safety"
+en_match = "cancel[-\\s]safe(ty)?"
+ru = "безопасность при отмене"
+ru_match = "безопасн\\w*\\s+при\\s+отмене"
+zh = "取消安全"
+
+[[term]]
 en = "compile time"
-en_match = "compile[- ]time"
+en_match = "compile[-\\s]time"
 ru = "время компиляции"
 ru_match = "компиляци"
 zh = "编译期"
 zh_match = "编译(期|时)"
+
+[[term]]
+en = "zero-cost"
+ru = "zero-cost"
+zh = "零成本"
 
 [[term]]
 en = "trait"
@@ -155,6 +167,11 @@ en_match = "crates?"
 ru = "крейт"
 ru_match = "крейт"
 zh = "crate"
+
+[[term]]
+en = "typestate"
+ru = "typestate"
+zh = "typestate"
 
 # Kafka's own vocabulary.
 
