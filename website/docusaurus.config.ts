@@ -15,11 +15,11 @@ import {searchLanguages} from './search';
 import {translatableLabels} from './sidebarItems';
 import {coreLanding, readBuildVersion, siteRoot} from './versioning';
 
-// The `build` script sets `WEBPACK_URL_LOADER_LIMIT=0`. Docusaurus otherwise inlines every asset
-// under 10 kB into the file that imports it, and the fonts' `woff` fallbacks, which no current
-// browser downloads, would then fill the render-blocking stylesheet with base64. The variable is
-// read when the Docusaurus command starts, before this file, so it cannot be set here; `cross-env`
-// sets it in a way that works in every shell, `cmd.exe` included.
+// The look of every RustStream site: the core site publishes its palette, fonts, logos and favicon
+// at one address outside its versions, and each broker site loads them from there. The theme's
+// stylesheet comes before the bundled one, and still wins: the bundle puts Infima and the
+// Docusaurus themes into cascade layers (`future.v4`), which a rule outside any layer overrides.
+const sharedTheme = 'https://powersemmi.github.io/ruststream/theme/v1/';
 
 // Every minor line is built on its own and served from `/ruststream-rdkafka/<version>/`, with a
 // second build of the newest line under `/ruststream-rdkafka/latest/` and a build of `main` under
@@ -104,7 +104,8 @@ function askAiInSearch(): Plugin {
 const config: Config = {
   title: 'RustStream Kafka',
   tagline: 'The Apache Kafka broker for RustStream',
-  favicon: 'img/favicon.svg',
+  favicon: `${sharedTheme}img/favicon.svg`,
+  stylesheets: [`${sharedTheme}theme.css`],
 
   future: {
     v4: true,
@@ -225,9 +226,6 @@ const config: Config = {
         // Every version opens on its first page of documentation: the Guides category, or an
         // archive's first page.
         pages: false,
-        theme: {
-          customCss: './src/css/custom.css',
-        },
         // Only the indexed copy lists its pages. Google ignores `changefreq` and `priority`;
         // `lastmod` comes from the git history of each page. The search page holds nothing
         // without a query.
@@ -264,8 +262,8 @@ const config: Config = {
       // this site's root is the Guides category in the navbar.
       logo: {
         alt: 'RustStream',
-        src: 'img/logo.svg',
-        srcDark: 'img/logo-dark.svg',
+        src: `${sharedTheme}img/logo.svg`,
+        srcDark: `${sharedTheme}img/logo-dark.svg`,
         href: coreLanding(buildLocale),
         target: '_self',
       },
@@ -281,10 +279,6 @@ const config: Config = {
           position: 'right',
         },
       ],
-    },
-    footer: {
-      style: 'light',
-      copyright: 'Apache-2.0',
     },
     prism: {
       theme: prismThemes.github,
