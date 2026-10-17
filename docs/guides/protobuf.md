@@ -107,7 +107,7 @@ A record with no envelope is read as a bare message, so a topic where some produ
 [`KafkaPublish::framed`](api:ruststream_rdkafka::KafkaPublish::framed) is that policy, named for the reply with `out_reply`.
 On the first publish to a topic, it looks up the topic's subject (`labels-value`) and caches its schema id.
 The index path defaults to the schema's first message.
-[`message`](api:ruststream_rdkafka::KafkaFramedPublish::message) names another message for a topic, and [`subject`](api:ruststream_rdkafka::KafkaFramedPublish::subject) another subject.
+[`message`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::message) names another message for a topic, and [`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) another subject.
 
 The subject is resolved on the first publish, not at startup, because the topic is only known then.
 When the registry does not hold the subject, or holds another format there, the publish fails and the delivery settles as a retry.
