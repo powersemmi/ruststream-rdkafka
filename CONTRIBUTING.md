@@ -41,7 +41,7 @@ git clone https://github.com/powersemmi/ruststream-rdkafka.git
 | rendering the scaffold under `templates/` | cargo-generate | `cargo install cargo-generate --locked` |
 | `just bench` | Python 3 | the system package manager |
 | `just bench-code` | valgrind and Python 3 | the system package manager; the recipe installs the benchmark runner itself, at the release `Cargo.lock` pins |
-| the documentation site | Python 3.12 | `pip install -r docs/requirements.txt`, then `properdocs serve` |
+| the documentation site | Node.js 22 and Python 3 | `scripts/site_rustdoc.sh` (the rustdoc the API links resolve against), then `npm ci` in `website/` and `npm start` (one language) or `npm run build` (all three, strict) |
 
 ## Checking a change
 

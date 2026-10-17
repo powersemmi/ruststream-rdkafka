@@ -2,9 +2,6 @@ target/
 **/*.rs.bk
 Cargo.lock.bak
 
-# mkdocs build output
-site/
-
 .venv/
 __pycache__/
 *.py[cod]
