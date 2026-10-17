@@ -507,8 +507,15 @@ required-features = ["testing"]
 test = true
 
 [[example]]
-name = "kafka_protobuf"
-required-features = ["protobuf"]
+name = "kafka_protobuf_transcode"
+required-features = ["protobuf", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_protobuf_transcode"
+path = "examples/manual/kafka_protobuf_transcode.rs"
+required-features = ["protobuf", "testing"]
+test = true
 
 [[example]]
 name = "kafka_protobuf_plain"
