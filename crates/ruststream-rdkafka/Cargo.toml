@@ -166,6 +166,28 @@ path = "examples/manual/kafka_settlement_source_topic.rs"
 required-features = ["testing"]
 test = true
 
+[[example]]
+name = "kafka_context_fields"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_context_fields"
+path = "examples/manual/kafka_context_fields.rs"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "kafka_context_batch"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_context_batch"
+path = "examples/manual/kafka_context_batch.rs"
+required-features = ["testing"]
+test = true
+
 # --- examples: transactions ---
 
 [[example]]
