@@ -243,3 +243,29 @@ async fn an_exactly_once_reply_lands_when_its_window_commits() {
             enriched: true,
         });
 }
+
+/// A transactional producer is a client of its own, created when its slot is paired, and
+/// librdkafka refuses to create it when the service turned idempotence off: the service does not
+/// start, in process as on a cluster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transactional_producer_librdkafka_refuses_is_refused_at_startup() {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
+        broker().producer_config("enable.idempotence", "false"),
+        |b| {
+            b.include(fan_out)
+                .out(
+                    Shipments,
+                    KafkaPublish::default().transactional_id("refused-svc-1"),
+                )
+                .build();
+        },
+    );
+    let refused = TestApp::start(app)
+        .await
+        .expect_err("librdkafka refuses to create this producer, so the service must not start")
+        .to_string();
+    assert!(
+        refused.contains("`transactional.id` requires `enable.idempotence=true`"),
+        "{refused}"
+    );
+}

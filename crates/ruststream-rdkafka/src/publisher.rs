@@ -28,13 +28,15 @@ use tokio::sync::OnceCell;
 use tokio::task;
 
 #[cfg(feature = "testing")]
+use rdkafka::types::RDKafkaType;
+#[cfg(feature = "testing")]
 use ruststream::Str;
 
 use crate::broker::{ConnState, ConnectedKafkaBroker};
 use crate::convert;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
-use crate::in_process::{Cluster, ProducerId};
+use crate::in_process::{Cluster, ProducerId, create_offline};
 
 const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -764,7 +766,7 @@ pub(crate) async fn open_transactional(
     if let Some(cluster) = state.in_process() {
         // The configuration is validated as the live producer's creation would validate it, and
         // the pairing fences every earlier one with this id, as `init_transactions` does.
-        config.create_native_config().map_err(KafkaError::publish)?;
+        create_offline(&config, RDKafkaType::RD_KAFKA_PRODUCER).map_err(KafkaError::publish)?;
         let producer = TxProducer::InProcess {
             cluster: Arc::clone(cluster),
             id: cluster.init_transactions(policy.id()),

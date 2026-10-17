@@ -622,8 +622,10 @@ librdkafka, and so do its subscribers, its publishers, its seeker and its delive
 descriptors and publish policies of the routes file are the production ones, `EosPublish`
 included. The cluster has no settings of its own. It reads what librdkafka would read: the
 broker's `config` and `producer_config`, each descriptor's typed options and passthrough, and
-librdkafka's defaults for everything left unset. A property librdkafka refuses fails the connect
-or the subscription the same way.
+librdkafka's defaults for everything left unset. A configuration librdkafka refuses to create a
+client from (a property it does not know, a SASL mechanism the build has no provider for, two
+settings that contradict each other) fails the connect, the subscription or the first transaction
+the same way.
 
 It models Kafka's semantics rather than a queue:
 

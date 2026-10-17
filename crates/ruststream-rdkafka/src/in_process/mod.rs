@@ -42,7 +42,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use rdkafka::ClientConfig;
+use rdkafka::client::{Client, DefaultClientContext};
 use rdkafka::error::{KafkaError as RdKafkaError, RDKafkaErrorCode};
+use rdkafka::types::RDKafkaType;
 use ruststream::testing::Coordinator;
 use ruststream::{HeaderMap, RawMessage, Str};
 use tokio::sync::Notify;
@@ -57,6 +59,27 @@ use crate::message::PARTITION_KEY_HEADER;
 use crate::seek::KafkaPosition;
 use crate::subscription::legal_topic;
 
+/// Creates and drops the client librdkafka would create from `config`, with no bootstrap server,
+/// so nothing is dialled.
+///
+/// Setting each property checks it alone; the configuration as a whole (a SASL mechanism the
+/// build has no provider for, two settings that contradict each other) is checked only when a
+/// client is created, so this is what holds the in-process transport to every refusal of the
+/// real one. It starts and joins librdkafka's own threads, once per client the live path would
+/// create: a cost of startup and of a first transaction, never of a delivery.
+///
+/// # Errors
+///
+/// Returns librdkafka's own error for a configuration it refuses to create a client from.
+pub(crate) fn create_offline(config: &ClientConfig, kind: RDKafkaType) -> Result<(), RdKafkaError> {
+    let mut offline = config.clone();
+    offline
+        .remove("bootstrap.servers")
+        .remove("metadata.broker.list");
+    let native = offline.create_native_config()?;
+    Client::new(&offline, native, kind, DefaultClientContext).map(drop)
+}
+
 /// What the cluster reads off the producer configuration when the broker connects.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ProducerSettings {
@@ -67,13 +90,14 @@ pub(crate) struct ProducerSettings {
 }
 
 impl ProducerSettings {
-    /// Reads the settings off `config`, validating it the way librdkafka does when it creates a
-    /// client from it, without creating one.
+    /// Reads the settings off `config`, refusing it as librdkafka refuses to create a producer
+    /// from it.
     ///
     /// # Errors
     ///
-    /// Returns librdkafka's own error for a property name or value it refuses.
+    /// Returns librdkafka's own error for a configuration it refuses.
     pub(crate) fn read(config: &ClientConfig) -> Result<Self, RdKafkaError> {
+        create_offline(config, RDKafkaType::RD_KAFKA_PRODUCER)?;
         let native = config.create_native_config()?;
         let number = |key: &str| -> Result<u64, RdKafkaError> {
             let value = native.get(key)?;

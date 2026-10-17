@@ -720,3 +720,61 @@ async fn a_subscription_with_no_group_is_refused_at_startup() {
         assert!(message.contains("default_group"), "{message}");
     }
 }
+
+#[subscriber(KafkaTopic::new("refused-orders").config("fetch.max.bytes", "1000"))]
+async fn small_fetch_refused(order: &Refused) -> HandlerOutcome {
+    let _ = order.id;
+    HandlerOutcome::ack()
+}
+
+const REFUSED: &str = "librdkafka refuses to create this client, so the service must not start";
+
+/// librdkafka checks a configuration as a whole only when it creates a client: a SASL mechanism
+/// the build has no provider for, or two settings that contradict each other, pass every single
+/// property and still fail there. A service that a cluster refuses to start does not start in
+/// process either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_client_librdkafka_refuses_to_create_is_refused_at_startup() {
+    let sasl = RustStream::new(AppInfo::new("sasl", "0.1.0")).with_broker(
+        broker()
+            .config("security.protocol", "SASL_PLAINTEXT")
+            .config("sasl.mechanism", "GSSAPI"),
+        |b| {
+            b.include(ack_order);
+        },
+    );
+    let sasl = TestApp::start(sasl).await.expect_err(REFUSED).to_string();
+    assert!(
+        sasl.contains("No provider for SASL mechanism GSSAPI"),
+        "{sasl}"
+    );
+
+    let producer = RustStream::new(AppInfo::new("acks", "0.1.0")).with_broker(
+        broker()
+            .producer_config("enable.idempotence", "true")
+            .producer_config("acks", "1"),
+        |b| {
+            b.include(ack_order);
+        },
+    );
+    let producer = TestApp::start(producer)
+        .await
+        .expect_err(REFUSED)
+        .to_string();
+    assert!(
+        producer.contains("`acks` must be set to `all`"),
+        "{producer}"
+    );
+
+    let consumer = RustStream::new(AppInfo::new("fetch", "0.1.0")).with_broker(broker(), |b| {
+        b.include(small_fetch_refused);
+    });
+    let consumer = TestApp::start(consumer)
+        .await
+        .expect_err(REFUSED)
+        .to_string();
+    assert!(
+        consumer.contains("`fetch.max.bytes` must be >= `message.max.bytes`"),
+        "{consumer}"
+    );
+}
