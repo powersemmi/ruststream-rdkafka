@@ -43,7 +43,7 @@ Broker 是真实的，所以同一个二进制程序每次运行的计数都会�
 just bench
 ```
 
-这条命令按 `docker-compose.test.yml` 启动测试环境，运行两个对照场景，停止测试环境，并重写 `docs/benchmarks/results.json`。它大约需要十五分钟，并且需要独占机器。它会清空 `RUSTFLAGS`，因此二进制程序不会绑定到构建它的 CPU 上。
+这条命令按 `docker-compose.test.yml` 启动测试环境，运行两个对照场景，停止测试环境，并重写 `docs/benchmarks/results.json`。它大约需要十五分钟，并且需要独占机器。它会清空 `RUSTFLAGS`，因此二进制程序不会绑定到构建它的 CPU 上。两条命令都按发布版本的方式构建基准测试，跨 crate 启用完整的链接时优化（fat LTO），因此这些数字描述的正是服务实际使用的代码。
 
 ```bash
 just bench-code
