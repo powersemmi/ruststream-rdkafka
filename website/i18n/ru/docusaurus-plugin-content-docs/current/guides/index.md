@@ -1,5 +1,6 @@
 ---
 slug: /
+sidebar_position: 0
 description: "Руководства по сервисам на Kafka с ruststream-rdkafka, брокером Kafka для RustStream."
 ---
 

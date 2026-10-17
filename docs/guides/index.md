@@ -1,5 +1,6 @@
 ---
 slug: /
+sidebar_position: 0
 description: "Guides to building Kafka services with ruststream-rdkafka, the Kafka broker for RustStream."
 ---
 

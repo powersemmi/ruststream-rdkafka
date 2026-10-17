@@ -1,5 +1,6 @@
 ---
 slug: /
+sidebar_position: 0
 description: "使用 RustStream 的 Kafka Broker ruststream-rdkafka 构建 Kafka 服务的指南。"
 ---
 
