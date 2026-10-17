@@ -453,6 +453,14 @@ test = true
 
 [[example]]
 name = "kafka_transactions"
+required-features = ["testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_transactions"
+path = "examples/manual/kafka_transactions.rs"
+required-features = ["testing"]
+test = true
 
 [[example]]
 name = "kafka_protobuf"
