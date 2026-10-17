@@ -261,11 +261,13 @@ required-features = ["protobuf", "testing"]
 
 [[example]]
 name = "kafka_schema_registry"
-required-features = ["schema-registry"]
+required-features = ["schema-registry", "testing"]
+test = true
 
 [[example]]
 name = "kafka_avro"
-required-features = ["avro"]
+required-features = ["avro", "testing"]
+test = true
 
 [[example]]
 name = "kafka_third_party_registry"
@@ -274,6 +276,29 @@ required-features = ["avro"]
 [[example]]
 name = "kafka_avro_codec"
 required-features = ["avro"]
+
+[[example]]
+name = "kafka_registry_envelope"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_envelope"
+path = "examples/manual/kafka_registry_envelope.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_schema_registry"
+path = "examples/manual/kafka_schema_registry.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_avro"
+path = "examples/manual/kafka_avro.rs"
+required-features = ["avro", "testing"]
+test = true
 
 # --- examples: guides ---
 
