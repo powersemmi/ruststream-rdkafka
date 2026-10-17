@@ -8,15 +8,15 @@ import TabItem from '@theme/TabItem';
 
 # Commits and delivery guarantees
 
-This guide chooses what `ack` and `nack` commit on Kafka: librdkafka's own commits, precise at-least-once with `Commit::Tracked`, and batches settled element by element.
+This guide chooses what `ack` and `nack` commit on Kafka: librdkafka's own commits, precise at-least-once with [`Commit::Tracked`](../components/settlement/tracked.md), and batches settled element by element.
 
 Kafka does not settle single messages.
 A consumer group commits a position per partition, and everything below it counts as read.
-A handler still settles each delivery, so the subscription's [`Commit`](api:ruststream_rdkafka::Commit) mode decides how those settlements become a position.
+A handler still settles each delivery, so the subscription's [`Commit`](../components/settlement/index.md) mode decides how those settlements become a position.
 
 | Mode | `ack` | `drop` | `retry` | After a crash |
 |---|---|---|---|---|
-| [`Auto`](api:ruststream_rdkafka::Commit::Auto) (default) | nothing | nothing | reports unsupported, the record does not come back | the tail of handled records is read again, or records stored but not handled are skipped |
+| [`Auto`](../components/settlement/auto.md) (default) | nothing | nothing | reports unsupported, the record does not come back | the tail of handled records is read again, or records stored but not handled are skipped |
 | [`Tracked`](api:ruststream_rdkafka::Commit::Tracked) | settles the offset | settles the offset | the record comes back | every record not settled is read again |
 | [`Transactional`](api:ruststream_rdkafka::Commit::Transactional) | settles the offset, committed with the pipeline's transaction | the same as `ack` | stalls the window until the transaction deadline | the open window is read again |
 
@@ -80,7 +80,7 @@ This mode costs the least, and a crash can lose handled records or skip records 
 
 ## Batches
 
-`reconcile` takes statement lines in batches of up to 500 and settles each line on its own.
+`reconcile` takes statement lines in [batches](../components/subscriptions/batches.md) of up to 500 and settles each line on its own.
 
 <Tabs groupId="api">
 <TabItem value="macros" label="Macros">
@@ -102,7 +102,7 @@ The returned list settles the batch element by element; in the manual form `Ok((
 Under `Commit::Tracked` an element that asks for a retry comes back alone, and the committed position stops in front of it until it settles.
 A process that stops first reads the acked elements behind it again: duplicates, not loss.
 
-How much librdkafka keeps queued is a consumer property, set with [`KafkaTopic::config`](api:ruststream_rdkafka::KafkaTopic::config).
+How much librdkafka keeps queued is a consumer property, set with [`KafkaTopic::config`](../components/subscriptions/passthrough.md).
 When the queue is full, librdkafka pauses fetching for `fetch.queue.backoff.ms` (1000 ms by default), which slows large records behind a slow handler.
 `.config("fetch.queue.backoff.ms", "10")` shortens the pause.
 
@@ -124,13 +124,13 @@ When the queue is full, librdkafka pauses fetching for `fetch.queue.backoff.ms` 
 </Tabs>
 
 At-least-once from end to end needs the producer side too.
-`enable.idempotence` makes librdkafka's own resends of a record land once; [`producer_config`](api:ruststream_rdkafka::KafkaBroker::producer_config) sets it and every other producer property, `acks` included.
+`enable.idempotence` makes librdkafka's own resends of a record land once; [`producer_config`](../components/broker/config.md) sets it and every other producer property, [`acks`](../components/publishing/durability.md) included.
 Every publish waits for the cluster's delivery report, so a publish that returned `Ok` was accepted by Kafka.
 
 A publish waits for space while librdkafka's local queue is full, which slows the handler down to what the cluster takes.
 [`queue_timeout`](api:ruststream_rdkafka::KafkaPublish::queue_timeout) bounds that wait and turns it into an error.
-At shutdown the broker flushes the records still in flight, for up to [`flush_timeout`](api:ruststream_rdkafka::KafkaBroker::flush_timeout) (30 seconds by default).
+At shutdown the broker flushes the records still in flight, for up to [`flush_timeout`](../components/broker/shutdown.md) (30 seconds by default).
 [`ClosedKafkaBroker::unflushed_records`](api:ruststream_rdkafka::ClosedKafkaBroker::unflushed_records) counts the records that did not make it.
 
 The tests in the example file run the app in process and replace the bank and the analytics store with clients that fail once.
-The in-process Kafka commits as a cluster does, so the payout comes back under `Commit::Tracked` and the page view does not under `Commit::Auto`.
+The [in-process Kafka](../components/testing/index.md) commits as a cluster does, so the payout comes back under `Commit::Tracked` and the page view does not under `Commit::Auto`.

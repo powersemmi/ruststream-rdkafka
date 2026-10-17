@@ -30,6 +30,6 @@ librdkafka 已经拉取的记录无需等待即可取出。[`KafkaMessage`](api:
 
 唯一被复制的记录，是等待中的流自己取到的那一条：队列为空时，等待所返回的记录会被复制出来。
 
-处理器的应答编码进分发循环复用的缓冲区。发布者把这些字节借给 librdkafka，librdkafka 把它们复制进自己的队列，集群确认这条记录之后，发布才返回。应答发布失败时，这次投递以重试的方式结算。
+处理器的应答编码进分发循环复用的缓冲区。[发布者](../components/publishing/index.md)把这些字节借给 librdkafka，librdkafka 把它们复制进自己的队列，集群确认这条记录之后，发布才返回。应答发布失败时，这次投递以重试的方式结算。
 
-投递在应答之后结算。这对已提交的偏移量有什么影响，取决于订阅的 [`Commit`](api:ruststream_rdkafka::Commit) 模式，[结算](settlement.md)一页用图说明了这一点。
+投递在应答之后结算。这对已提交的偏移量有什么影响，取决于订阅的 [`Commit`](../components/settlement/index.md) 模式，[结算](settlement.md)一页用图说明了这一点。

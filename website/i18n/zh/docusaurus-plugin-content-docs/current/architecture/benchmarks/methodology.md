@@ -12,10 +12,10 @@ description: "ruststream-rdkafka 如何测量自己：三个循环、在真实 B
 一个进程把每个场景跑三遍，作为三个循环，它们只有一处不同：承载记录的是什么。
 
 - **裸客户端。** 一个 rdkafka `StreamConsumer`，直接驱动：接收、解码、存储偏移量。
-- **Broker crate。** 本 crate，上面什么也没有：Broker 建立连接，主题描述符打开一个订阅，一个循环从它的流中取出投递、解码并 ack。
+- **Broker crate。** 本 crate，上面什么也没有：Broker 建立连接，[主题描述符](../../components/subscriptions/kafka-topic.md)打开一个订阅，一个循环从它的流中取出投递、解码并 ack。
 - **RustStream。** 用户写的服务：一个 `#[subscriber]` 处理器及其外围的应用。
 
-其余一切在三个循环中都相同：消费者属性、消费者组、提交模式、ack 的位置、解码成同一个结构体、载荷字节、带四个工作线程的 tokio 运行时，以及二进制程序。
+其余一切在三个循环中都相同：消费者属性、消费者组、[提交模式](../../components/settlement/index.md)、ack 的位置、解码成同一个结构体、载荷字节、带四个工作线程的 tokio 运行时，以及二进制程序。
 
 消息体是 512 字节的 JSON。它解码成一个包含两个整数字段的结构体，因此解码不做内存分配，数字反映的是本 crate，而不是 JSON 解析器。
 
@@ -31,7 +31,7 @@ description: "ruststream-rdkafka 如何测量自己：三个循环、在真实 B
 
 ## 代码计数 {/* #the-code-count */}
 
-[开销图](index.md#cost-of-the-code)的每个场景都是用户写的服务，基于 `KafkaBroker`，连接同一个 Broker，构建时不带 `testing` 特性。一个消费者组读取一个只有一个分区的主题，另一个线程在测量区间打开之前把主题填满。
+[开销图](index.md#cost-of-the-code)的每个场景都是用户写的服务，基于 [`KafkaBroker`](../../components/broker/index.md)，连接同一个 Broker，构建时不带 `testing` 特性。一个消费者组读取一个只有一个分区的主题，另一个线程在测量区间打开之前把主题填满。
 
 指令数来自 callgrind，内存分配来自 DHAT。一个场景依次在一次投递、1000 次、2000 次上运行。后两次之差是一条消息的稳态开销，单次投递就是冷启动。
 

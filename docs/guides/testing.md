@@ -8,14 +8,14 @@ import TabItem from '@theme/TabItem';
 
 # Testing a Kafka service
 
-A test runs the service's own app with [`TestApp`](api:ruststream::testing::TestApp), against an in-process Kafka or against a cluster.
+A test runs the service's own app with [`TestApp`](api:ruststream::testing::TestApp), against an [in-process Kafka](../components/testing/index.md) or against a cluster.
 
 The service under test charges card payments.
 A payment arrives on `card-payments`, and its record key is the account to charge.
 The handler replies with a receipt on `card-receipts`.
 A payment without a key is dropped.
-A payment over the bank's instant limit is held: the handler asks for it again in a minute with `retry_after`.
-After three deliveries a payment goes to `card-payments.review`, the dead-letter topic.
+A payment over the bank's instant limit is held: the handler asks for it again in a minute with [`retry_after`](../components/settlement/retries.md).
+After three deliveries a payment goes to `card-payments.review`, the [dead-letter topic](../components/settlement/dead-letters.md).
 The app is built by `service(broker)`, so a test chooses the broker and `main` uses the production one.
 The tests need the `testing` feature of `ruststream-rdkafka` in `[dev-dependencies]`.
 
@@ -36,11 +36,11 @@ The tests need the `testing` feature of `ruststream-rdkafka` in `[dev-dependenci
 </TabItem>
 </Tabs>
 
-[`TestApp::start`](api:ruststream::testing::TestApp::start) connects `KafkaBroker` to an in-process Kafka.
+[`TestApp::start`](api:ruststream::testing::TestApp::start) connects [`KafkaBroker`](../components/broker/index.md) to an in-process Kafka.
 The bootstrap address is never dialled.
 The test addresses the broker by its production type, `tb.broker::<KafkaBroker>()`.
-A Kafka record key travels as the [`PARTITION_KEY_HEADER`](api:ruststream_rdkafka::PARTITION_KEY_HEADER) header, so the test sets it with `with_headers`.
-The broker turns that header into the record's native key, and the handler reads it back with `Ctx<Key>`.
+A Kafka record key travels as the [`PARTITION_KEY_HEADER`](../components/publishing/keys.md) header, so the test sets it with `with_headers`.
+The broker turns that header into the record's native key, and the handler reads it back with [`Ctx<Key>`](../components/context/index.md).
 `publish` returns once the handler and its reply have settled.
 So the next lines assert on finished state: how the subscriber settled and what reached `card-receipts`.
 The body takes the started app as an argument, so the live test below runs it too.
@@ -91,15 +91,15 @@ Each held delivery is recorded as `Outcome::Nack`.
 
 ## What the in-process Kafka models
 
-The in-process Kafka reads the configuration librdkafka would read: the broker's `config` and `producer_config`, each descriptor's options, and librdkafka's defaults.
+The in-process Kafka reads the configuration librdkafka would read: the broker's [`config`](../components/broker/config.md) and `producer_config`, each descriptor's options, and librdkafka's defaults.
 A property librdkafka refuses fails the test's start the same way.
 It models Kafka rather than a queue:
 
 - Each consumer group reads a record once, and every group reads its own copy.
-- The commit mode decides what is committed: a `retry` under [`Commit::Tracked`](api:ruststream_rdkafka::Commit::Tracked) comes back, and under [`Commit::Auto`](api:ruststream_rdkafka::Commit::Auto) it reports itself unsupported.
+- The [commit mode](../components/settlement/index.md) decides what is committed: a `retry` under [`Commit::Tracked`](api:ruststream_rdkafka::Commit::Tracked) comes back, and under [`Commit::Auto`](api:ruststream_rdkafka::Commit::Auto) it reports itself unsupported.
 - A record key places the record and comes back to the handler.
-- A seek moves a subscription to an offset, either end of the log, or a timestamp.
-- A `read_committed` reader sees a transaction's records when it commits and never after an abort.
+- A [seek](../components/positions/seek.md) moves a subscription to an offset, either end of the log, or a timestamp.
+- A `read_committed` reader sees a [transaction's](../components/transactions/index.md) records when it commits and never after an abort.
 
 Every topic has one partition there.
 Several partitions, cooperative rebalancing, retention and the timing of a real group join need a cluster.
@@ -121,7 +121,7 @@ Several partitions, cooperative rebalancing, retention and the timing of a real 
 </TabItem>
 </Tabs>
 
-[`TestApp::start_live_within`](api:ruststream::testing::TestApp::start_live_within) connects the same app to a running Kafka.
+[`TestApp::start_live_within`](../components/testing/live.md) connects the same app to a running Kafka.
 Its deadline is the longest a publish waits for the reaction to settle; a real cluster needs more than the in-process default.
 The test reads the address from `KAFKA_TEST_URL` with `live::url`, a helper of the example's own, and skips when it is unset.
 It joins a consumer group of its own, so nothing an earlier run left behind is read.

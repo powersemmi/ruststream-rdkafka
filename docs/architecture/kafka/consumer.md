@@ -42,8 +42,8 @@ does that through `recv`, an async call that is safe to cancel.
 
 The offset store is an in-memory position per partition. By default
 (`enable.auto.offset.store`) a poll stores the offset of the record it hands out, before the
-application has processed it. The dashed arrow is the other way: the application turns the
-automatic store off and stores an offset once the record is processed.
+application has processed it. The dashed arrow is the other way: the application [turns the
+automatic store off](../../components/settlement/tracked.md) and stores an offset once the record is processed.
 
 A timer commits the stored positions every `auto.commit.interval.ms` (five seconds) while
 `enable.auto.commit` is on, and once more when the consumer closes. A crash loses what was

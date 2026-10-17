@@ -8,7 +8,7 @@ import TabItem from '@theme/TabItem';
 
 # Protobuf with the Confluent envelope
 
-This guide handles prost-generated Protobuf messages that carry the Confluent envelope: it reads framed records without a registry and publishes framed replies.
+This guide handles prost-generated Protobuf messages that carry the [Confluent envelope](../components/schema-registry/envelope.md): it reads framed records without a registry and publishes framed replies.
 
 A registry-backed Protobuf record starts with the Confluent envelope: a zero byte, the four-byte schema id, and a message-index path that names which message of the schema follows.
 A generated message is not a serde type, so it does not go through a codec.
@@ -81,7 +81,7 @@ A parcel with no address is dropped, and nothing is published for it.
 
 ## Reading framed records
 
-[`decode_confluent`](api:ruststream_rdkafka::protobuf::decode_confluent) is the decode function of `Parcel`.
+[`decode_confluent`](../components/protobuf/index.md) is the decode function of `Parcel`.
 It steps over the envelope and the message-index path, then `prost` reads the message.
 It needs no registry: the generated type already knows its fields.
 A record with no envelope is read as a bare message, so a topic where some producers frame and others do not still decodes.
@@ -104,23 +104,23 @@ A record with no envelope is read as a bare message, so a topic where some produ
 </Tabs>
 
 `Label` writes bare Protobuf, and the publish policy puts the envelope in front of it.
-[`KafkaPublish::framed`](api:ruststream_rdkafka::KafkaPublish::framed) is that policy, named for the reply with `out_reply`.
+[`KafkaPublish::framed`](../components/protobuf/framed.md) is that policy, named for the reply with `out_reply`.
 On the first publish to a topic, it looks up the topic's subject (`labels-value`) and caches its schema id.
 The index path defaults to the schema's first message.
 [`message`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::message) names another message for a topic, and [`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) another subject.
 
 The subject is resolved on the first publish, not at startup, because the topic is only known then.
 When the registry does not hold the subject, or holds another format there, the publish fails and the delivery settles as a retry.
-With the default commit mode a retry is not redelivered; [Commits and delivery guarantees](commits.md) covers the modes.
+With the [default commit mode](../components/settlement/auto.md) a retry is not redelivered; [Commits and delivery guarantees](commits.md) covers the modes.
 
-[`ProtobufFrame`](api:ruststream_rdkafka::protobuf::ProtobufFrame) frames for a whole app, added with `RustStream::publish_layer`.
+[`ProtobufFrame`](../components/protobuf/protobuf-frame.md) frames for a whole app, added with `RustStream::publish_layer`.
 It frames what leaves through `Out` slots and publishers the mount sites do not name, when the destination subject holds a Protobuf schema, and passes the rest through as it is.
 A reply goes straight to its own publisher and does not pass through the layer, so a replying handler names `KafkaPublish::framed`.
 A payload that already carries an envelope is left alone, so the layer and the policy combine.
 
 ## Testing in process
 
-Reading needs no registry, so `print_label` reads framed records under `TestApp::start` with no registry and no cluster.
+Reading needs no registry, so `print_label` reads framed records under [`TestApp::start`](../components/testing/index.md) with no registry and no cluster.
 The example's first test publishes a framed parcel with no address and checks that it is dropped and that no label is published.
 A framed publish needs the subject's schema id, so the tests of the label run against a registry.
 [Testing a Kafka service](testing.md) covers the harness.
@@ -128,5 +128,5 @@ A framed publish needs the subject's schema id, so the tests of the label run ag
 ## Limits
 
 A Protobuf schema cannot be derived from a generated type.
-So the `.proto` source is registered separately, with [`SchemaRegistry::register`](api:ruststream_rdkafka::schema_registry::SchemaRegistry::register) and `SchemaType::Protobuf`, or with the registry's own tools.
+So the `.proto` source is registered separately, with [`SchemaRegistry::register`](../components/schema-registry/registration.md) and `SchemaType::Protobuf`, or with the registry's own tools.
 The schema registered for a framed topic may import only the well-known types (`google/protobuf/*.proto`); other schema references are not resolved.

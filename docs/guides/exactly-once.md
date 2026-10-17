@@ -8,7 +8,7 @@ import TabItem from '@theme/TabItem';
 
 # Transactions and exactly-once
 
-This guide publishes several records as one Kafka transaction, runs transactions under a worker pool, and makes a consume-transform-produce handler exactly-once.
+This guide publishes several records as one [Kafka transaction](../components/transactions/index.md), runs transactions under a worker pool, and makes a consume-transform-produce handler exactly-once.
 
 A Kafka transaction makes a set of records visible together.
 A reader at `read_committed` isolation, librdkafka's default, sees all of them once the transaction commits and none of them after an abort.
@@ -41,9 +41,9 @@ Outside an open transaction the slot publishes like a plain one.
 A second `begin_transaction` while one is open reports [`KafkaError::TransactionBusy`](api:ruststream_rdkafka::KafkaError::TransactionBusy), and a `commit` or `abort` with nothing open reports [`KafkaError::NoTransaction`](api:ruststream_rdkafka::KafkaError::NoTransaction).
 
 The transaction covers the published lines and not the consumed order.
-`Commit::Tracked` commits the order's offset after the handler acks it.
+[`Commit::Tracked`](../components/settlement/tracked.md) commits the order's offset after the handler acks it.
 A crash between the two delivers the order again and ships its lines a second time.
-The exactly-once pipeline below closes that gap.
+The [exactly-once pipeline](../components/transactions/exactly-once/index.md) below closes that gap.
 
 ## Transactions under a worker pool
 
@@ -70,7 +70,7 @@ The slot is [`PartitionLanes`](api:ruststream_rdkafka::PartitionLanes): [`for_pa
 Lanes that handle different partitions run their transactions at the same time.
 The transactional ids follow the topic's partitions, not the number of workers, so changing `workers(n)` changes no id.
 
-This scheme needs the default lane key.
+This scheme needs the default [lane key](../components/subscriptions/lane-key.md).
 [`LaneKey::RecordKey`](api:ruststream_rdkafka::LaneKey::RecordKey) spreads one partition across several lanes, which would then share one partition's publisher and collide on its single transaction.
 
 ## The exactly-once pipeline
@@ -121,10 +121,10 @@ The mount site names the policy behind each slot and reply.
 One transactional id belongs to one live producer: a second producer that starts with the same id fences the first, and the first can no longer commit.
 Give every running instance of the service its own id, for example from the pod's ordinal.
 
-[`per_partition`](api:ruststream_rdkafka::KafkaTransactionalPublish::per_partition) makes the id a base: the publishers of `invoice` take the ids `invoicing-1-p0`, `invoicing-1-p1` and so on.
+[`per_partition`](../components/transactions/per-partition.md) makes the id a base: the publishers of `invoice` take the ids `invoicing-1-p0`, `invoicing-1-p1` and so on.
 
 [`EosPublish::new("enrichment-1")`](api:ruststream_rdkafka::KafkaEosPublish::new) is the pipeline, and its id is the one the subscription's commit mode names.
-[`EosReplies`](api:ruststream_rdkafka::EosReplies) carries each delivery's source position onto its reply, which is how the pipeline pairs the two.
+[`EosReplies`](../components/transactions/exactly-once/eos-replies.md) carries each delivery's source position onto its reply, which is how the pipeline pairs the two.
 Without it the first reply fails instead of leaving outside the transaction.
 
 ## The commit window
@@ -140,5 +140,5 @@ The committed output still holds each reply once.
 The pipeline limits what its handlers can return and how they read:
 
 - A `retry()` from a handler holds its window open until the transaction timeout, 30 seconds unless [`transaction_timeout`](api:ruststream_rdkafka::KafkaEosPublish::transaction_timeout) sets another, and then the window replays.
-- `retry_after` does not belong in a pipeline handler: its delayed copy is published outside the window and breaks the pairing of records and offsets.
-- [`KafkaPartitions`](api:ruststream_rdkafka::KafkaPartitions) does not combine with `Commit::Transactional`, and such a subscription fails to start: the pipeline commits through the consumer group, and a reader of fixed partitions takes no part in one.
+- [`retry_after`](../components/settlement/retries.md) does not belong in a pipeline handler: its delayed copy is published outside the window and breaks the pairing of records and offsets.
+- [`KafkaPartitions`](../components/subscriptions/kafka-partitions.md) does not combine with `Commit::Transactional`, and such a subscription fails to start: the pipeline commits through the consumer group, and a reader of fixed partitions takes no part in one.

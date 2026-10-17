@@ -16,12 +16,12 @@ One process runs each scenario three times over, as three loops that differ in o
 carries the records.
 
 - **Raw client.** An rdkafka `StreamConsumer`, driven directly: receive, decode, store the offset.
-- **Broker crate.** This crate and nothing above it: the broker connects, the topic descriptor opens
+- **Broker crate.** This crate and nothing above it: the broker connects, the [topic descriptor](../../components/subscriptions/kafka-topic.md) opens
   a subscription, and a loop pulls deliveries off its stream, decodes them and acks them.
 - **RustStream.** The service a user writes: a `#[subscriber]` handler and the app around it.
 
-Everything else is equal across the three: the consumer properties, the consumer group, the commit
-mode, the place of the ack, the decode into the same struct, the payload bytes, the tokio runtime
+Everything else is equal across the three: the consumer properties, the consumer group, the [commit
+mode](../../components/settlement/index.md), the place of the ack, the decode into the same struct, the payload bytes, the tokio runtime
 with four worker threads, and the binary.
 
 The body is 512 bytes of JSON. It decodes into a struct of two integer fields, so the decode
@@ -48,7 +48,7 @@ time per message. The round trip is published with the machine, so the arithmeti
 ## The code count
 
 Each scenario of the [cost chart](index.md#cost-of-the-code) is the service a user writes, on
-`KafkaBroker` against the same broker, built without the `testing` feature. A consumer group reads a
+[`KafkaBroker`](../../components/broker/index.md) against the same broker, built without the `testing` feature. A consumer group reads a
 topic of one partition, and another thread fills the topic before the measured region opens.
 
 Instructions come from callgrind and allocations from DHAT. A scenario runs over one delivery,

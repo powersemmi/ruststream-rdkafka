@@ -27,15 +27,15 @@ the median. The zero of the axis is the raw client's best round, and a dot right
 A hollow dot is a loop whose difference from the raw client is smaller than the spread of the
 rounds. The table under the chart prints the best round with the median in parentheses.
 
-The two scenarios differ in what an ack means. Under auto-commit librdkafka stores the offset when it
-hands the record over, and an ack is advisory. Under `Commit::Tracked` every ack stores an offset,
+The two scenarios differ in what an ack means. Under [auto-commit](../../components/settlement/auto.md) librdkafka stores the offset when it
+hands the record over, and an ack is advisory. Under [`Commit::Tracked`](../../components/settlement/tracked.md) every ack stores an offset,
 as [Settlement](../settlement.md) draws.
 
 ## Cost of the code
 
 The second chart counts what one message costs on the service's thread: instructions under
 callgrind and allocations under DHAT, in the steady state. Each scenario is a service on
-`KafkaBroker` against the same broker. The count includes the framework's dispatch, this crate's
+[`KafkaBroker`](../../components/broker/index.md) against the same broker. The count includes the framework's dispatch, this crate's
 code and the librdkafka calls made on that thread. Fetching, the group protocol, producing and
 delivery reports run on librdkafka's own threads and are not counted. `Cold start` is what starting
 the service, joining the group and taking the first record cost once.

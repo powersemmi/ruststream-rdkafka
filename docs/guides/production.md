@@ -8,7 +8,7 @@ import TabItem from '@theme/TabItem';
 
 # Connecting to a production cluster
 
-A production cluster asks for authentication and TLS, and a service sets its producer's durability and its own timeouts.
+A production cluster asks for [authentication and TLS](../components/broker/security.md), and a service sets its producer's [durability](../components/publishing/durability.md) and its own timeouts.
 
 ## SASL over TLS
 
@@ -22,7 +22,7 @@ ruststream-rdkafka = { version = "0.7", features = ["ssl"] }
 ```
 
 The deployment provides the address and the credentials in environment variables.
-Every librdkafka property goes through [`KafkaBroker::config`](api:ruststream_rdkafka::KafkaBroker::config), which applies it to the consumers and the producer.
+Every librdkafka property goes through [`KafkaBroker::config`](../components/broker/config.md), which applies it to the consumers and the producer.
 `security.protocol` selects SASL over TLS, and `sasl.mechanism` the SASL mechanism.
 TLS needs librdkafka built with OpenSSL: the `ssl` feature links the system OpenSSL, and `ssl-vendored` builds one from source.
 SCRAM and OAUTHBEARER need the same feature, because librdkafka builds them on OpenSSL.
@@ -39,8 +39,8 @@ Every publish waits for the cluster's confirmation, so a successful publish mean
 
 The broker has timeouts of its own:
 
-- [`connect_timeout`](api:ruststream_rdkafka::KafkaBroker::connect_timeout) bounds the check that the cluster is reachable at startup.
-- [`flush_timeout`](api:ruststream_rdkafka::KafkaBroker::flush_timeout) bounds the flush of unsent records at shutdown.
+- [`connect_timeout`](../components/broker/startup.md) bounds the check that the cluster is reachable at startup.
+- [`flush_timeout`](../components/broker/shutdown.md) bounds the flush of unsent records at shutdown.
 - [`assignment_timeout`](api:ruststream_rdkafka::KafkaBroker::assignment_timeout) bounds how long startup waits for the group to assign a subscription its partitions.
 
 ## The service
@@ -61,16 +61,16 @@ The broker has timeouts of its own:
 </Tabs>
 
 A publish waits for space in librdkafka's local queue when the queue is full.
-[`queue_timeout`](api:ruststream_rdkafka::KafkaPublish::queue_timeout) on the publish policy turns a longer wait into an error.
+[`queue_timeout`](api:ruststream_rdkafka::KafkaPublish::queue_timeout) on the [publish policy](../components/publishing/index.md) turns a longer wait into an error.
 
-A subscription sets its own properties with [`KafkaTopic::config`](api:ruststream_rdkafka::KafkaTopic::config), and they win over the broker's.
-Two properties belong to the commit mode: `enable.auto.commit` and `enable.auto.offset.store`.
-Under [`Commit::Tracked`](api:ruststream_rdkafka::Commit::Tracked) and `Commit::Transactional` a subscription that sets either refuses to start, and the error names the property and the mode.
+A subscription sets its own properties with [`KafkaTopic::config`](../components/subscriptions/passthrough.md), and they win over the broker's.
+Two properties belong to the [commit mode](../components/settlement/index.md): `enable.auto.commit` and `enable.auto.offset.store`.
+Under [`Commit::Tracked`](../components/settlement/tracked.md) and `Commit::Transactional` a subscription that sets either refuses to start, and the error names the property and the mode.
 
 ## Testing the configuration
 
 The tests start the production `service` with the production `broker`, given test credentials, under `TestApp::start`.
-The in-process Kafka validates the configuration the way librdkafka does, without dialling the cluster.
+The [in-process Kafka](../components/testing/index.md) validates the configuration the way librdkafka does, without dialling the cluster.
 A property name or value that librdkafka refuses fails the start with librdkafka's message:
 
 ```text

@@ -31,7 +31,7 @@ consumer group reads all of it.
 
 <Diagram name="log" words={words} />
 
-A producer appends a record to one partition of the topic. A record with a key goes to the
+A producer appends a record to one partition of the topic. A record with a [key](../../components/publishing/keys.md) goes to the
 partition its key hashes to, so the records of one key keep their order. A record without a key
 goes wherever the producer's partitioner puts it.
 

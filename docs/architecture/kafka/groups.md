@@ -35,20 +35,20 @@ The group coordinator is a broker of the cluster. When a member joins or leaves,
 rebalance and the group agrees on a new assignment. A partition taken from one member is revoked
 there and assigned to another, which resumes from the group's committed offset. Work the first
 member did after its last commit is read again by the second. A partition the group has never
-committed starts where `auto.offset.reset` says: the end of the log by default.
+committed starts where [`auto.offset.reset`](../../components/subscriptions/start-offset.md) says: the end of the log by default.
 
 A member that stops sending heartbeats for `session.timeout.ms` (45 seconds in librdkafka) is
 removed from the group. A member that does not take a new record for `max.poll.interval.ms`
 (5 minutes) leaves the group too.
 
-`partition.assignment.strategy` decides how a rebalance moves partitions. The eager strategies,
+[`partition.assignment.strategy`](../../components/subscriptions/assignment.md) decides how a rebalance moves partitions. The eager strategies,
 `range` and `roundrobin` (librdkafka's default is both, `range` first), revoke every partition and
 assign them anew. `cooperative-sticky` moves only the partitions that change owner, and the rest
 keep flowing during the rebalance
 ([KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429%3A+Kafka+Consumer+Incremental+Rebalance+Protocol)).
 The two families cannot mix inside one group.
 
-A consumer can also take partitions by name instead of joining the group protocol. It then never
+A consumer can also [take partitions by name](../../components/subscriptions/kafka-partitions.md) instead of joining the group protocol. It then never
 rebalances, and nothing moves its partitions.
 
 The defaults are those of librdkafka

@@ -19,11 +19,11 @@ export const machine = {"cpu": "处理器", "architecture": "架构", "cpu_frequ
 
 每个循环画成一条横条，从最佳一轮延伸到最慢的一轮，圆点标出最佳一轮，缺口标出中位一轮。坐标轴的零点是裸客户端的最佳一轮，圆点在零点右侧表示更慢。空心圆点表示该循环与裸客户端的差异小于各轮的波动范围。图表下方的表格列出最佳一轮，括号里是中位数。
 
-两个场景的区别在于 ack 的含义。在自动提交下，librdkafka 在交出记录时就存储了偏移量，ack 只起建议作用。在 `Commit::Tracked` 下，每次 ack 都会存储一个偏移量，[结算](../settlement.md)一页用图说明了这一点。
+两个场景的区别在于 ack 的含义。在[自动提交](../../components/settlement/auto.md)下，librdkafka 在交出记录时就存储了偏移量，ack 只起建议作用。在 [`Commit::Tracked`](../../components/settlement/tracked.md) 下，每次 ack 都会存储一个偏移量，[结算](../settlement.md)一页用图说明了这一点。
 
 ## 代码的开销 {/* #cost-of-the-code */}
 
-第二张图统计一条消息在服务线程上的开销：稳态下 callgrind 测得的指令数和 DHAT 测得的内存分配次数。每个场景都是一个基于 `KafkaBroker`、连接同一个 Broker 的服务。计数包括框架的分发、本 crate 的代码，以及在该线程上发起的 librdkafka 调用。拉取、组协议、生产和投递报告运行在 librdkafka 自己的线程上，不计入。`冷启动` 是启动服务、加入组并取得第一条记录一次性付出的开销。
+第二张图统计一条消息在服务线程上的开销：稳态下 callgrind 测得的指令数和 DHAT 测得的内存分配次数。每个场景都是一个基于 [`KafkaBroker`](../../components/broker/index.md)、连接同一个 Broker 的服务。计数包括框架的分发、本 crate 的代码，以及在该线程上发起的 librdkafka 调用。拉取、组协议、生产和投递报告运行在 librdkafka 自己的线程上，不计入。`冷启动` 是启动服务、加入组并取得第一条记录一次性付出的开销。
 
 ## 结果 {/* #results */}
 

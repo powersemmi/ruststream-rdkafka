@@ -37,9 +37,9 @@ paid once.
 A row is one consumer reading one topic of one partition, a small body and a single-node cluster.
 It measures what a delivery costs inside this crate, not what Kafka can carry.
 
-A topic of several partitions, a pool of worker lanes and a transactional pipeline each answer a
-different question, and the comparison measures none of them. The code chart counts a batch
-handler and a reply on the same stand.
+A topic of several partitions, a pool of worker lanes and a [transactional pipeline](../../components/transactions/exactly-once/index.md) each answer a
+different question, and the comparison measures none of them. The code chart counts a [batch
+handler](../../components/subscriptions/batches.md) and a reply on the same stand.
 
 The numbers are a snapshot of one machine on one day, with the build recorded beside them. They are
 measured again by hand, on a machine given to the run alone: the differences they show are smaller

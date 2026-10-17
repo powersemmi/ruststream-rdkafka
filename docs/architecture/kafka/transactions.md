@@ -27,7 +27,7 @@ together or not at all.
 
 <Diagram name="transactions" words={words} />
 
-A transactional producer is named by its `transactional.id`. It runs one transaction at a time.
+A [transactional producer](../../components/transactions/index.md) is named by its `transactional.id`. It runs one transaction at a time.
 Records produced inside it land in the log at once, and the commit writes markers that make them
 visible.
 
@@ -36,7 +36,7 @@ records only after the commit and never after an abort. A reader at `read_uncomm
 they are written.
 
 The consumed offsets can join the transaction. Then the input positions move exactly when the
-output becomes visible, which is the consume-transform-produce shape of
+output becomes visible, which is the [consume-transform-produce](../../components/transactions/exactly-once/index.md) shape of
 [KIP-447](https://cwiki.apache.org/confluence/display/KAFKA/KIP-447%3A+Producer+scalability+for+exactly+once+semantics).
 An abort leaves the offsets where they were, so the input is read again into a new transaction.
 

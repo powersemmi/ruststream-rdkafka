@@ -26,19 +26,19 @@ tokio = { version = "1", features = ["macros", "rt"] }
 
 `ruststream` is the framework: `macros` gives the attributes, `json` the default codec, and `logging` prints the service's log to the terminal.
 `ruststream-rdkafka` is the Kafka broker.
-Its `testing` feature adds the in-process Kafka that tests run on.
+Its `testing` feature adds the [in-process Kafka](../components/testing/index.md) that tests run on.
 
 The broker crate has these features:
 
 | Feature | What it gives |
 |---|---|
 | `json` *(default)*, `msgpack`, `cbor` | the codec of the same name |
-| `schema-registry` | the Confluent Schema Registry client and its wire format |
-| `avro` | Avro over the Schema Registry |
-| `protobuf` | Protobuf messages, with the Confluent envelope |
-| `asyncapi` | the Kafka bindings in the generated AsyncAPI document |
+| `schema-registry` | the Confluent [Schema Registry](../components/schema-registry/index.md) client and its wire format |
+| `avro` | [Avro](../components/avro/index.md) over the Schema Registry |
+| `protobuf` | [Protobuf](../components/protobuf/index.md) messages, with the Confluent envelope |
+| `asyncapi` | the [Kafka bindings](../components/asyncapi/index.md) in the generated AsyncAPI document |
 | `testing` | the in-process Kafka behind `TestApp` |
-| `ssl` | TLS through the system OpenSSL |
+| `ssl` | [TLS](../components/broker/security.md) through the system OpenSSL |
 | `ssl-vendored` | TLS through an OpenSSL built from source |
 | `zstd` | the `zstd` compression codec |
 
@@ -91,7 +91,7 @@ The broker listens on `localhost:9092`.
 
 `take_order` reads JSON orders from the `orders` topic.
 It acknowledges an order with an amount and drops one without.
-[`KafkaBroker::new`](api:ruststream_rdkafka::KafkaBroker::new) takes the bootstrap servers and only records them.
+[`KafkaBroker::new`](../components/broker/index.md) takes the bootstrap servers and only records them.
 The connection opens when the service starts.
 Kafka reads a topic only inside a consumer group.
 [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group) is the group of every subscription that names none.
@@ -138,11 +138,11 @@ Here is where each part goes in RustStream:
 
 | rust-rdkafka | RustStream |
 |---|---|
-| `ClientConfig::new().set("group.id", ..)` | [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group), or [`KafkaTopic::group`](api:ruststream_rdkafka::KafkaTopic::group) per subscription |
-| `ClientConfig::set` for any other property | [`KafkaBroker::config`](api:ruststream_rdkafka::KafkaBroker::config), [`producer_config`](api:ruststream_rdkafka::KafkaBroker::producer_config), [`KafkaTopic::config`](api:ruststream_rdkafka::KafkaTopic::config) |
+| `ClientConfig::new().set("group.id", ..)` | [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group), or [`KafkaTopic::group`](../components/subscriptions/kafka-topic.md) per subscription |
+| `ClientConfig::set` for any other property | [`KafkaBroker::config`](../components/broker/config.md), [`producer_config`](api:ruststream_rdkafka::KafkaBroker::producer_config), [`KafkaTopic::config`](api:ruststream_rdkafka::KafkaTopic::config) |
 | `StreamConsumer::subscribe` and a `recv` loop | a `#[subscriber]` handler |
 | deserializing `message.payload()` | the handler's parameter type, decoded by the codec |
-| `store_offset` or `commit_message` after the work | [`Commit::Tracked`](api:ruststream_rdkafka::Commit::Tracked) and the handler's outcome ([Commits and delivery guarantees](commits.md)) |
-| `FutureProducer::send` | a reply or an `Out` parameter, sent through a publish policy |
-| `seek` and `assign` | `start_at` at the mount site, or the seek handle in the handler ([Replay and seeking](replay.md)) |
-| `send_offsets_to_transaction` | [`EosPublish`](api:ruststream_rdkafka::KafkaEosPublish) ([Transactions and exactly-once](exactly-once.md)) |
+| `store_offset` or `commit_message` after the work | [`Commit::Tracked`](../components/settlement/tracked.md) and the handler's outcome ([Commits and delivery guarantees](commits.md)) |
+| `FutureProducer::send` | a reply or an `Out` parameter, sent through a [publish policy](../components/publishing/index.md) |
+| `seek` and `assign` | [`start_at`](../components/positions/start-at.md) at the mount site, or the [seek handle](../components/positions/seek.md) in the handler ([Replay and seeking](replay.md)) |
+| `send_offsets_to_transaction` | [`EosPublish`](../components/transactions/exactly-once/index.md) ([Transactions and exactly-once](exactly-once.md)) |

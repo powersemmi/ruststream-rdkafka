@@ -36,10 +36,10 @@ for them. The consumer stays open for as long as a delivery holds a record of it
 The one record that is copied is the one a waiting stream resolves itself: when the queue was
 empty, the record the wait returns is copied out.
 
-The handler's reply is encoded into a buffer the dispatch loop reuses. The publisher lends those
+The handler's reply is encoded into a buffer the dispatch loop reuses. The [publisher](../components/publishing/index.md) lends those
 bytes to librdkafka, which copies them into its own queue, and the publish returns once the cluster
 has acknowledged the record. A reply that fails to publish settles the delivery with a retry.
 
 The delivery settles after the reply. What that does to the committed offset depends on the
-subscription's [`Commit`](api:ruststream_rdkafka::Commit) mode, which [Settlement](settlement.md)
+subscription's [`Commit`](../components/settlement/index.md) mode, which [Settlement](settlement.md)
 draws.

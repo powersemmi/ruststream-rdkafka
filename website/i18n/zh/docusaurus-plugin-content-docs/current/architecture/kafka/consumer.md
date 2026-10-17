@@ -35,7 +35,7 @@ librdkafka 在应用请求之前，就把已分配分区的记录拉取到本地
 
 一次轮询从队列中取出下一条记录。rust-rdkafka 的 [`StreamConsumer`](https://docs.rs/rdkafka/0.39.0/rdkafka/consumer/stream_consumer/struct.StreamConsumer.html) 通过 `recv` 完成这一步，这是一个取消安全的异步调用。
 
-偏移量存储是每个分区在内存中的一个位置。默认情况下（`enable.auto.offset.store`），轮询在应用处理记录之前，就存储它交出的那条记录的偏移量。虚线箭头是另一种方式：应用关闭自动存储，在记录处理完之后再存储偏移量。
+偏移量存储是每个分区在内存中的一个位置。默认情况下（`enable.auto.offset.store`），轮询在应用处理记录之前，就存储它交出的那条记录的偏移量。虚线箭头是另一种方式：应用[关闭自动存储](../../components/settlement/tracked.md)，在记录处理完之后再存储偏移量。
 
 `enable.auto.commit` 开启时，计时器每隔 `auto.commit.interval.ms`（五秒）提交一次已存储的位置，消费者关闭时再提交一次。崩溃会丢失上次提交之后已处理的进度，这部分记录会被再读一遍。在默认的存储方式下，交出时已存储、尚未处理的记录在崩溃后会被跳过。
 
