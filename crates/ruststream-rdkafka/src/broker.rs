@@ -223,7 +223,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -347,7 +347,7 @@ impl KafkaBroker {
     ///
     /// #[subscriber("orders")]
     /// async fn place(order: &Order) -> HandlerOutcome {
-    ///     println!("order {}", order.id);
+    ///     tracing::info!(order.id, "accepted");
     ///     HandlerOutcome::ack()
     /// }
     ///
@@ -629,7 +629,7 @@ impl KafkaBroker {
 ///     }
 ///     let closed = connected.shutdown().await?;
 ///     if closed.unflushed_records() > 0 {
-///         eprintln!("{} records were not flushed", closed.unflushed_records());
+///         tracing::warn!(unflushed = closed.unflushed_records(), "records were not flushed");
 ///     }
 ///     Ok(())
 /// }
@@ -717,7 +717,7 @@ impl ConnectedKafkaBroker {
     ///     while let Some(record) = records.next().await {
     ///         let record = record?;
     ///         let (partition, offset) = (record.partition(), record.offset());
-    ///         println!("{partition}@{offset}: {} bytes", record.payload().len());
+    ///         tracing::info!(%partition, %offset, bytes = record.payload().len(), "read");
     ///         record.ack().await?;
     ///     }
     ///     Ok(())

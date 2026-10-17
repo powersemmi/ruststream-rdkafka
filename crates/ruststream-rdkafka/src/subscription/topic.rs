@@ -40,7 +40,7 @@ use crate::subscriber::KafkaSubscriber;
 ///         .config("fetch.min.bytes", "1024")
 /// )]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///
@@ -119,7 +119,7 @@ impl KafkaTopic {
     ///     workers(8, by_key)
     /// )]
     /// async fn place(order: &Order) -> HandlerOutcome {
-    ///     println!("order {}", order.id);
+    ///     tracing::info!(order.id, "accepted");
     ///     HandlerOutcome::ack()
     /// }
     ///

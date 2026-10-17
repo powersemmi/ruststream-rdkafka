@@ -86,7 +86,7 @@ use crate::schema_registry::{
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {}", order.id);
+///     tracing::info!(order.id, "accepted");
 ///     HandlerOutcome::ack()
 /// }
 ///

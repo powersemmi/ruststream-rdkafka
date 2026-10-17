@@ -225,7 +225,7 @@ where
 /// fn inspect(path: &Path) -> Result<(), Box<dyn Error>> {
 ///     let datum = fs::read(path)?;
 ///     let order: Order = avro::decode(&datum)?;
-///     println!("{}: order {}", path.display(), order.id);
+///     tracing::info!(order.id, path = %path.display(), "decoded");
 ///     Ok(())
 /// }
 /// # let _ = inspect;

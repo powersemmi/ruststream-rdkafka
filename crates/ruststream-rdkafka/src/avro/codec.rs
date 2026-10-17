@@ -153,7 +153,7 @@ fn avro_record_name(schema: &Schema) -> Option<&'static str> {
 ///
 /// #[subscriber("orders")]
 /// async fn place(order: &Order) -> HandlerOutcome {
-///     println!("order {} of {}", order.id, order.item);
+///     tracing::info!(order.id, item = %order.item, "placed");
 ///     HandlerOutcome::ack()
 /// }
 ///
