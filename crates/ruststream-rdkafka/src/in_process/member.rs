@@ -6,6 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rdkafka::ClientConfig;
 use rdkafka::error::KafkaError as RdKafkaError;
+use rdkafka::types::RDKafkaType;
 use regex::Regex;
 use ruststream::{HeaderMap, Str};
 use tokio::sync::Notify;
@@ -67,6 +68,8 @@ impl MemberSpec {
         config: &ClientConfig,
         tracker: Arc<CommitTracker>,
     ) -> Result<Self, KafkaError> {
+        super::create_offline(config, RDKafkaType::RD_KAFKA_CONSUMER)
+            .map_err(KafkaError::subscribe)?;
         let native = config
             .create_native_config()
             .map_err(KafkaError::subscribe)?;

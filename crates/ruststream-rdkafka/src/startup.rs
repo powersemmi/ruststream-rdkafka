@@ -5,7 +5,9 @@
 //! or, when there is none, the `auto.offset.reset` end of the log. A subscription that returned
 //! before either happened would miss what is published in between under the `latest` reset, so
 //! `subscribe` waits here for the first assignment and writes a concrete start into every
-//! assigned partition before librdkafka takes it.
+//! assigned partition before librdkafka takes it. The start outlives the wait: a partition the
+//! group hands back to this member later, with nothing committed for it, resumes there instead of
+//! at the reset end.
 //!
 //! The subscription is then handed to the runtime, which may subscribe other registrations before
 //! it polls any stream. A member that nobody polls cannot answer a rebalance, and a second member
@@ -223,21 +225,26 @@ impl Startup {
         self.lock().last_error.clone()
     }
 
-    /// Prepares an assignment the group just handed over, when the subscription is still kept:
-    /// every partition gets a concrete start. Returns whether the subscription is kept, which
-    /// is what [`assigned`](Self::assigned) is told after librdkafka took the assignment.
+    /// Prepares an assignment the group just handed over: every partition gets a concrete start,
+    /// a partition this member had before resuming where it was given. Returns whether the
+    /// subscription is kept, which is what [`assigned`](Self::assigned) is told after librdkafka
+    /// took the assignment.
+    ///
+    /// A started subscription is prepared too. Under the eager protocol a member gives every
+    /// partition back whenever another member joins, and a partition the group has committed
+    /// nothing for would come back at the `auto.offset.reset` end, resolved whenever the fetcher
+    /// asks: what was published after the subscription opened and before it got the partition
+    /// back would be skipped. Where the group committed nothing, nothing was read past the start
+    /// this member was given, so that start is where the partition resumes.
     pub(crate) fn assigning<C>(&self, consumer: &C, partitions: &mut TopicPartitionList) -> bool
     where
         C: Consumer<TrackingContext>,
     {
         // Copied out rather than read under the lock: resolving asks the cluster, and a
         // subscription closing meanwhile must not wait for the answer.
-        let remembered = {
+        let (released, remembered) = {
             let kept = self.lock();
-            if kept.released {
-                return false;
-            }
-            kept.starts.clone()
+            (kept.released, kept.starts.clone())
         };
         if let Err(err) = resolve_starts(consumer, partitions, &remembered, self.reset) {
             let reason = format!("the start positions of its partitions could not be read: {err}");
@@ -246,42 +253,44 @@ impl Startup {
                 let _ = opened.send(Err(reason));
             } else {
                 // librdkafka resolves what was left unresolved itself, as it does for a
-                // subscription that is not kept.
+                // partition whose start could not be read.
                 warn!(error = %err, "{reason}");
             }
         }
-        true
+        !released
     }
 
-    /// Finishes an assignment of a kept subscription once librdkafka took it: its partitions are
-    /// paused until the stream takes over, their starts are remembered, and the first one answers
-    /// the wait in `subscribe`.
+    /// Finishes an assignment once librdkafka took it: the starts are remembered, and a kept
+    /// subscription pauses its partitions until the stream takes over and answers the wait in
+    /// `subscribe` with the first one.
     pub(crate) fn assigned<C>(
         &self,
         consumer: &C,
         partitions: &TopicPartitionList,
         applied: Result<(), &RdKafkaError>,
+        kept: bool,
     ) where
         C: Consumer<TrackingContext>,
     {
         // Paused after the assignment, because a partition librdkafka has not been given yet has
         // no state to pause. The pause fences off what was fetched before it: that is dropped,
         // and the stream seeks the partition back to its start when it takes over.
-        if partitions.count() > 0
+        if kept
+            && partitions.count() > 0
             && let Err(err) = consumer.pause(partitions)
         {
             warn!(error = %err, "a kept subscription could not pause its partitions");
         }
-        let mut kept = self.lock();
+        let mut state = self.lock();
         for element in partitions.elements() {
             if matches!(element.offset(), Offset::Offset(_)) {
-                kept.starts.insert(
+                state.starts.insert(
                     (element.topic().to_owned(), element.partition()),
                     element.offset(),
                 );
             }
         }
-        if let Some(opened) = kept.opened.take() {
+        if let Some(opened) = state.opened.take() {
             let _ = opened.send(
                 applied.map_err(|err| format!("librdkafka did not take its assignment: {err}")),
             );
