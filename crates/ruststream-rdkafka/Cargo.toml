@@ -329,6 +329,61 @@ path = "examples/manual/kafka_avro_resolve.rs"
 required-features = ["avro", "testing"]
 test = true
 
+[[example]]
+name = "kafka_registry_framed"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_register"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_prefetch"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_missing"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "kafka_registry_cache"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_framed"
+path = "examples/manual/kafka_registry_framed.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_register"
+path = "examples/manual/kafka_registry_register.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_prefetch"
+path = "examples/manual/kafka_registry_prefetch.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_missing"
+path = "examples/manual/kafka_registry_missing.rs"
+required-features = ["avro", "testing"]
+test = true
+
+[[example]]
+name = "manual_kafka_registry_cache"
+path = "examples/manual/kafka_registry_cache.rs"
+required-features = ["schema-registry", "testing"]
+test = true
+
 # --- examples: guides ---
 
 # --- examples: architecture ---
