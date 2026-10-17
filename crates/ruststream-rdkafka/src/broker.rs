@@ -237,6 +237,70 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 /// }
 /// # let _ = app;
 /// ```
+///
+/// A test runs the app `main` runs. With the `testing` feature, `TestApp::start` connects this
+/// broker to an in-process Kafka cluster, and the test addresses it by its production type:
+///
+/// ```
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # mod demo {
+/// use std::error::Error;
+///
+/// use ruststream::testing::TestApp;
+/// use ruststream_rdkafka::prelude::*;
+/// use serde::{Deserialize, Serialize};
+///
+/// #[derive(Debug, Serialize, Deserialize, PartialEq, Outgoing)]
+/// #[outgoing(name = "payments")]
+/// pub struct Payment {
+///     pub amount: u64,
+/// }
+///
+/// #[subscriber(KafkaTopic::new("payments").commit(Commit::Tracked))]
+/// async fn accept(payment: &Payment) -> HandlerOutcome {
+///     if payment.amount == 0 {
+///         return HandlerOutcome::drop();
+///     }
+///     HandlerOutcome::ack()
+/// }
+///
+/// /// The app `main` runs.
+/// pub fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
+///         KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
+///         |b| {
+///             b.include(accept);
+///         },
+///     )
+/// }
+///
+/// pub async fn zero_amounts_are_dropped() -> Result<(), Box<dyn Error>> {
+///     let tb = TestApp::start(app()).await?;
+///
+///     // The publish returns once the handler it woke has settled.
+///     tb.broker::<KafkaBroker>()
+///         .message(&Payment { amount: 0 })
+///         .publish()
+///         .await?;
+///
+///     tb.broker::<KafkaBroker>()
+///         .subscriber("payments")
+///         .assert_called(1)
+///         .with(&Payment { amount: 0 })
+///         .settled(HandlerOutcome::drop());
+///
+///     tb.shutdown().await?;
+///     Ok(())
+/// }
+/// # }
+/// # #[cfg(all(feature = "json", feature = "testing"))]
+/// # #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// #     demo::zero_amounts_are_dropped().await
+/// # }
+/// # #[cfg(not(all(feature = "json", feature = "testing")))]
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone)]
 pub struct KafkaBroker {
     servers: Vec<String>,
