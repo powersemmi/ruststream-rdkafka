@@ -11,7 +11,7 @@ import TabItem from '@theme/TabItem';
 [`KafkaEosPublish`](api:ruststream_rdkafka::KafkaEosPublish) commits consumed offsets inside the producer's transaction, so positions move atomically with the records published.
 
 It is the consume-transform-produce shape of Kafka (KIP-447), named `EosPublish` in the prelude.
-[`KafkaEosPublish::new`](api:ruststream_rdkafka::KafkaEosPublish::new) takes the pipeline id, which is also the producer's transactional id.
+[`KafkaEosPublish::new`](api:ruststream_rdkafka::KafkaEosPublish::new) takes the pipeline id, which is also the producer's [transactional id](../index.md).
 Each source subscription names the same id in [`Commit::Transactional`](api:ruststream_rdkafka::Commit::Transactional): its consumer stops committing on its own, and the pipeline commits its offsets.
 One pipeline serves every lane of a `workers(n, by_key)` pool: publishes join the open transaction concurrently, and only the commit is exclusive.
 
@@ -25,7 +25,7 @@ The `retry_after` copy does not apply to the pipeline's replies: a delayed copy 
 The window's commit runs on the runtime the broker connected on, so a handler on a dedicated thread may open a window.
 
 The transactional commit needs consumer group membership.
-So `Commit::Transactional` is a [`KafkaTopic`](api:ruststream_rdkafka::KafkaTopic) or [`KafkaTopics`](api:ruststream_rdkafka::KafkaTopics) mode; [`KafkaPartitions`](api:ruststream_rdkafka::KafkaPartitions), which joins no group, works with `Commit::Auto` and `Commit::Tracked`.
+So `Commit::Transactional` is a [`KafkaTopic`](../../subscriptions/kafka-topic.md) or [`KafkaTopics`](../../subscriptions/kafka-topics.md) mode; [`KafkaPartitions`](../../subscriptions/kafka-partitions.md), which joins no group, works with `Commit::Auto` and `Commit::Tracked`.
 A replying handler reaches the window through [`EosReplies`](./eos-replies.md), and a handler that publishes by hand through [`EosPipeline`](./eos-pipeline.md).
 
 ## Example

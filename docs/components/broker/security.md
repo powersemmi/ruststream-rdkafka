@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # Security
 
-SASL and TLS are librdkafka properties set through [`config`](api:ruststream_rdkafka::KafkaBroker::config); the `ssl` and `ssl-vendored` features link the OpenSSL they need.
+SASL and TLS are librdkafka properties set through [`config`](./config.md); the `ssl` and `ssl-vendored` features link the OpenSSL they need.
 
 `security.protocol` picks the listener: `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`.
 `sasl.mechanism`, `sasl.username` and `sasl.password` set the SASL login, and the `ssl.*` properties the certificates.
@@ -20,8 +20,8 @@ The `ssl` feature links the system OpenSSL, and `ssl-vendored` builds OpenSSL fr
 Without it, a TLS property fails startup with "OpenSSL not available at build time", and a SCRAM or OAUTHBEARER mechanism fails the connect.
 The `zstd` feature adds that compression codec; the other codecs are built in.
 
-A misspelled `security.protocol` fails startup, in a [`TestApp`](api:ruststream::testing::TestApp) test as on a cluster.
-The generated AsyncAPI document reports the bootstrap addresses and never the credentials.
+A misspelled `security.protocol` fails startup, in a [`TestApp`](../testing/index.md) test as on a cluster.
+The generated [AsyncAPI document](../asyncapi/server.md) reports the bootstrap addresses and never the credentials.
 
 ## Example
 

@@ -9,11 +9,11 @@ import TabItem from '@theme/TabItem';
 
 # framed
 
-[`KafkaPublish::framed`](api:ruststream_rdkafka::KafkaPublish::framed) puts the Confluent envelope on every message its policy publishes, with the destination subject's schema id.
+[`KafkaPublish::framed`](api:ruststream_rdkafka::KafkaPublish::framed) puts the [Confluent envelope](../schema-registry/envelope.md) on every message its policy publishes, with the destination subject's schema id.
 
 It returns a [`KafkaFramedPublish`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish), a policy like any other, so it goes where a policy goes: `.out_reply(..)` or an `Out` slot.
 Its live form is a [`KafkaFramedPublisher`](api:ruststream_rdkafka::protobuf::KafkaFramedPublisher).
-The subject comes from the destination topic, `{topic}-value` by default; [`subject_strategy`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject_strategy) and [`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) choose another.
+The subject comes from the destination topic, `{topic}-value` by default; [`subject_strategy`](../schema-registry/subject-strategy.md) and [`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) choose another.
 The index path names the schema's first message, which Confluent writes as one zero byte.
 [`message`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::message) pins another message of the schema by its full name, for a topic whose type is not declared first.
 [`KafkaFramedPublish::over`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::over) wraps a configured `KafkaPublish` instead of the default one.

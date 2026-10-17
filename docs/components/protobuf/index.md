@@ -8,7 +8,7 @@ import TabItem from '@theme/TabItem';
 
 # Protobuf
 
-A `prost` message rides the byte lanes as itself, and [`decode_confluent`](api:ruststream_rdkafka::protobuf::decode_confluent) steps over the Confluent envelope with no registry.
+A `prost` message rides the byte lanes as itself, and [`decode_confluent`](api:ruststream_rdkafka::protobuf::decode_confluent) steps over the [Confluent envelope](../schema-registry/envelope.md) with no registry.
 
 The `protobuf` feature adds it, with the [`protobuf`](api:ruststream_rdkafka::protobuf) module.
 A generated message is not a serde type, so it carries its own bytes: an incoming type derives `Deserialized` and names `#[wire(decode = decode_confluent)]`, an outgoing one derives `Serialized` and names `#[wire(encode = prost::Message::encode)]`.
@@ -23,7 +23,7 @@ What the reader does not check is which schema version a delivery claims.
 Writing the envelope needs the schema id of the destination's subject, which a value cannot look up.
 The publish side adds it where the destination is known: [`framed`](./framed.md) at a mount site, or [`ProtobufFrame`](./protobuf-frame.md) for the whole app.
 A publish without either sends the bare message.
-A subject is registered from `.proto` text through [`SchemaRegistry::register`](api:ruststream_rdkafka::schema_registry::SchemaRegistry::register) with `SchemaType::Protobuf`.
+A subject is registered from `.proto` text through [`SchemaRegistry::register`](../schema-registry/registration.md) with `SchemaType::Protobuf`.
 The registry paths compile that text with the well-known types available, so a schema imports from them and from nothing else.
 
 ## Example

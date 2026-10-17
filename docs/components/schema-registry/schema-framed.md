@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # SchemaFramed
 
-[`SchemaFramed`](api:ruststream_rdkafka::schema_registry::SchemaFramed) wraps a codec such as `JsonCodec` in the Confluent envelope, so a registry-backed JSON topic is a codec choice.
+[`SchemaFramed`](api:ruststream_rdkafka::schema_registry::SchemaFramed) wraps a codec such as `JsonCodec` in the Confluent [envelope](./envelope.md), so a registry-backed JSON topic is a codec choice.
 
 A JSON document reads without its schema, so the envelope separates from the format: the inner codec writes and reads the document, and `SchemaFramed` puts the envelope on and takes it off.
 Decoding strips the envelope and looks nothing up.

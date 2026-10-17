@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # KafkaBatchContext
 
-A batch handler's context, [`KafkaBatchContext`](api:ruststream_rdkafka::context::KafkaBatchContext), carries the subscription's seek handle; each record's own coordinates travel with the elements.
+A [batch handler's](../subscriptions/batches.md) context, [`KafkaBatchContext`](api:ruststream_rdkafka::context::KafkaBatchContext), carries the subscription's [seek handle](../positions/seek.md); each record's own coordinates travel with the elements.
 
 A batch spans many records, so it has no single topic, partition or offset.
 The subscription builds the context once per batch, and it holds what every record of the batch shares: the [`SeekHandle`](api:ruststream_rdkafka::context::keys::SeekHandle) key, the same key a [`KafkaContext`](./index.md) carries.

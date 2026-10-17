@@ -14,9 +14,9 @@ import TabItem from '@theme/TabItem';
 [`KafkaTopics::new`](api:ruststream_rdkafka::KafkaTopics::new) takes the topics, and [`and_topic`](api:ruststream_rdkafka::KafkaTopics::and_topic) adds one more.
 The group settings are the ones [`KafkaTopic`](./kafka-topic.md) has: `group`, `start`, `commit`, `assignment`, `lane_key` and `config`.
 Every topic of the list shares the handler, so every topic carries the handler's payload type.
-`Ctx<Topic>` binds the topic a delivery came from.
+[`Ctx<Topic>`](../context/index.md) binds the topic a delivery came from.
 The subscription's name is the list joined with commas, `orders,cancellations` here.
-No one publish reaches a list again, so a registration over it names where a retry copy goes: `.out_retry(policy).to(topic)`, or [`ToSourceTopic`](api:ruststream_rdkafka::ToSourceTopic) to send each copy back to the topic it came from.
+No one publish reaches a list again, so a registration over it names where a [retry copy](../settlement/retries.md) goes: `.out_retry(policy).to(topic)`, or [`ToSourceTopic`](../settlement/to-source-topic.md) to send each copy back to the topic it came from.
 A registration that names neither stops the service at startup.
 
 ## Example

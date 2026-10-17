@@ -13,7 +13,7 @@ On a broker with [`schema_registry`](api:ruststream_rdkafka::KafkaBroker::schema
 
 Every subscription of that broker reads a delivery's schema id, fetches the schema and compiles its `.proto` source into a descriptor.
 It decodes the datum into a dynamic message and hands the handler JSON, so the handler is a plain serde one on the default codec.
-On the way out, the [`SchemaFrame`](api:ruststream_rdkafka::schema_registry::SchemaFrame) publish layer turns the JSON into the subject's Protobuf message and frames it.
+On the way out, the [`SchemaFrame`](../schema-registry/json-transcode.md) publish layer turns the JSON into the subject's Protobuf message and frames it.
 Field names in the serde types match the `.proto` messages.
 The message written is the schema's first; [`SchemaFrame::message`](api:ruststream_rdkafka::schema_registry::SchemaFrame::message) pins another.
 

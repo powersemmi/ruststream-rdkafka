@@ -17,7 +17,7 @@ A publish, `settle` and `advance` wait on the real clock until every subscriptio
 The wait lasts ten seconds at most, and [`start_live_within`](api:ruststream::testing::TestApp::start_live_within) sets another bound.
 A consumer group takes a few seconds to form on a cluster, so a Kafka test gives it thirty.
 
-The live mode is for what the in-process cluster leaves out: a topic created with several partitions, the cooperative assignment that keeps partitions sticky, retention, and the timing of a group join.
+The live mode is for what the in-process cluster leaves out: a topic created with several partitions, the [cooperative assignment](../subscriptions/assignment.md) that keeps partitions sticky, retention, and the timing of a group join.
 A cluster keeps what earlier runs left in it.
 Each run reads in a consumer group of its own, and creates its topics before the app starts: a group assigned a topic created after it subscribed reads from the end of the log, past the record that created the topic.
 

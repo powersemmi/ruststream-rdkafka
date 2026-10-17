@@ -16,9 +16,9 @@ Its `seek(position)` takes a [`KafkaPosition`](./index.md), and the next deliver
 `Ctx<Partition>` and [`Ctx<Position>`](api:ruststream_rdkafka::context::keys::Position) give the delivery's own coordinates to aim with.
 A seek moves this consumer and no other member of the group.
 It commits nothing, and the next rebalance discards it: whoever gets the partitions resumes from the group's committed offsets.
-Under `Commit::Tracked` a seek clears the tracked position of every partition it moves, so a later commit never passes records the seek replayed and nobody handled.
+Under [`Commit::Tracked`](../settlement/tracked.md) a seek clears the tracked position of every partition it moves, so a later commit never passes records the seek replayed and nobody handled.
 A seek after the service shut down returns an error.
-A batch handler reaches the same key through its [`KafkaBatchContext`](api:ruststream_rdkafka::context::KafkaBatchContext), and the move applies once the batch has settled.
+A batch handler reaches the same key through its [`KafkaBatchContext`](../context/batch-context.md), and the move applies once the batch has settled.
 A position that has to survive a restart belongs in [`start_at`](./start-at.md) instead.
 
 ## Example

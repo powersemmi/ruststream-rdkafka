@@ -17,10 +17,10 @@ The reader takes no part in the group protocol, so group members on the same top
 A group stays optional and decides only where offsets go.
 With `group` the reader commits into that group without joining it.
 Without a group it commits nothing, so `start` must name `Earliest` or `Latest`: `Committed` has nothing to resume from and stops the service at startup.
-`commit`, `lane_key` and `config` work as on [`KafkaTopic`](./kafka-topic.md); `Commit::Transactional` stops the service at startup, because an exactly-once pipeline commits through the group protocol.
+`commit`, `lane_key` and `config` work as on [`KafkaTopic`](./kafka-topic.md); `Commit::Transactional` stops the service at startup, because an [exactly-once pipeline](../transactions/exactly-once/index.md) commits through the group protocol.
 Under the default [lane key](./lane-key.md) each named partition gets a lane of its own.
 The subscription's name is the topic.
-No publish addresses a subset of partitions, so a registration names where a retry copy goes, as the example does with `.out_retry(policy).to("orders.retry")`.
+No publish addresses a subset of partitions, so a registration names where a [retry copy](../settlement/retries.md) goes, as the example does with `.out_retry(policy).to("orders.retry")`.
 
 ## Example
 

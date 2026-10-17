@@ -15,7 +15,7 @@ The schema id takes four bytes, big-endian.
 `parse_envelope` splits a payload into the id and a view of the datum, with no copy.
 It returns `None` for a payload that does not open with the zero byte or is shorter than five bytes, which reads as "not framed".
 `encode_envelope` writes the five bytes and the datum into a new buffer.
-Neither function reaches a registry.
+Neither function reaches a [registry](./index.md).
 
 A handler that works on the framed bytes takes them through the byte lanes: a `#[derive(Deserialized)]` view of the delivery in, a `#[derive(Serialized)]` buffer out.
 No codec runs on either side, so the bytes travel as they are.

@@ -17,7 +17,7 @@ A pattern without it stops the service at startup, because librdkafka would subs
 The consumer finds a topic created after startup on its next metadata refresh, and the group then assigns its partitions.
 A new topic is read from where the [start offset](./start-offset.md) puts it.
 The subscription's name is the pattern itself.
-A delivery names the topic it came from through `Ctx<Topic>`, and a retry copy needs a destination named at the mount site, as on [`KafkaTopics`](./kafka-topics.md).
+A delivery names the topic it came from through [`Ctx<Topic>`](../context/index.md), and a [retry copy](../settlement/retries.md) needs a destination named at the mount site, as on [`KafkaTopics`](./kafka-topics.md).
 
 ## Example
 

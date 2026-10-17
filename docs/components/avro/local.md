@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # Local
 
-[`AvroCodec::local`](api:ruststream_rdkafka::avro::AvroCodec::local) pins one schema and writes a bare datum, with no envelope, no registry and no I/O.
+[`AvroCodec::local`](api:ruststream_rdkafka::avro::AvroCodec::local) pins one schema and writes a bare datum, with no [envelope](../schema-registry/envelope.md), no [registry](../schema-registry/index.md) and no I/O.
 
 The schema passed in is the one the wire carries: `T::get_schema()` when the model defines it, or a parsed `.avsc` file when the schema text is the source of truth.
 Every message is written and read with that schema, so producers and consumers of the topic agree on it outside the service.

@@ -18,7 +18,7 @@ Everything one partition delivers then runs in order, keyless records included, 
 `LaneKey::RecordKey` keys a lane by the record's native key, which is finer than a partition.
 One key's records stay in order, and records of different keys run at once even inside one partition.
 A keyless record has no lane key under `RecordKey`; it rotates over the lanes and loses its partition order.
-The publish side sets the record key from the partition-key header, so a record published with a key reaches its lane by that key.
+The publish side sets the record key from the [partition-key header](../publishing/keys.md), so a record published with a key reaches its lane by that key.
 The manual form writes the lanes as `.workers_by_key(n)` on the mount chain.
 
 ## Example

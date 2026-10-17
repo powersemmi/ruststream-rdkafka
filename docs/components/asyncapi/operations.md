@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # Operations
 
-A receive operation reports the consumer group its descriptor names, and the client id its `config` sets.
+A receive operation reports the consumer group its descriptor names, and the client id its [`config`](../subscriptions/passthrough.md) sets.
 
 The operation binding carries `groupId` and `clientId`, each as a one-value schema.
 `groupId` is the group the descriptor names, such as [`KafkaTopic::group`](api:ruststream_rdkafka::KafkaTopic::group).

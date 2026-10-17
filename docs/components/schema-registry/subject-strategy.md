@@ -20,7 +20,7 @@ The strategies are Confluent's three.
 The [`SchemaFrame`](./json-transcode.md) layer derives a topic's subject with its strategy, `TopicName` unless [`subject_strategy`](api:ruststream_rdkafka::schema_registry::SchemaFrame::subject_strategy) names another.
 The publish path knows the topic and not the record name, so a topic under a record strategy gets its subject pinned with `subject(topic, subject)`, which overrides the strategy for that topic.
 The example pins the subject that `RecordName` gives the record.
-The Protobuf publish policy and its layer take the same three settings.
+The Protobuf [publish policy](../protobuf/framed.md) and its [layer](../protobuf/protobuf-frame.md) take the same three settings.
 
 ## Example
 

@@ -17,11 +17,11 @@ librdkafka fetches records ahead in the background, and a batch takes what it al
 So a batch is often smaller than `n`, and a quiet topic yields batches of one.
 One outcome settles every record of the batch.
 A `Vec<HandlerOutcome>` settles record `i` with outcome `i`.
-Under `Commit::Tracked` a record that asks to come back holds the committed position in front of it until it settles; a process that stops first replays the acked records behind it too.
-A `retry_after` in a batch becomes a copy published back to the topic after the delay, so the registration names its retry publisher with `.out_retry(policy)`.
+Under [`Commit::Tracked`](../settlement/tracked.md) a record that asks to come back holds the committed position in front of it until it settles; a process that stops first replays the acked records behind it too.
+A [`retry_after`](../settlement/retries.md) in a batch becomes a copy published back to the topic after the delay, so the registration names its retry publisher with `.out_retry(policy)`.
 How much librdkafka queues locally is a consumer property, set through the descriptor's [passthrough](./passthrough.md) (`queued.max.messages.kbytes`, `fetch.queue.backoff.ms`).
 `workers(n)` keeps up to `n` batches in flight at once.
-A batch body reads a [`KafkaBatchContext`](api:ruststream_rdkafka::context::KafkaBatchContext), which carries the seek handle and no per-record field.
+A batch body reads a [`KafkaBatchContext`](../context/batch-context.md), which carries the seek handle and no per-record field.
 In the manual form the body is an `impl Handle<[T]>`, where `Ok(())` acks the batch and `Err(outcomes)` settles record by record.
 
 ## Example

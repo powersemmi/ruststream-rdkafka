@@ -11,12 +11,12 @@ import TabItem from '@theme/TabItem';
 
 [`ToSourceTopic`](api:ruststream_rdkafka::ToSourceTopic) sends each retry copy back to the topic its delivery arrived on, for subscriptions over several topics.
 
-A [`KafkaTopic`](api:ruststream_rdkafka::KafkaTopic) subscription reads one topic, and its retry copies go there.
-A [`KafkaTopics`](api:ruststream_rdkafka::KafkaTopics) list or pattern and a [`KafkaPartitions`](api:ruststream_rdkafka::KafkaPartitions) reader have no single topic, so the mount site names one.
+A [`KafkaTopic`](../subscriptions/kafka-topic.md) subscription reads one topic, and its retry copies go there.
+A [`KafkaTopics`](../subscriptions/kafka-topics.md) list or pattern and a [`KafkaPartitions`](../subscriptions/kafka-partitions.md) reader have no single topic, so the mount site names one.
 `ToSourceTopic` is a transform of the [`Retry`](api:ruststream::runtime::Retry) slot: `.out_retry(Publish::default()).transform(ToSourceTopic)`.
 It reads each delivery's topic from its [Kafka context](../context/index.md), so a copy of an `orders-us` record goes back to `orders-us`.
 The context reaches the slot when the handler reads it: a `Ctx<Topic>` parameter, or a manual body typed over `KafkaContext`.
-A batch handler carries no per-record topic, so a batch registration names a fixed topic instead.
+A [batch handler](../subscriptions/batches.md) carries no per-record topic, so a batch registration names a fixed topic instead.
 `.out_retry(Publish::default()).to(topic)` sends every copy to that one topic; a pattern that matches it reads the copies back.
 A registration over several topics that names neither does not start.
 

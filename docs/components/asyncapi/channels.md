@@ -12,12 +12,12 @@ import TabItem from '@theme/TabItem';
 Each channel reports its topic: the descriptor's for a subscription, the resolved destination for a publish.
 
 The channel binding has one field, `topic`.
-A subscription by name, a [`KafkaTopic`](api:ruststream_rdkafka::KafkaTopic) and a [`KafkaPartitions`](api:ruststream_rdkafka::KafkaPartitions) reader each report the one topic they read.
-A [`KafkaTopics`](api:ruststream_rdkafka::KafkaTopics) set or pattern reads several topics, so its channel carries no binding.
+A subscription by name, a [`KafkaTopic`](../subscriptions/kafka-topic.md) and a [`KafkaPartitions`](../subscriptions/kafka-partitions.md) reader each report the one topic they read.
+A [`KafkaTopics`](../subscriptions/kafka-topics.md) set or pattern reads several topics, so its channel carries no binding.
 
 A channel the service publishes to reports the topic the mount site resolved.
-That is a `reply("dest")` clause, a reply type's `#[outgoing(name)]`, the name of a slot entry, or a declared dead-letter topic.
-A publish policy holds producer settings and no topic, so the policy itself adds nothing to the channel.
+That is a `reply("dest")` clause, a reply type's `#[outgoing(name)]`, the name of a slot entry, or a declared [dead-letter topic](../settlement/dead-letters.md).
+A [publish policy](../publishing/index.md) holds producer settings and no topic, so the policy itself adds nothing to the channel.
 
 ## Example
 

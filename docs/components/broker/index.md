@@ -22,7 +22,7 @@ At shutdown the runtime turns it into a [`ClosedKafkaBroker`](api:ruststream_rdk
 
 `#[subscriber("orders")]` reads the topic `orders` in the broker's default group.
 Kafka reads a topic only through a consumer group, so a subscription with no group of its own on a broker with no default group fails startup.
-The descriptors that set a group, several topics or exact partitions per subscription are on the Subscriptions pages.
+The descriptors that set a group, several topics or exact partitions per subscription are on the [Subscriptions](../subscriptions/index.md) pages.
 
 ## Example
 

@@ -15,7 +15,7 @@ The codec is built from a [`SchemaPrefetch`](../schema-registry/schema-prefetch.
 The codec itself is synchronous and reads only the prefetch's cache, so its encode and decode reach no network.
 
 Decoding needs no registration.
-The envelope of each delivery names the writer schema, the prefetch resolves it before the decode, and the codec reads the datum with it.
+The [envelope](../schema-registry/envelope.md) of each delivery names the writer schema, the prefetch resolves it before the decode, and the codec reads the datum with it.
 One codec therefore decodes every record type that arrives on its topics.
 
 [`register::<T>(subject)`](api:ruststream_rdkafka::avro::AvroCodec::register) is the publish side: values of `T` are framed with the id of `subject`.

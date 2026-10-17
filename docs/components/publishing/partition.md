@@ -17,7 +17,7 @@ The bound keeps the step off a publisher of another broker.
 The record goes to exactly that partition; its key still travels with it.
 A partition the topic does not have fails the publish, and the handler decides what follows.
 A test reads the setting back from the slot with `tb.out::<Slot>().with_options(..)`.
-The in-process cluster gives every topic one partition, so a pin to partition `0` lands and a pin to any other is refused, as a cluster refuses a partition its topic lacks.
+The [in-process cluster](../testing/index.md) gives every topic one partition, so a pin to partition `0` lands and a pin to any other is refused, as a cluster refuses a partition its topic lacks.
 
 ## Example
 

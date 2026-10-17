@@ -9,17 +9,17 @@ import TabItem from '@theme/TabItem';
 
 # Passthrough
 
-A descriptor's `config` passes any consumer property; one the commit mode owns is refused at startup, naming the property.
+A descriptor's `config` passes any consumer property; one the [commit mode](../settlement/index.md) owns is refused at startup, naming the property.
 
 [`KafkaTopic::config`](api:ruststream_rdkafka::KafkaTopic::config), and the same method on `KafkaTopics` and `KafkaPartitions`, sets one librdkafka consumer property by its name.
 It reaches the properties the descriptor has no typed option for: fetch sizes, queue limits, timeouts.
 The passthrough applies last, so it wins over the typed options and over the broker-wide configuration.
 A property the commit mode owns is the exception.
-Under `Commit::Tracked` and `Commit::Transactional` the crate computes the committed position itself, through `enable.auto.offset.store` and `enable.auto.commit`.
+Under [`Commit::Tracked`](../settlement/tracked.md) and `Commit::Transactional` the crate computes the committed position itself, through `enable.auto.offset.store` and `enable.auto.commit`.
 A passthrough that sets either one would leave the position to librdkafka while every `ack` decided nothing.
 So the subscription refuses to open, and the startup error names the subscription and the property.
 `Commit::Auto` owns neither property and takes both from the passthrough.
-A property for every consumer of the broker goes on [`KafkaBroker`](api:ruststream_rdkafka::KafkaBroker) instead.
+A property for every consumer of the broker goes on [`KafkaBroker`](../broker/config.md) instead.
 
 ## Example
 

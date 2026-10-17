@@ -11,7 +11,7 @@ import TabItem from '@theme/TabItem';
 
 [`EosPipeline::publish`](api:ruststream_rdkafka::EosPipeline::publish) sends a record into the open window by hand, with the source coordinates the `Source` key gives.
 
-[`EosPipeline`](api:ruststream_rdkafka::EosPipeline) is the live form of `EosPublish`, so a slot bound to that policy holds one.
+[`EosPipeline`](api:ruststream_rdkafka::EosPipeline) is the live form of [`EosPublish`](./index.md), so a slot bound to that policy holds one.
 A handler reaches it through the slot's `Borrow<EosPipeline>` bound, `Out<impl Borrow<EosPipeline>>`, and the manual form names it as the slot's wired value.
 The delivery's coordinates are a [`SourceOffset`](api:ruststream_rdkafka::SourceOffset), read with `Ctx<Source>` ([`context::keys::Source`](api:ruststream_rdkafka::context::keys::Source)).
 `publish(&source, record, options)` adds the record to the window and pairs it with that offset; `None` keeps the producer's own partition choice.

@@ -18,7 +18,7 @@ A handler bounds its slot `Out<impl PartitionLanes>` and reads its delivery's pa
 The live value is [`TransactionalPartitions`](api:ruststream_rdkafka::TransactionalPartitions), and its clones share the publishers.
 
 The scope is the source partition because one producer runs one transaction at a time.
-Under the default `LaneKey::Partition`, a `workers(n, by_key)` pool processes each partition in order on one lane, so each lane has a transaction of its own.
+Under the default [`LaneKey::Partition`](../subscriptions/lane-key.md), a `workers(n, by_key)` pool processes each partition in order on one lane, so each lane has a transaction of its own.
 The set of ids follows the topic's partitions, not the worker count: changing `n` keeps the ids and their fencing.
 It does not combine with `LaneKey::RecordKey`, which spreads one partition over several lanes; two lanes would then meet on one producer and get `KafkaError::TransactionBusy`.
 What a lane publishes leaves through the partition's own publisher, so a test reads it on the topic, not on the slot's record.

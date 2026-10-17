@@ -24,7 +24,7 @@ A handler binds one field with [`Ctx<K>`](api:ruststream::runtime::Ctx), where `
 `Topic` and `Partition` are in the prelude; the other keys are imported from `context::keys`.
 A body that reads several fields takes `ctx: &mut Context<'_, KafkaContext>` instead and calls `ctx.context(key)` per field, as the manual form does.
 Reading the context also hands it to the retry position, where [ToSourceTopic](../settlement/to-source-topic.md) reads the topic.
-The same context carries the `Position` and `SeekHandle` keys, which move the subscription through the log.
+The same context carries the [`Position`](../positions/index.md) and [`SeekHandle`](../positions/seek.md) keys, which move the subscription through the log.
 
 ## Example
 

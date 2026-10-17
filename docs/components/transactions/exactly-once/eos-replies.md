@@ -9,7 +9,7 @@ import TabItem from '@theme/TabItem';
 
 # EosReplies
 
-[`EosReplies`](api:ruststream_rdkafka::EosReplies) joins every reply to the pipeline's open window, paired with its delivery's consumed offset.
+[`EosReplies`](api:ruststream_rdkafka::EosReplies) joins every reply to the [pipeline's open window](./index.md), paired with its delivery's consumed offset.
 
 It is a publish transform for the reply position, written after the policy: `.out_reply(EosPublish::new(id)).transform(EosReplies)`.
 A `Commit::Transactional` subscription marks each delivery with its source coordinates, and the transform carries them onto the reply.

@@ -14,12 +14,12 @@ import TabItem from '@theme/TabItem';
 A property set with `config` reaches every consumer and the producer the broker creates.
 A property that applies to one side only is ignored by the other, as librdkafka ignores it.
 `producer_config` applies on top of `config`, to the producer alone: `acks`, `compression.type`, `message.max.bytes`, `linger.ms`.
-A descriptor's own `config` adds consumer properties for one subscription.
+A descriptor's own [`config`](../subscriptions/passthrough.md) adds consumer properties for one subscription.
 The names and values are librdkafka's, listed in its `CONFIGURATION.md`.
 
 librdkafka checks every property when the broker connects.
 An unknown name or a value it refuses fails startup with [`KafkaError::Connect`](api:ruststream_rdkafka::KafkaError::Connect), so a typo never reaches the first publish.
-The in-process cluster a [`TestApp`](api:ruststream::testing::TestApp) test runs on reads the same properties.
+The in-process cluster a [`TestApp`](../testing/index.md) test runs on reads the same properties.
 It refuses what librdkafka refuses, and a record over the producer's `message.max.bytes` is refused there as on a cluster.
 
 ## Example
