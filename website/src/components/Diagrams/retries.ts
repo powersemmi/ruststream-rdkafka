@@ -9,8 +9,26 @@ import {lines, word, type Words} from './words';
 export function retries(words: Words): {boxes: Box[]; links: Link[]} {
   const boxes: Box[] = [
     {id: 'record', x: 12, y: 0, w: 336, h: 44, kind: 'broker', lines: lines(words, 'record')},
-    {id: 'outcome', x: 12, y: 72, w: 336, h: 44, kind: 'service', lines: lines(words, 'outcome')},
-    {id: 'cap', x: 12, y: 144, w: 336, h: 44, kind: 'core', lines: lines(words, 'cap')},
+    {
+      id: 'outcome',
+      x: 12,
+      y: 72,
+      w: 336,
+      h: 44,
+      kind: 'service',
+      lines: lines(words, 'outcome'),
+      href: '/components/settlement/retries/',
+    },
+    {
+      id: 'cap',
+      x: 12,
+      y: 144,
+      w: 336,
+      h: 44,
+      kind: 'core',
+      lines: lines(words, 'cap'),
+      href: '/components/settlement/retries/',
+    },
     {id: 'copy', x: 0, y: 220, w: 112, h: 104, kind: 'step', lines: lines(words, 'copy')},
     {
       id: 'deadLetter',
@@ -20,6 +38,7 @@ export function retries(words: Words): {boxes: Box[]; links: Link[]} {
       h: 104,
       kind: 'bad',
       lines: lines(words, 'deadLetter'),
+      href: '/components/settlement/dead-letters/',
     },
     {id: 'dropped', x: 248, y: 220, w: 112, h: 104, kind: 'bad', lines: lines(words, 'dropped')},
     {id: 'arrives', x: 0, y: 352, w: 236, h: 58, kind: 'broker', lines: lines(words, 'arrives')},

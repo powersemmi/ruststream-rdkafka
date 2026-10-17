@@ -40,7 +40,16 @@ export function watermark(words: Words): {boxes: Box[]; links: Link[]} {
         lines: [String(offset), word(words, settled ? 'settled' : 'unsettled')],
       }),
     ),
-    {id: 'stored', x: 12, y: 112, w: 160, h: 58, kind: 'core', lines: lines(words, 'stored')},
+    {
+      id: 'stored',
+      x: 12,
+      y: 112,
+      w: 160,
+      h: 58,
+      kind: 'core',
+      lines: lines(words, 'stored'),
+      href: '/components/settlement/tracked/',
+    },
     {
       id: 'committed',
       x: 12,

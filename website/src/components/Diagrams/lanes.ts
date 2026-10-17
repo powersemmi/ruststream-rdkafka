@@ -24,7 +24,16 @@ export function lanes(words: Words): {boxes: Box[]; links: Link[]} {
   boxes.push(
     {id: 'consumer', x: 12, y: 66, w: 336, h: 44, kind: 'broker', lines: lines(words, 'consumer')},
     {id: 'stream', x: 12, y: 138, w: 336, h: 44, kind: 'broker', lines: lines(words, 'stream')},
-    {id: 'keyed', x: 12, y: 210, w: 336, h: 44, kind: 'core', lines: lines(words, 'keyed')},
+    {
+      id: 'keyed',
+      x: 12,
+      y: 210,
+      w: 336,
+      h: 44,
+      kind: 'core',
+      lines: lines(words, 'keyed'),
+      href: '/components/subscriptions/lane-key/',
+    },
     ...LANE_X.map(
       (x, lane): Box => ({
         id: `lane${lane}`,
@@ -36,7 +45,16 @@ export function lanes(words: Words): {boxes: Box[]; links: Link[]} {
         lines: lines(words, `lane${lane}`),
       }),
     ),
-    {id: 'recordKey', x: 0, y: 368, w: 360, h: 44, kind: 'note', lines: lines(words, 'recordKey')},
+    {
+      id: 'recordKey',
+      x: 0,
+      y: 368,
+      w: 360,
+      h: 44,
+      kind: 'note',
+      lines: lines(words, 'recordKey'),
+      href: '/components/subscriptions/lane-key/',
+    },
   );
   const links: Link[] = [
     ...PARTITION_LANES.map((_, partition) => ({

@@ -29,13 +29,32 @@ export function design(words: Words): {boxes: Box[]; links: Link[]} {
     box('runtime', 12, 128, 336, 36, {kind: 'core'}),
     box('crate', 0, 200, 360, 204, {kind: 'group'}),
     box('subscriber', left, 226, column, 58, {kind: 'broker', code: true}),
-    box('publishers', right, 226, column, 58, {kind: 'broker', code: true}),
-    box('tracker', left, 294, column, 30, {kind: 'broker'}),
-    box('eos', right, 294, column, 30, {kind: 'broker', code: true}),
-    box('broker', left, 334, column, 58, {kind: 'broker', code: true}),
-    box('descriptors', right, 334, column, 58, {kind: 'broker', code: true}),
+    box('publishers', right, 226, column, 58, {
+      kind: 'broker',
+      code: true,
+      href: '/components/publishing/',
+    }),
+    box('tracker', left, 294, column, 30, {
+      kind: 'broker',
+      href: '/components/settlement/tracked/',
+    }),
+    box('eos', right, 294, column, 30, {
+      kind: 'broker',
+      code: true,
+      href: '/components/transactions/exactly-once/eos-pipeline/',
+    }),
+    box('broker', left, 334, column, 58, {kind: 'broker', code: true, href: '/components/broker/'}),
+    box('descriptors', right, 334, column, 58, {
+      kind: 'broker',
+      code: true,
+      href: '/components/subscriptions/',
+    }),
     box('client', 0, 428, 360, 72, {kind: 'group'}),
-    box('consumer', left, 454, column, 36, {kind: 'broker', code: true}),
+    box('consumer', left, 454, column, 36, {
+      kind: 'broker',
+      code: true,
+      href: '/architecture/kafka/consumer/',
+    }),
     box('producer', right, 454, column, 36, {kind: 'broker', code: true}),
     box('cluster', 12, 524, 336, 36, {kind: 'broker'}),
   ];
