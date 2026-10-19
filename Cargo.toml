@@ -42,7 +42,7 @@ apache-avro = { version = "0.22", features = ["derive"] }
 # very version - so the version a service must match belongs in the manifest, not in a re-export.
 prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
-protox = "0.9"
+protox = "0.10"
 # The in-process cluster's pattern subscriptions, behind the `testing` feature.
 regex = "1"
 
