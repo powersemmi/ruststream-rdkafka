@@ -10,8 +10,6 @@
 
 #![cfg(feature = "testing")]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::time::Duration;
 
@@ -25,33 +23,7 @@ use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::context::keys::{Key, Source, Topic};
 use ruststream_rdkafka::{KafkaBroker, KafkaPublish, PARTITION_KEY_HEADER};
 
-/// Counts this thread's allocations. The reads under test run on it and nothing else does.
-struct Counting;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        // SAFETY: the layout is the caller's, forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the pointer and layout are the caller's, forwarded unchanged.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-/// What this thread has allocated so far.
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
-}
+use crate::alloc_watch::allocations;
 
 /// Reads of one field in a counted window, enough that a per-read copy cannot hide in a rounding.
 const READS: usize = 1_000;

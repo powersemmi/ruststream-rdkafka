@@ -12,11 +12,9 @@
 //!
 //! ```text
 //! just brokers-up
-//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test live_delivery_cost -- --test-threads=1
+//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test suite live_delivery_cost:: -- --test-threads=1
 //! ```
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::hint::black_box;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,36 +33,9 @@ use ruststream::{Broker, BuildContext as _, IncomingMessage, Subscriber};
 use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaMessage, KafkaTopic, StartOffset};
 
-mod live;
+use crate::alloc_watch::allocations;
 
-/// Counts this thread's allocations. A thread-local count rather than a global one: the client's
-/// own threads are not what this measures.
-struct Counting;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        // SAFETY: the layout is the caller's, forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the pointer and layout are the caller's, forwarded unchanged.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-/// What this thread has allocated so far.
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
-}
+use crate::live;
 
 /// Deliveries consumed before the first count, so nothing the subscription paid once is read as
 /// a per-delivery cost.

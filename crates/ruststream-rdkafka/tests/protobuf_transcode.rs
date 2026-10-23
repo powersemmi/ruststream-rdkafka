@@ -21,7 +21,7 @@ use ruststream_rdkafka::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-mod live;
+use crate::live;
 
 /// The fixed reply topic (the macro's `reply(..)` takes a string literal). Runs share it:
 /// each pins its own uniquely-named subject on the `SchemaFrame`, so its messages carry a

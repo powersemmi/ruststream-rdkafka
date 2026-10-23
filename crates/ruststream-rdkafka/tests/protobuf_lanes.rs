@@ -14,8 +14,6 @@ use ruststream::{IncomingMessage, Subscriber};
 use ruststream_rdkafka::{ConnectedKafkaBroker, KafkaTopic, StartOffset};
 use serde::Deserialize;
 
-mod live;
-
 /// What the transcoding consumer sees: the same shape as plain JSON.
 #[derive(Debug, PartialEq, Deserialize)]
 struct ConfirmationJson {
@@ -334,7 +332,7 @@ message Confirmation {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         use super::{CONFIRMATIONS_PROTO, PlainConfirmation, PlainOrder};
-        use crate::{Seeded, envelope, framed};
+        use crate::protobuf_lanes::{Seeded, envelope, framed};
 
         const CONFIRMATIONS_ID: u32 = 21;
 
@@ -606,7 +604,7 @@ message Confirmation {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         use super::{CONFIRMATIONS_PROTO, ReplyConfirmation, ReplyOrder};
-        use crate::{Seeded, envelope, framed};
+        use crate::protobuf_lanes::{Seeded, envelope, framed};
 
         const CONFIRMATIONS_ID: u32 = 31;
         const REPLY_TOPIC: &str = "in-process-reply-confirmations";

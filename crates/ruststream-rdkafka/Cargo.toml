@@ -11,6 +11,8 @@ authors.workspace = true
 readme = "../../README.md"
 keywords = ["kafka", "messaging", "broker", "streaming", "ruststream"]
 categories = ["asynchronous", "network-programming"]
+# Every file under `tests/` is a module of one test binary: one link instead of one per file.
+autotests = false
 
 [lints]
 workspace = true
@@ -100,6 +102,10 @@ features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 # the ones a page shows carry the tests that prove what the page says.
 
 # --- examples: broker ---
+
+[[test]]
+name = "suite"
+path = "tests/main.rs"
 
 [[example]]
 name = "kafka_quickstart"
