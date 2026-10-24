@@ -82,6 +82,10 @@ ruststream = { workspace = true, features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+# Builds the examples' tests into one test binary (`tests/examples.rs`) instead of a test binary
+# per example. It lives in the core repository and is not published: a dev-dependency without a
+# version is dropped on publish.
+ruststream-example-suite = { git = "https://github.com/powersemmi/ruststream", branch = "main" }
 wiremock = "0.6"
 schema_registry_converter = { version = "5", default-features = false, features = ["avro", "rustls_tls", "futures"] }
 
@@ -107,16 +111,19 @@ features = ["testing", "schema-registry", "avro", "protobuf", "asyncapi"]
 name = "suite"
 path = "tests/main.rs"
 
+# The tests of the examples, one module per example, in a binary of their own beside the suite.
+[[test]]
+name = "examples"
+path = "tests/examples.rs"
+
 [[example]]
 name = "kafka_quickstart"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_quickstart"
 path = "examples/manual/kafka_quickstart.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_producer"
@@ -124,604 +131,496 @@ name = "kafka_producer"
 [[example]]
 name = "kafka_broker_config"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_config"
 path = "examples/manual/kafka_broker_config.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_broker_security"
 required-features = ["testing", "ssl"]
-test = true
 
 [[example]]
 name = "kafka_broker_startup"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_broker_shutdown"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_broker_prelude"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_broker_errors"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_prelude"
 path = "examples/manual/kafka_broker_prelude.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_security"
 path = "examples/manual/kafka_broker_security.rs"
 required-features = ["testing", "ssl"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_startup"
 path = "examples/manual/kafka_broker_startup.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_shutdown"
 path = "examples/manual/kafka_broker_shutdown.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_broker_errors"
 path = "examples/manual/kafka_broker_errors.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_testing"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_testing"
 path = "examples/manual/kafka_testing.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_testing_live"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_testing_live"
 path = "examples/manual/kafka_testing_live.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_asyncapi"
 required-features = ["asyncapi", "schema-registry"]
-test = true
 
 [[example]]
 name = "manual_kafka_asyncapi"
 path = "examples/manual/kafka_asyncapi.rs"
 required-features = ["asyncapi", "schema-registry"]
-test = true
 
 # --- examples: subscriptions ---
 
 [[example]]
 name = "kafka_subscriptions_name"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_subscriptions_name"
 path = "examples/manual/kafka_subscriptions_name.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_topics"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_topics"
 path = "examples/manual/kafka_topics.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_multi_topic"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_multi_topic"
 path = "examples/manual/kafka_multi_topic.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_subscriptions_partitions"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_subscriptions_partitions"
 path = "examples/manual/kafka_subscriptions_partitions.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_subscriptions_start_offset"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_subscriptions_start_offset"
 path = "examples/manual/kafka_subscriptions_start_offset.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_subscriptions_assignment"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_subscriptions_assignment"
 path = "examples/manual/kafka_subscriptions_assignment.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_keys"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_keys"
 path = "examples/manual/kafka_keys.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_subscriptions_passthrough"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_subscriptions_passthrough"
 path = "examples/manual/kafka_subscriptions_passthrough.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_batches"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_batches"
 path = "examples/manual/kafka_batches.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_seek"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_seek"
 path = "examples/manual/kafka_seek.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_positions_timestamp"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_positions_timestamp"
 path = "examples/manual/kafka_positions_timestamp.rs"
 required-features = ["testing"]
-test = true
 
 # --- examples: settlement ---
 
 [[example]]
 name = "kafka_retries"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_retries"
 path = "examples/manual/kafka_retries.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_distribution"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_distribution"
 path = "examples/manual/kafka_distribution.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_settlement_commit"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_settlement_commit"
 path = "examples/manual/kafka_settlement_commit.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_settlement_source_topic"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_settlement_source_topic"
 path = "examples/manual/kafka_settlement_source_topic.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_context_fields"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_context_fields"
 path = "examples/manual/kafka_context_fields.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_context_batch"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_context_batch"
 path = "examples/manual/kafka_context_batch.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_publishing_publish"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_publishing_publish"
 path = "examples/manual/kafka_publishing_publish.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_publishing_durability"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_publishing_durability"
 path = "examples/manual/kafka_publishing_durability.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_publishing_keys"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_publishing_keys"
 path = "examples/manual/kafka_publishing_keys.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_publishing_partition"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_publishing_partition"
 path = "examples/manual/kafka_publishing_partition.rs"
 required-features = ["testing"]
-test = true
 
 # --- examples: transactions ---
 
 [[example]]
 name = "kafka_transactions"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_transactions"
 path = "examples/manual/kafka_transactions.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_transactions_partitions"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_transactions_partitions"
 path = "examples/manual/kafka_transactions_partitions.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_eos"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_eos"
 path = "examples/manual/kafka_eos.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_eos_replies"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_eos_replies"
 path = "examples/manual/kafka_eos_replies.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_eos_pipeline"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_eos_pipeline"
 path = "examples/manual/kafka_eos_pipeline.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "kafka_protobuf_transcode"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_protobuf_transcode"
 path = "examples/manual/kafka_protobuf_transcode.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "kafka_protobuf_plain"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_protobuf_plain"
 path = "examples/manual/kafka_protobuf_plain.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "kafka_protobuf_framed"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_protobuf_framed"
 path = "examples/manual/kafka_protobuf_framed.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "kafka_protobuf_frame"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_protobuf_frame"
 path = "examples/manual/kafka_protobuf_frame.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 # --- examples: registry ---
 
 [[example]]
 name = "kafka_schema_registry"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "kafka_avro"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_third_party_registry"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_avro_codec"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_envelope"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_envelope"
 path = "examples/manual/kafka_registry_envelope.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_schema_registry"
 path = "examples/manual/kafka_schema_registry.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_avro"
 path = "examples/manual/kafka_avro.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_avro_codec"
 path = "examples/manual/kafka_avro_codec.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_avro_local"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_avro_local"
 path = "examples/manual/kafka_avro_local.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_avro_resolve"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_avro_resolve"
 path = "examples/manual/kafka_avro_resolve.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_framed"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_register"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_prefetch"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_missing"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_cache"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_framed"
 path = "examples/manual/kafka_registry_framed.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_register"
 path = "examples/manual/kafka_registry_register.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_prefetch"
 path = "examples/manual/kafka_registry_prefetch.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_missing"
 path = "examples/manual/kafka_registry_missing.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_cache"
 path = "examples/manual/kafka_registry_cache.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_client"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_client"
 path = "examples/manual/kafka_registry_client.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_custom_client"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "kafka_registry_subject"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_subject"
 path = "examples/manual/kafka_registry_subject.rs"
 required-features = ["schema-registry", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_registry_custom_client"
 path = "examples/manual/kafka_registry_custom_client.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_kafka_third_party_registry"
 path = "examples/manual/kafka_third_party_registry.rs"
 required-features = ["avro", "testing"]
-test = true
 
 # --- examples: guides ---
 
@@ -733,99 +632,83 @@ test = true
 name = "guide_getting_started"
 path = "examples/guide/getting_started.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_getting_started"
 path = "examples/manual/guide/getting_started.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "guide_testing"
 path = "examples/guide/testing.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_testing"
 path = "examples/manual/guide/testing.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "guide_production"
 path = "examples/guide/production.rs"
 required-features = ["testing", "ssl"]
-test = true
 
 [[example]]
 name = "manual_guide_production"
 path = "examples/manual/guide/production.rs"
 required-features = ["testing", "ssl"]
-test = true
 
 # guides: groups and ordering, commits, retries
 [[example]]
 name = "guide_groups_and_ordering"
 path = "examples/guide/groups_and_ordering.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_groups_and_ordering"
 path = "examples/manual/guide/groups_and_ordering.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "guide_commits"
 path = "examples/guide/commits.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_commits"
 path = "examples/manual/guide/commits.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "guide_retries"
 path = "examples/guide/retries.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_retries"
 path = "examples/manual/guide/retries.rs"
 required-features = ["testing"]
-test = true
 
 # guides: replay, exactly-once
 [[example]]
 name = "guide_replay"
 path = "examples/guide/replay.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_replay"
 path = "examples/manual/guide/replay.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "guide_exactly_once"
 path = "examples/guide/exactly_once.rs"
 required-features = ["testing"]
-test = true
 
 [[example]]
 name = "manual_guide_exactly_once"
 path = "examples/manual/guide/exactly_once.rs"
 required-features = ["testing"]
-test = true
 
 # guides: schema registry, protobuf
 
@@ -833,24 +716,20 @@ test = true
 name = "guide_schema_registry"
 path = "examples/guide/schema_registry.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "manual_guide_schema_registry"
 path = "examples/manual/guide/schema_registry.rs"
 required-features = ["avro", "testing"]
-test = true
 
 [[example]]
 name = "guide_protobuf"
 path = "examples/guide/protobuf.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 [[example]]
 name = "manual_guide_protobuf"
 path = "examples/manual/guide/protobuf.rs"
 required-features = ["protobuf", "testing"]
-test = true
 
 # --- examples: architecture ---
