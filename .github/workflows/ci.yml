@@ -224,6 +224,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/target-minimal
         run: |
           cargo check --locked -p ruststream-rdkafka-bench --all-targets
+          cargo check --locked -p ruststream-rdkafka --examples --all-features
           cargo test --locked --workspace --all-features --no-fail-fast --tests
           cargo test --locked --workspace --all-features --no-fail-fast --doc
 
@@ -337,6 +338,7 @@ jobs:
         # `--tests` and not every target: the examples' tests are modules of one test binary, so
         # an example needs no binary of its own, and clippy has already compiled each one.
         run: |
+          cargo check --locked -p ruststream-rdkafka --examples --all-features
           cargo test --locked --workspace --all-features --no-fail-fast --tests
           cargo test --locked --workspace --all-features --no-fail-fast --doc
 
@@ -367,6 +369,7 @@ jobs:
         # `--tests` and not every target: the examples' tests are modules of one test binary, so
         # an example needs no binary of its own, and clippy has already compiled each one.
         run: |
+          cargo check --locked -p ruststream-rdkafka --examples --all-features
           cargo test --locked --workspace --all-features --no-fail-fast --tests
           cargo test --locked --workspace --all-features --no-fail-fast --doc
 
