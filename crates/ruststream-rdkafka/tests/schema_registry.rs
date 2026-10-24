@@ -391,7 +391,7 @@ async fn unknown_ids_and_subjects_error_clearly() {
 
 // --- live tests: a real registry (and, for the prefetch path, a real Kafka) ---
 
-mod live;
+use crate::live;
 
 fn registry_url() -> Option<String> {
     live::url("SCHEMA_REGISTRY_TEST_URL")

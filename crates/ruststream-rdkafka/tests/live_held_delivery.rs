@@ -15,11 +15,9 @@
 //!
 //! ```text
 //! just brokers-up
-//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test live_held_delivery -- --test-threads=1
+//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test suite live_held_delivery:: -- --test-threads=1
 //! ```
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::fs;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,47 +34,9 @@ use rdkafka::util::Timeout;
 use ruststream::{Broker as _, ConnectedBroker as _, IncomingMessage as _, Subscriber as _};
 use ruststream_rdkafka::{KafkaBroker, KafkaTopic, StartOffset};
 
-mod live;
+use crate::alloc_watch::{largest, mark};
 
-thread_local! {
-    /// The largest single block this thread has asked the allocator for since the last mark.
-    static LARGEST: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Watches this thread's allocation sizes. A thread-local watch rather than a global one: the
-/// client's own threads allocate the fetch buffers, which is what this test wants the delivery
-/// to be reading from.
-struct Watching;
-
-unsafe impl GlobalAlloc for Watching {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LARGEST.with(|largest| {
-            if layout.size() > largest.get() {
-                largest.set(layout.size());
-            }
-        });
-        // SAFETY: the layout is the caller's, forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the pointer and layout are the caller's, forwarded unchanged.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Watching = Watching;
-
-/// Forgets what was allocated before the window under test.
-fn mark() {
-    LARGEST.with(|largest| largest.set(0));
-}
-
-/// The largest block this thread took since [`mark`].
-fn largest() -> usize {
-    LARGEST.with(Cell::get)
-}
+use crate::live;
 
 /// How many threads this process runs, which is how the client's own threads are observed
 /// without a handle on the client: librdkafka starts them when a consumer is created and joins

@@ -120,7 +120,7 @@ fn unique(base: &str) -> String {
     )
 }
 
-mod live;
+use crate::live;
 
 /// The registry and cluster addresses, or `None` to skip.
 fn live_urls() -> Option<(String, String)> {

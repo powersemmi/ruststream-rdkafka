@@ -29,7 +29,7 @@ use ruststream_rdkafka::{
 use tokio::runtime::Handle;
 use tokio::task;
 
-mod live;
+use crate::live;
 
 fn kafka_url() -> Option<String> {
     live::url("KAFKA_TEST_URL")

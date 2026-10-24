@@ -23,7 +23,11 @@ check:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
 
 test:
-    cargo test --workspace --all-features
+    # The examples' tests are modules of one test binary, so `--tests` builds none per example;
+    # `check` compiles every example on its own. `--tests` leaves the doc examples out, so they
+    # run on their own line.
+    cargo test --workspace --all-features --tests
+    cargo test --workspace --all-features --doc
 
 brokers-up:
     docker compose -f docker-compose.test.yml up -d --wait
@@ -40,7 +44,7 @@ test-brokers: brokers-up
     KAFKA_TEST_URL=127.0.0.1:9092 \
     SCHEMA_REGISTRY_TEST_URL=http://127.0.0.1:8081 \
     RUSTSTREAM_REQUIRE_LIVE=1 \
-        cargo test --workspace --all-features -- --test-threads=1
+        cargo test --workspace --all-features --tests -- --test-threads=1
 
 # What this crate costs over the rdkafka client it wraps, and what the runtime costs on top: two
 # scenarios, each run three times over - the client driven directly, this crate's own consumer,

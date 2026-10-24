@@ -30,7 +30,7 @@ use ruststream_rdkafka::{
 #[cfg(feature = "testing")]
 use serde::{Deserialize, Serialize};
 
-mod live;
+use crate::live;
 
 /// Well inside the group's rebalance timeout (`max.poll.interval.ms`, five minutes), which is how
 /// long a group waits for a member nobody polls: a stalled join fails the test at this bound.
