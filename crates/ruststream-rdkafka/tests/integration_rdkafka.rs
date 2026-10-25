@@ -48,7 +48,7 @@ use tokio::sync::Notify;
 
 const WAIT: Duration = Duration::from_secs(15);
 
-mod live;
+use crate::live;
 
 fn kafka_url() -> Option<String> {
     live::url("KAFKA_TEST_URL")

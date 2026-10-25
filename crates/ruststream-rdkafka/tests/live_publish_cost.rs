@@ -18,11 +18,9 @@
 //!
 //! ```text
 //! just brokers-up
-//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test live_publish_cost -- --test-threads=1
+//! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --test suite live_publish_cost:: -- --test-threads=1
 //! ```
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -46,7 +44,9 @@ use ruststream_rdkafka::{
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use tikv_jemalloc_ctl::thread;
 
-mod live;
+use crate::alloc_watch::allocations;
+
+use crate::live;
 
 /// What this thread has allocated through the C allocator so far, in bytes: librdkafka's
 /// allocations, and Rust's, which reach the same allocator through the system one.
@@ -58,35 +58,6 @@ fn natively_allocated() -> u64 {
     thread::allocatedp::read()
         .expect("jemalloc reports its per-thread counter")
         .get()
-}
-
-/// Counts this thread's allocations. A thread-local count rather than a global one: the client's
-/// own threads are not what this measures.
-struct Counting;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        // SAFETY: the layout is the caller's, forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the pointer and layout are the caller's, forwarded unchanged.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-/// What this thread has allocated so far.
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
 }
 
 /// The body every record carries.

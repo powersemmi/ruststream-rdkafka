@@ -21,7 +21,7 @@ use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaTopic, StartOffset};
 use serde::{Deserialize, Serialize};
 
-mod live;
+use crate::live;
 
 /// The topic the handler reads; fixed, because the subscription names it in the attribute.
 const ORDERS: &str = "both-modes-orders";

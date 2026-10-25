@@ -6,44 +6,13 @@
 //! because content equality and addresses cannot tell a hand-over from a copy.
 #![cfg(all(feature = "protobuf", feature = "testing"))]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
-
 use ruststream::testing::InProcess as _;
 use ruststream::{HeaderMap, OutgoingMessage, PublishPolicy, Publisher};
 use ruststream_rdkafka::{KafkaBroker, KafkaFramedPublish, KafkaPublish, SchemaRegistry};
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Counts this thread's allocations, so the cost of one publish can be read off directly. A
-/// thread-local count rather than a global one: nothing another thread does belongs in this
-/// measurement.
-struct Counting;
-
-thread_local! {
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.with(|count| count.set(count.get() + 1));
-        // SAFETY: the layout is the caller's, forwarded unchanged to the system allocator.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the pointer and layout are the caller's, forwarded unchanged.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
-
-/// What this thread has allocated so far.
-fn allocations() -> usize {
-    ALLOCATIONS.with(Cell::get)
-}
+use crate::alloc_watch::allocations;
 
 /// One message declaring one message type, which is all the framing needs to resolve an index
 /// path.

@@ -20,7 +20,7 @@ use ruststream::{Outgoing, subscriber};
 use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
 use serde::{Deserialize, Serialize};
 
-mod live;
+use crate::live;
 
 /// A group forms on the stand in seconds, and each join rebalances it again.
 const DEADLINE: Duration = Duration::from_secs(30);
