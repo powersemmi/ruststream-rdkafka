@@ -1,0 +1,110 @@
+# ruststream-rdkafka
+
+> `ruststream-rdkafka` is the Apache Kafka broker crate for RustStream, a Rust framework for services that subscribe to message brokers and publish to them. It runs over `rdkafka` and librdkafka: a subscription is one consumer in one consumer group, Kafka settles by committed position, and the Confluent Schema Registry with Avro and Protobuf is part of the crate.
+
+A subscription is a descriptor: `KafkaTopic` (one topic in one group), `KafkaTopics` (several topics or a pattern) or `KafkaPartitions` (a manual assignment); a bare `#[subscriber("orders")]` reads the topic in the broker's default group. A service imports `ruststream_rdkafka::prelude::*`, which offers the policies as `Publish`, `TransactionalPublish`, `PartitionedPublish` and `EosPublish`; the record key and partition of one publish are its per-message settings. Every librdkafka property the crate does not type is reachable through the `config` passthroughs. A `cargo generate` template, `templates/kafka-topic`, scaffolds a service.
+
+This site holds the guides, one page per component and the architecture of the crate; the API reference is on docs.rs, and the framework itself is documented on the RustStream site.
+
+## Guides
+
+- [Guides](https://powersemmi.github.io/ruststream-rdkafka/latest/): building a Kafka service with the crate, from a first subscriber to a production cluster
+- [Getting started](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/getting-started/): installation, a local Kafka, a first subscriber against it and its test without a cluster
+- [Topics, consumer groups and ordering](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/groups-and-ordering/): consumer groups, per-key order on parallel lanes, and records placed by key, by number or in turn
+- [Commits and delivery guarantees](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/commits/): what `ack` and `nack` commit, librdkafka's own commits, `Commit::Tracked` and batches
+- [Retries and dead-letter topics](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/retries/): a retry now or later, the attempt cap and the dead-letter topic, on one topic or several
+- [Replay and seeking](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/replay/): reading a topic again from the start or from a moment, and seeking from inside a handler
+- [Transactions and exactly-once](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/exactly-once/): records published as one transaction, transactions under a worker pool, and an exactly-once pipeline
+- [Schema Registry: Avro and JSON Schema](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/schema-registry/): Avro and JSON Schema records under the Confluent envelope, checked against the registry at startup
+- [Protobuf with the Confluent envelope](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/protobuf/): `prost` messages read framed without a registry and framed replies
+- [Testing a Kafka service](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/testing/): `TestApp` on the production app with keyed records, replies and delays, and the same test against a cluster
+- [Connecting to a production cluster](https://powersemmi.github.io/ruststream-rdkafka/latest/guides/production/): SASL and TLS, producer durability, timeouts, per-subscription overrides and a test of the configuration
+
+## Components
+
+- [Components](https://powersemmi.github.io/ruststream-rdkafka/latest/components/): the parts of the crate a Kafka service uses, one page each
+- [KafkaBroker](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/): the broker type, its bootstrap servers and its lazy connection
+- [Config](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/config/): `config` and `producer_config`, any librdkafka property for every client or for the producer
+- [Security](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/security/): SASL and TLS through `config`, and the `ssl` and `ssl-vendored` features
+- [Startup](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/startup/): the cluster probe within `connect_timeout` and the wait for assignments within `assignment_timeout`
+- [Shutdown](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/shutdown/): the flush within `flush_timeout`, and `KafkaError::Closed` for a publisher used afterwards
+- [Prelude](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/prelude/): `ruststream_rdkafka::prelude`, the one glob a Kafka service imports
+- [Errors](https://powersemmi.github.io/ruststream-rdkafka/latest/components/broker/errors/): `KafkaError`, the one error type of the crate
+- [Subscriptions](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/): a topic name in `#[subscriber]` and the descriptors that carry every other setting
+- [KafkaTopic](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topic/): one topic in one consumer group
+- [KafkaTopics](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topics/): a list of topics through one consumer and one group
+- [Patterns](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/patterns/): `KafkaTopics::pattern`, every topic a `^` regex matches, later ones included
+- [KafkaPartitions](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-partitions/): a fixed list of partitions with no group and no rebalance
+- [StartOffset](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/start-offset/): where a group starts on a partition with no committed offset
+- [Assignment](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/assignment/): the group's rebalance strategy, eager or cooperative sticky
+- [LaneKey](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/lane-key/): what `workers(n, by_key)` keys a lane by, the source partition or the record key
+- [Passthrough](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/passthrough/): a descriptor's `config`, any consumer property for one subscription
+- [Batches](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/batches/): slice handlers over what librdkafka has already fetched
+- [Commit](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/): what an `ack` or a `nack` does on Kafka under each commit mode
+- [Auto](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/auto/): `Commit::Auto`, librdkafka's timer commit, where an `ack` is advisory
+- [Tracked](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/tracked/): `Commit::Tracked`, commits below the lowest unsettled delivery
+- [Retries](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/retries/): `retry_after`, a copy republished to the subscription with its delivery count
+- [Dead letters](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/dead-letters/): `dead_letter`, the topic a delivery that reached its cap goes to
+- [ToSourceTopic](https://powersemmi.github.io/ruststream-rdkafka/latest/components/settlement/to-source-topic/): retry copies sent back to the topic each delivery came from
+- [KafkaContext](https://powersemmi.github.io/ruststream-rdkafka/latest/components/context/): a record's topic, partition, offset, timestamp and key, read through `Ctx<K>`
+- [KafkaBatchContext](https://powersemmi.github.io/ruststream-rdkafka/latest/components/context/batch-context/): a batch handler's context and its seek handle
+- [KafkaPosition](https://powersemmi.github.io/ruststream-rdkafka/latest/components/positions/): a place in the log: either end, an offset, an offset of one topic, or a timestamp
+- [start_at](https://powersemmi.github.io/ruststream-rdkafka/latest/components/positions/start-at/): a subscription opened at a position on every startup
+- [Seek](https://powersemmi.github.io/ruststream-rdkafka/latest/components/positions/seek/): a running subscription moved from its handler through `Ctx<SeekHandle>`
+- [KafkaPublish](https://powersemmi.github.io/ruststream-rdkafka/latest/components/publishing/): the plain publish policy, `Publish` in the prelude
+- [Keys](https://powersemmi.github.io/ruststream-rdkafka/latest/components/publishing/keys/): the partition-key header as the record's native key
+- [partition](https://powersemmi.github.io/ruststream-rdkafka/latest/components/publishing/partition/): one record pinned to a partition by a per-message setting
+- [RoundRobin](https://powersemmi.github.io/ruststream-rdkafka/latest/components/publishing/round-robin/): replies spread over a fixed partition count
+- [Durability](https://powersemmi.github.io/ruststream-rdkafka/latest/components/publishing/durability/): the producer's acks, and at-least-once from input to output
+- [Transactions](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/): `transactional_id`, publishes that become visible together or not at all
+- [per_partition](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/per-partition/): a transactional publisher per source partition, for a worker pool
+- [Exactly once](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/): `EosPublish`, consumed offsets committed inside the producer's transaction
+- [EosReplies](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-replies/): every reply joined to the pipeline's open transaction
+- [EosPipeline](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-pipeline/): a record sent into the open transaction by hand
+- [Schema Registry](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/): `SchemaRegistry`, the Confluent Schema Registry client
+- [Registration](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/registration/): `register`, `register_json`, `register_avro` and `warm`
+- [SchemaPrefetch](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/schema-prefetch/): every subject resolved at connect, so codecs run without I/O
+- [MissingSubject](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/missing-subject/): what a codec does when the registry no longer holds its subject
+- [Cache](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/cache/): `SchemaCachePolicy`, the bounds of the registry cache
+- [RegistryClient](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/registry-client/): the registry's transport, `HttpRegistryClient` or one of your own
+- [SubjectStrategy](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/subject-strategy/): how a subject is named, and `SchemaFrame::subject` for one topic
+- [SchemaFramed](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/schema-framed/): a codec such as `JsonCodec` wrapped in the Confluent envelope
+- [JSON transcode](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/json-transcode/): `schema_registry` and `SchemaFrame`, framed payloads as plain JSON at the broker's edges
+- [Envelope](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/envelope/): `parse_envelope` and `encode_envelope`, the Confluent wire format
+- [Third-party clients](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/third-party/): another registry stack's framed bytes on the byte lanes
+- [Avro](https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/): `AvroCodec::registry`, each delivery read with its writer schema
+- [Local](https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/local/): `AvroCodec::local`, one pinned schema and a bare datum with no registry
+- [resolve_onto](https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/resolve-onto/): every delivery read onto a reader schema
+- [Avro transcode](https://powersemmi.github.io/ruststream-rdkafka/latest/components/avro/transcode/): Avro as JSON on a broker with `schema_registry`
+- [Protobuf](https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/): a `prost` message on the byte lanes, and `decode_confluent` with no registry
+- [framed](https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/framed/): `KafkaPublish::framed`, the Confluent envelope on every publish of a policy
+- [ProtobufFrame](https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/protobuf-frame/): the app-wide layer that frames every Protobuf publish through a slot
+- [Protobuf transcode](https://powersemmi.github.io/ruststream-rdkafka/latest/components/protobuf/transcode/): framed Protobuf as JSON on a broker with `schema_registry`
+- [Kafka bindings](https://powersemmi.github.io/ruststream-rdkafka/latest/components/asyncapi/): the Kafka bindings of the AsyncAPI document behind the `asyncapi` feature
+- [Server](https://powersemmi.github.io/ruststream-rdkafka/latest/components/asyncapi/server/): the server's host and port coordinates and the schema registry
+- [Channels](https://powersemmi.github.io/ruststream-rdkafka/latest/components/asyncapi/channels/): the topic behind each channel
+- [Operations](https://powersemmi.github.io/ruststream-rdkafka/latest/components/asyncapi/operations/): the consumer group and client id of each operation
+- [Testing](https://powersemmi.github.io/ruststream-rdkafka/latest/components/testing/): `TestApp::start` with `KafkaBroker` on an in-process cluster behind the `testing` feature
+- [Live](https://powersemmi.github.io/ruststream-rdkafka/latest/components/testing/live/): `TestApp::start_live`, the same test body against a running Kafka
+
+## Architecture
+
+- [Architecture](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/): how Kafka works, where the crate sits between Kafka and the RustStream runtime, and what that costs
+- [Log](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/kafka/): topics, partitions and offsets
+- [Groups](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/kafka/groups/): consumer groups, partition ownership and rebalances
+- [Consumer](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/kafka/consumer/): the librdkafka consumer's fetch threads, its poll and its timer commit
+- [Kafka transactions](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/kafka/transactions/): records on several partitions and the consumed offsets made visible together
+- [Design](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/design/): one consumer per subscription and one shared producer, between the runtime and the client
+- [Lifecycle](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/lifecycle/): `new`, `connect`, a consumer per subscription at startup, and the flush at shutdown
+- [Path](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/path/): one record from the fetch queue through the handler and the reply to its commit
+- [Lanes](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/lanes/): one consumer per subscription, and `workers(n, by_key)` lanes keyed by partition
+- [Settlement](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/settlement/): what `ack`, drop, retry and `retry_after` become on a log settled by committed offset
+- [Benchmarks](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/benchmarks/): what the crate and the framework's runtime cost over the raw `rdkafka` client, and the cost of the crate's own code
+- [Benchmarks: Numbers](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/benchmarks/numbers/): what each published number measures, and what it does not allow you to conclude
+- [Benchmarks: Methodology](https://powersemmi.github.io/ruststream-rdkafka/latest/architecture/benchmarks/methodology/): the three loops, the run on a real broker and the code count with `just bench` and `just bench-code`
+
+## Optional
+
+- [API reference](https://docs.rs/ruststream-rdkafka): the full rustdoc of the crate, whose overview maps each module to its pages here
+- [RustStream llms.txt](https://powersemmi.github.io/ruststream/llms.txt): the index of the framework's own documentation
+- [Source](https://github.com/powersemmi/ruststream-rdkafka): the crate's repository and its template
