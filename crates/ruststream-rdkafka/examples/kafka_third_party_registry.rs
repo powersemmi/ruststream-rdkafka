@@ -42,8 +42,8 @@ struct Confirmation {
 /// The service's own registry stack, held as application state.
 #[derive(Clone)]
 struct Converter {
-    decoder: Arc<AvroDecoder<'static>>,
-    encoder: Arc<AvroEncoder<'static>>,
+    decoder: Arc<AvroDecoder>,
+    encoder: Arc<AvroEncoder>,
 }
 
 #[derive(FromRef)]
