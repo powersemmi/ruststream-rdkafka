@@ -20,7 +20,21 @@ workspace = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full", "extra-traits"] }
+syn = { version = "2", features = ["full", "extra-traits", "visit"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.9"
+# The parser serde's own derive and `schemars` read serde attributes with.
+serde_derive_internals = "0.30"
+# The syntax tree `serde_derive_internals` reads: the derive input is parsed again into it.
+syn3 = { package = "syn", version = "3", default-features = false, features = ["derive", "parsing", "printing", "clone-impls"] }
+
+[dev-dependencies]
+# The compile-time checks are compile errors, so their tests compile services of their own.
+trybuild = "1"
+ruststream-rdkafka = { workspace = true, features = ["schema-check", "schema-registry", "uuid", "chrono"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true, features = ["uuid1", "chrono04"] }
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }

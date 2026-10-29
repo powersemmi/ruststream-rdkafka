@@ -1,0 +1,5 @@
+error: variant `Split` is a tuple variant, which serde writes as an array the schema check does not compare; give its fields names
+  --> tests/json/fail/tuple_variant.rs:44:5
+   |
+44 |     Split(String, u32),
+   |     ^^^^^

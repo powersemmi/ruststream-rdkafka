@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Order",
+  "type": "object",
+  "properties": {
+    "channel": {
+      "$ref": "#/$defs/Channel"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_by": {
+      "type": "string"
+    },
+    "delivery": {
+      "$ref": "#/$defs/Delivery"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "orderId": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "payment": {
+      "$ref": "#/$defs/Payment"
+    },
+    "priority": {
+      "type": "integer",
+      "format": "int32",
+      "default": 0
+    },
+    "status": {
+      "$ref": "#/$defs/Status"
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "trace": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "required": [
+    "orderId",
+    "items",
+    "payment",
+    "channel",
+    "delivery",
+    "status",
+    "tags",
+    "created_by",
+    "created_at",
+    "trace"
+  ],
+  "$defs": {
+    "Address": {
+      "type": "object",
+      "properties": {
+        "line": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "line"
+      ]
+    },
+    "Channel": {
+      "description": "Internally tagged: a oneOf keyed by a const.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "Web"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "Store"
+            }
+          },
+          "$ref": "#/$defs/Store",
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "Phone"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "Delivery": {
+      "description": "Adjacently tagged.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "t": {
+              "type": "string",
+              "const": "Pickup"
+            }
+          },
+          "required": [
+            "t"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "c": {
+              "type": "object",
+              "properties": {
+                "eta_minutes": {
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "eta_minutes"
+              ]
+            },
+            "t": {
+              "type": "string",
+              "const": "Courier"
+            }
+          },
+          "required": [
+            "t",
+            "c"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "c": {
+              "$ref": "#/$defs/Address"
+            },
+            "t": {
+              "type": "string",
+              "const": "Mail"
+            }
+          },
+          "required": [
+            "t",
+            "c"
+          ]
+        }
+      ]
+    },
+    "Item": {
+      "type": "object",
+      "properties": {
+        "price": {
+          "type": "number",
+          "format": "double"
+        },
+        "qty": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sku": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sku",
+        "qty",
+        "price"
+      ]
+    },
+    "Payment": {
+      "description": "Externally tagged: a oneOf of a string enum and single-property objects.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "Cash"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Card": {
+              "type": "object",
+              "properties": {
+                "number": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "number"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Card"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "Voucher": {
+              "$ref": "#/$defs/Voucher"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "Voucher"
+          ]
+        }
+      ]
+    },
+    "Status": {
+      "description": "A string enum.",
+      "type": "string",
+      "enum": [
+        "new",
+        "in_progress"
+      ]
+    },
+    "Store": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "Voucher": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ]
+    }
+  }
+}

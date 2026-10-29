@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `map-value` (migration 0001_init): Order.tags{}: the field's type is a string, and the schema declares an integer
+  --> tests/json/fail/schema_map_values.rs:10:12
+   |
+10 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

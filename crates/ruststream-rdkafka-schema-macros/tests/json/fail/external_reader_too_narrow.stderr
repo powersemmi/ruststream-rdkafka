@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Stock` does not match subject `inventory-value` (migration 0001): Stock.qty: the schema admits integers outside the integer type's range (`i16` holds -32768..=32767, the schema admits -2147483648..=2147483647)
+ --> tests/json/fail/external_reader_too_narrow.rs:8:12
+  |
+8 | pub struct Stock {
+  |            ^^^^^ evaluation of `_` failed here
