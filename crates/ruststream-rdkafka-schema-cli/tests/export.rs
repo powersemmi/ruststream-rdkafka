@@ -4,11 +4,9 @@ use crate::support::Crate;
 
 /// Runs `migrate add` and `check` on a crate whose type derives `Schema` with the real derive.
 ///
-/// Ignored until the derive emits its export test (the `Schema` derive's export mode); run it
-/// with `cargo test -p ruststream-rdkafka-schema-cli -- --ignored` once it does. It builds
-/// `ruststream-rdkafka` into the fixture crate, which takes a few minutes the first time.
+/// It builds `ruststream-rdkafka` into the fixture crate, which takes a few minutes the first
+/// time.
 #[test]
-#[ignore = "needs the export test the `Schema` derive emits"]
 fn the_derive_exports_the_runtime_schema() {
     let rdkafka = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ruststream-rdkafka")
@@ -22,7 +20,8 @@ fn the_derive_exports_the_runtime_schema() {
              [workspace]\n\n[dependencies]\n\
              ruststream-rdkafka = {{ path = {rdkafka:?}, features = [\"avro\", \"schema-check\"] }}\n\
              apache-avro = {{ version = \"0.22\", features = [\"derive\"] }}\n\
-             serde = {{ version = \"1\", features = [\"derive\"] }}\n"
+             serde = {{ version = \"1\", features = [\"derive\"] }}\n\
+             serde_json = \"1\"\n"
         ),
     );
     krate.write(
