@@ -8,6 +8,8 @@
 mod lock;
 #[allow(dead_code)]
 mod migrations;
+#[allow(dead_code)]
+mod online;
 
 use proc_macro::TokenStream;
 
