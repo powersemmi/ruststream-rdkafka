@@ -4,3 +4,9 @@
 
 #[cfg(feature = "schema-check")]
 pub use ruststream_rdkafka_schema_macros::Schema;
+
+#[cfg(feature = "schema-check")]
+pub mod json;
+#[cfg(feature = "schema-check")]
+#[doc(hidden)]
+pub use json::__private as __json;
