@@ -10,6 +10,8 @@ use ruststream::{AddressedCopies, RedeliveryAddress, RedeliveryAddressed, Subscr
 use super::{Assignment, Commit, GroupSettings, LaneKey, Reader, StartOffset, SubscriptionPlan};
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
+#[cfg(feature = "schema-registry")]
+use crate::schema::{Schema, SubjectAfterSchema};
 use crate::subscriber::KafkaSubscriber;
 
 /// A subscription to one Kafka topic through one consumer group.
@@ -57,6 +59,9 @@ use crate::subscriber::KafkaSubscriber;
 pub struct KafkaTopic {
     topic: String,
     settings: GroupSettings,
+    /// What the topic opted into with `.schema(..)`; read once, while the subscription opens.
+    #[cfg(feature = "schema-registry")]
+    schema: Option<Schema>,
 }
 
 impl KafkaTopic {
@@ -66,7 +71,74 @@ impl KafkaTopic {
         Self {
             topic: topic.into(),
             settings: GroupSettings::default(),
+            #[cfg(feature = "schema-registry")]
+            schema: None,
         }
+    }
+
+    /// Turns the schema check on for this topic and names the namespace of its records.
+    ///
+    /// A string is the namespace, with the subjects the topic's name gives under
+    /// `TopicNameStrategy`: `<topic>-value` for the payload, `<topic>-key` for the key.
+    /// [`Schema::namespace`] names other subjects with `.value(..)` and `.key(..)`.
+    ///
+    /// When the subscription opens, the broker reads the newest schema of each subject from the
+    /// registry it carries ([`KafkaBroker::schema_prefetch`](crate::KafkaBroker::schema_prefetch))
+    /// and fails startup when the value subject is missing or declares no record of the
+    /// namespace. The key subject is checked the same way when it exists, and must exist when
+    /// `.key(..)` names it. A JSON Schema names no record, so a JSON subject is checked for
+    /// presence only. The check reads the registry once per topic and adds nothing to a
+    /// delivery.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Order { id: i64 }
+    ///
+    /// #[subscriber(KafkaTopic::new("orders").schema("com.acme.orders"))]
+    /// async fn on_order(order: &Order) -> HandlerOutcome {
+    ///     tracing::info!(order.id, "accepted");
+    ///     HandlerOutcome::ack()
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .schema_prefetch(prefetch);
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+    ///         b.include(on_order);
+    ///     })
+    /// }
+    /// # let _ = app;
+    /// ```
+    #[cfg(feature = "schema-registry")]
+    #[must_use]
+    pub fn schema(mut self, schema: impl Into<Schema>) -> Self {
+        self.schema = Some(schema.into());
+        self
+    }
+
+    // The subject overrides belong to `Schema`, after the namespace they override. These two
+    // exist only to turn the call a reader of the topic's other steps would try into an error
+    // that names that fix; their bound has no implementation, so neither can be called.
+    #[cfg(feature = "schema-registry")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn value<Subject: SubjectAfterSchema>(self, subject: Subject) -> Self {
+        drop(subject);
+        self
+    }
+
+    #[cfg(feature = "schema-registry")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn key<Subject: SubjectAfterSchema>(self, subject: Subject) -> Self {
+        drop(subject);
+        self
     }
 
     /// The consumer group for this subscription, overriding
@@ -207,7 +279,17 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopic {
         self,
         connected: &ConnectedKafkaBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
-        connected.open(self.into_plan()?).await
+        #[cfg(feature = "schema-registry")]
+        let schema = self.schema.clone();
+        let plan = self.into_plan()?;
+        #[cfg(feature = "schema-registry")]
+        if let Some(schema) = &schema {
+            schema.validate(&plan.name)?;
+            connected
+                .check_schemas(&plan.name, [(plan.name.as_str(), schema)])
+                .await?;
+        }
+        connected.open(plan).await
     }
 
     #[cfg(feature = "asyncapi")]
@@ -259,7 +341,7 @@ mod tests {
             panic!("a refused name must be an options error");
         };
         assert!(
-            message.contains("KafkaTopics::pattern"),
+            message.contains("KafkaTopicPattern"),
             "the error must name the form that does subscribe by pattern, got: {message}"
         );
     }

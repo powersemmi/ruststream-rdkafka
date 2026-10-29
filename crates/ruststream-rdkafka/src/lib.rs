@@ -58,5 +58,6 @@ pub use seek::{KafkaPosition, KafkaSeeker};
 
 pub use subscriber::KafkaSubscriber;
 pub use subscription::{
-    Assignment, Commit, KafkaPartitions, KafkaTopic, KafkaTopics, LaneKey, StartOffset,
+    Assignment, Commit, KafkaPartitions, KafkaTopic, KafkaTopicPattern, KafkaTopics, LaneKey,
+    StartOffset,
 };

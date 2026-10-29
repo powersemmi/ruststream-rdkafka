@@ -1,4 +1,4 @@
-//! Several topics, or a topic regex, consumed as one subscription.
+//! Several topics, named one by one, consumed as one subscription.
 
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
@@ -8,42 +8,16 @@ use ruststream::{NamedCopies, SubscriptionSource};
 use super::{Assignment, Commit, GroupSettings, LaneKey, Reader, StartOffset, SubscriptionPlan};
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
+#[cfg(feature = "schema-registry")]
+use crate::schema::{Schema, TopicSchemas};
 use crate::subscriber::KafkaSubscriber;
 
-/// One entry of the subscribed set: librdkafka reads a leading `^` as "this is a regex", so
-/// which of the two a name is belongs to the name, not to a flag beside the list.
-#[derive(Debug, Clone)]
-enum Subscribed {
-    Topic(String),
-    Pattern(String),
-}
-
-impl Subscribed {
-    fn as_str(&self) -> &str {
-        match self {
-            Self::Topic(name) | Self::Pattern(name) => name,
-        }
-    }
-
-    fn validate(&self) -> Result<(), KafkaError> {
-        super::reject_empty(self.as_str())?;
-        match self {
-            Self::Topic(name) => super::reject_pattern(name, "a topic of `KafkaTopics`"),
-            Self::Pattern(pattern) if pattern.starts_with('^') => Ok(()),
-            Self::Pattern(pattern) => Err(KafkaError::InvalidOptions(format!(
-                "pattern {pattern:?} must start with '^' (librdkafka's anchor for topic \
-                 regexes); without it the name would be subscribed literally"
-            ))),
-        }
-    }
-}
-
-/// A subscription to several topics, or to every topic matching a regex, through one consumer
-/// and one consumer group.
+/// A subscription to several topics, named one by one, through one consumer and one consumer
+/// group.
 ///
-/// All matched topics share the handler, and therefore its payload type; each delivery still
-/// reports the topic it came from. Topics created after the group formed are picked up on the
-/// next metadata refresh of a pattern subscription.
+/// All the topics share the handler, and therefore its payload type; each delivery still reports
+/// the topic it came from. Every topic matching a regex is
+/// [`KafkaTopicPattern`](crate::KafkaTopicPattern), which [`pattern`](Self::pattern) starts.
 ///
 /// One such subscription reads many destinations and a copy published to any one of them would
 /// come back on the wrong topic, so this form leaves the retry destination to the mount site:
@@ -73,89 +47,139 @@ impl Subscribed {
 /// ```
 #[derive(Debug, Clone)]
 pub struct KafkaTopics {
-    entries: Vec<Subscribed>,
+    entries: Vec<String>,
     /// The subscribed names joined with `,`: the handler metadata name, kept as an owned string
     /// because the trait hands it out as a borrow.
     name: String,
     settings: GroupSettings,
+    /// The topics that opted in with `.schema(..)`; read once, while the subscription opens.
+    #[cfg(feature = "schema-registry")]
+    schemas: TopicSchemas,
 }
 
 impl KafkaTopics {
-    fn from_entries(entries: Vec<Subscribed>) -> Self {
-        let name = entries
-            .iter()
-            .map(Subscribed::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        Self {
-            entries,
-            name,
-            settings: GroupSettings::default(),
-        }
-    }
-
-    fn push(mut self, entry: Subscribed) -> Self {
-        if !self.name.is_empty() {
-            self.name.push(',');
-        }
-        self.name.push_str(entry.as_str());
-        self.entries.push(entry);
-        self
-    }
-
     /// Describes a subscription to every one of `topics`, by literal name.
     #[must_use]
     pub fn new(topics: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self::from_entries(
-            topics
-                .into_iter()
-                .map(|topic| Subscribed::Topic(topic.into()))
-                .collect(),
-        )
+        let entries: Vec<String> = topics.into_iter().map(Into::into).collect();
+        Self {
+            name: entries.join(","),
+            entries,
+            settings: GroupSettings::default(),
+            #[cfg(feature = "schema-registry")]
+            schemas: TopicSchemas::default(),
+        }
     }
 
-    /// Describes a subscription to every existing topic matching `pattern`.
+    /// Describes a subscription to every topic matching `pattern`: a
+    /// [`KafkaTopicPattern`](crate::KafkaTopicPattern), the form a regex subscription takes.
     ///
-    /// The pattern is a librdkafka topic regex and must start with `^` (that anchor is how
-    /// librdkafka distinguishes a pattern from a literal name); subscribing fails with a clear
-    /// error otherwise.
+    /// The `#[subscriber(..)]` attribute reads the descriptor's type off the constructor it
+    /// starts from, so the attribute names the pattern form directly with
+    /// [`KafkaTopicPattern::new`](crate::KafkaTopicPattern::new); this constructor serves code
+    /// that builds the descriptor as a value.
     ///
     /// # Examples
     ///
     /// ```
-    /// use ruststream_rdkafka::prelude::*;
-    /// # #[derive(serde::Deserialize)]
-    /// # struct Event { kind: String }
+    /// use std::future::{Future, ready};
     ///
-    /// #[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-svc"))]
-    /// async fn archive(event: &Event, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
-    ///     tracing::info!(kind = %event.kind, %topic, "recorded");
-    ///     HandlerOutcome::ack()
+    /// use ruststream::schemars::{self, JsonSchema};
+    /// use ruststream_rdkafka::prelude::*;
+    /// use serde::Deserialize;
+    ///
+    /// #[derive(Deserialize, JsonSchema)]
+    /// struct Event {
+    ///     kind: String,
     /// }
     ///
-    /// fn app() -> RustStream {
+    /// /// Records every audit event, whichever `audit.*` topic carried it.
+    /// struct Archive;
+    ///
+    /// impl Handle<Event> for Archive {
+    ///     fn handle(
+    ///         &self,
+    ///         event: &Event,
+    ///         _outs: &(),
+    ///         _ctx: &mut Context<'_>,
+    ///     ) -> impl Future<Output = Result<(), HandlerOutcome>> {
+    ///         tracing::info!(kind = %event.kind, "recorded");
+    ///         ready(Ok(()))
+    ///     }
+    /// }
+    ///
+    /// fn app() -> impl App {
+    ///     let audit = KafkaTopics::pattern("^audit\\..*").group("audit-svc");
     ///     RustStream::new(AppInfo::new("audit", "0.1.0"))
     ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-    ///             b.include(archive);
+    ///             b.include(subscriber(audit, Archive).build());
     ///         })
     /// }
     /// # let _ = app;
     /// ```
     #[must_use]
-    pub fn pattern(pattern: impl Into<String>) -> Self {
-        Self::from_entries(vec![Subscribed::Pattern(pattern.into())])
+    pub fn pattern(pattern: impl Into<String>) -> crate::KafkaTopicPattern {
+        crate::KafkaTopicPattern::new(pattern)
     }
 
     /// Adds another literal topic to the same subscription.
     #[must_use]
-    pub fn and_topic(self, topic: impl Into<String>) -> Self {
-        self.push(Subscribed::Topic(topic.into()))
+    pub fn and_topic(mut self, topic: impl Into<String>) -> Self {
+        let topic = topic.into();
+        if !self.name.is_empty() {
+            self.name.push(',');
+        }
+        self.name.push_str(&topic);
+        self.entries.push(topic);
+        self
     }
 
-    /// Adds another `^`-anchored topic regex to the same subscription.
+    /// Turns the schema check on for `topic`, one of this list, and names the namespace of its
+    /// records.
+    ///
+    /// The topic is addressed by its name, so the list may change without moving the check to
+    /// another topic. A string is the namespace with the topic's default subjects
+    /// (`<topic>-value`, `<topic>-key`); [`Schema::namespace`] names other subjects. Each topic
+    /// keeps its own subjects: a consumer decodes every record by the schema id it carries,
+    /// whichever topic brought it. A name the list does not hold fails startup, naming the
+    /// list, and so does a topic that opts in twice. What is checked is described on
+    /// [`KafkaTopic::schema`](crate::KafkaTopic::schema).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ruststream_rdkafka::prelude::*;
+    /// use ruststream_rdkafka::schema::Schema;
+    /// use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
+    /// # #[derive(serde::Deserialize)]
+    /// # struct Order { id: i64 }
+    ///
+    /// #[subscriber(
+    ///     KafkaTopics::new(["orders", "returns"])
+    ///         .schema("orders", "com.acme.orders")
+    ///         .schema("returns", Schema::namespace("com.acme").value("returns-v2"))
+    /// )]
+    /// async fn on_order(order: &Order, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
+    ///     tracing::info!(order.id, %topic, "accepted");
+    ///     HandlerOutcome::ack()
+    /// }
+    ///
+    /// fn app() -> RustStream {
+    ///     let prefetch = SchemaPrefetch::new(SchemaRegistry::new("http://localhost:8081"));
+    ///     let broker = KafkaBroker::new(["localhost:9092"])
+    ///         .default_group("orders-svc")
+    ///         .schema_prefetch(prefetch);
+    ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
+    ///         b.include(on_order);
+    ///     })
+    /// }
+    /// # let _ = app;
+    /// ```
+    #[cfg(feature = "schema-registry")]
     #[must_use]
-    pub fn and_pattern(self, pattern: impl Into<String>) -> Self {
-        self.push(Subscribed::Pattern(pattern.into()))
+    pub fn schema(mut self, topic: impl Into<String>, schema: impl Into<Schema>) -> Self {
+        self.schemas.push(topic.into(), schema.into());
+        self
     }
 
     /// The consumer group for this subscription, overriding
@@ -231,20 +255,14 @@ impl KafkaTopics {
             ));
         }
         for entry in &self.entries {
-            entry.validate()?;
+            super::reject_empty(entry)?;
+            super::reject_pattern(entry, "a topic of `KafkaTopics`")?;
         }
         let name = self.name;
         super::reject_commit_mode_clash(&name, &self.settings.commit, &self.settings.config)?;
-        let names = self
-            .entries
-            .into_iter()
-            .map(|entry| match entry {
-                Subscribed::Topic(name) | Subscribed::Pattern(name) => name,
-            })
-            .collect();
         Ok(SubscriptionPlan {
             name,
-            reader: Reader::Subscribed(names),
+            reader: Reader::Subscribed(self.entries),
             settings: self.settings,
         })
     }
@@ -269,10 +287,19 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopics {
     }
 
     async fn subscribe(
-        self,
+        mut self,
         connected: &ConnectedKafkaBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
-        connected.open(self.into_plan()?).await
+        #[cfg(feature = "schema-registry")]
+        let schemas = std::mem::take(&mut self.schemas);
+        let plan = self.into_plan()?;
+        #[cfg(feature = "schema-registry")]
+        if let Reader::Subscribed(topics) = &plan.reader {
+            let listed: Vec<&str> = topics.iter().map(String::as_str).collect();
+            let opted = schemas.resolve(&listed)?;
+            connected.check_schemas(&plan.name, opted).await?;
+        }
+        connected.open(plan).await
     }
 
     #[cfg(feature = "asyncapi")]
@@ -294,20 +321,6 @@ mod tests {
         assert_eq!(plan.name, "orders,cancellations");
         assert!(
             matches!(plan.reader, Reader::Subscribed(names) if names == ["orders", "cancellations"])
-        );
-    }
-
-    #[test]
-    fn an_unanchored_pattern_is_refused() {
-        let err = KafkaTopics::pattern("orders\\..*")
-            .into_plan()
-            .expect_err("an unanchored pattern would be subscribed literally");
-        let KafkaError::InvalidOptions(message) = err else {
-            panic!("a refused pattern must be an options error");
-        };
-        assert!(
-            message.contains('^'),
-            "the error must name the anchor, got: {message}"
         );
     }
 

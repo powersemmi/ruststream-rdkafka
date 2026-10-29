@@ -95,7 +95,7 @@ async fn reserve(
 // --8<-- [start:pattern]
 /// A pattern reads every ledger topic there is; its copies go to one retry topic the pattern
 /// also matches, so they come back to this subscription.
-#[subscriber(KafkaTopics::pattern("^ledger\\..*").group("ledger-svc").commit(Commit::Tracked))]
+#[subscriber(KafkaTopicPattern::new("^ledger\\..*").group("ledger-svc").commit(Commit::Tracked))]
 async fn post_entry(entry: &Entry, State(ledger): State<Arc<Ledger>>) -> HandlerOutcome {
     if let Err(err) = ledger.post(entry) {
         tracing::warn!(entry.order_id, err, "ledger unavailable, retrying");

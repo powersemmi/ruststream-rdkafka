@@ -130,7 +130,7 @@ impl Handle<Entry, (), (), (), AppState> for PostEntry {
     }
 }
 
-fn ledgers() -> KafkaTopics {
+fn ledgers() -> KafkaTopicPattern {
     KafkaTopics::pattern("^ledger\\..*")
         .group("ledger-svc")
         .commit(Commit::Tracked)

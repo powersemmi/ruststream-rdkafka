@@ -37,7 +37,7 @@ use crate::properties::Properties;
 use crate::publisher::{KafkaPublish, KafkaPublisher};
 #[cfg(feature = "schema-registry")]
 use crate::schema_registry::{SchemaPrefetch, SchemaRegistry};
-use crate::startup::{self, Opened, Reset, Startup};
+use crate::startup::{self, Opened, Reset, Startup, TopicWatch};
 use crate::subscriber::{DeliveredTopic, KafkaSubscriber};
 use crate::subscription::{
     Commit, GroupSettings, KafkaTopic, Reader, StartOffset, SubscriptionPlan, refuse_illegal_topics,
@@ -750,6 +750,72 @@ impl ConnectedKafkaBroker {
         &self.state
     }
 
+    /// Checks the topics a subscription opted into schema checking against the registry this
+    /// broker carries; see [`crate::schema::check_topic`]. Runs while the subscription opens,
+    /// once per topic.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) async fn check_schemas<'topic>(
+        &self,
+        subscription: &str,
+        topics: impl IntoIterator<Item = (&'topic str, &'topic crate::schema::Schema)>,
+    ) -> Result<(), KafkaError> {
+        self.state.ensure_open(subscription)?;
+        let mut topics = topics.into_iter().peekable();
+        let Some((first, _)) = topics.peek() else {
+            return Ok(());
+        };
+        let registry = self.check_registry(&format!("topic `{first}`"))?;
+        for (topic, schema) in topics {
+            crate::schema::check_topic(registry, topic, schema).await?;
+        }
+        Ok(())
+    }
+
+    /// The registry a schema check reads: the prefetch's, or the transcode's when only that one
+    /// is attached. `opted` names what opted in, for the error a broker without one returns.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn check_registry(&self, opted: &str) -> Result<&SchemaRegistry, KafkaError> {
+        self.state
+            .schema_prefetch
+            .as_ref()
+            .map(SchemaPrefetch::registry)
+            .or(self.state.schema_registry.as_ref())
+            .ok_or_else(|| {
+                KafkaError::InvalidOptions(format!(
+                    "{opted} opts into schema checking with `.schema(..)`, and the broker carries \
+                     no schema registry to check it against; attach one with \
+                     `KafkaBroker::schema_prefetch`"
+                ))
+            })
+    }
+
+    /// The topics the cluster holds now, which a pattern subscription's schema sets are checked
+    /// against when it opens. Asked once, off the delivery path.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) async fn known_topics(
+        &self,
+        subscriber: &KafkaSubscriber,
+    ) -> Result<Vec<String>, KafkaError> {
+        #[cfg(feature = "testing")]
+        if let Some(cluster) = self.state.in_process() {
+            return Ok(cluster.topic_names());
+        }
+        let cart = subscriber.cart();
+        let bound = self.state.assignment_timeout;
+        task::spawn_blocking(move || {
+            cart.consumer.fetch_metadata(None, bound).map(|metadata| {
+                metadata
+                    .topics()
+                    .iter()
+                    .map(|topic| topic.name().to_owned())
+                    .collect()
+            })
+        })
+        .await
+        .map_err(|err| KafkaError::Subscribe(Box::new(err)))?
+        .map_err(KafkaError::subscribe)
+    }
+
     /// Opens a subscription for `def`, whichever of this crate's descriptors it is.
     ///
     /// # Errors
@@ -807,6 +873,15 @@ impl ConnectedKafkaBroker {
     /// A group subscription returns once the group assigned this member its partitions and the
     /// start of each is known, bounded by [`KafkaBroker::assignment_timeout`]; see `startup`.
     pub(crate) async fn open(&self, plan: SubscriptionPlan) -> Result<KafkaSubscriber, KafkaError> {
+        self.open_watched(plan, TopicWatch::default()).await
+    }
+
+    /// [`open`](Self::open), telling `watch` the topics of every assignment.
+    pub(crate) async fn open_watched(
+        &self,
+        plan: SubscriptionPlan,
+        watch: TopicWatch,
+    ) -> Result<KafkaSubscriber, KafkaError> {
         self.state.ensure_open(&plan.name)?;
         refuse_illegal_topics(&plan.reader)?;
         let manual = matches!(plan.reader, Reader::Assigned { .. });
@@ -843,7 +918,7 @@ impl ConnectedKafkaBroker {
         let tracker = Arc::new(CommitTracker::default());
         let (startup, opened) = match &plan.reader {
             Reader::Subscribed(names) => {
-                let (startup, opened) = Startup::kept(names, reset);
+                let (startup, opened) = Startup::kept(names, reset, watch);
                 (startup, Some(opened))
             }
             Reader::Assigned { .. } => (Startup::released(), None),
@@ -1117,7 +1192,7 @@ impl Subscribe for ConnectedKafkaBroker {
     /// A bare name is one topic, and a record produced to a topic reaches every group reading
     /// it, so `#[subscriber("orders")]` addresses its own deferred `retry_after` copies. A
     /// `^`-anchored name is a librdkafka topic regex and is refused here; subscribe to a pattern
-    /// with [`KafkaTopics::pattern`](crate::KafkaTopics::pattern).
+    /// with [`KafkaTopicPattern`](crate::KafkaTopicPattern).
     type Copies = AddressedCopies;
 
     /// Subscribes to the topic `name` with descriptor defaults; requires

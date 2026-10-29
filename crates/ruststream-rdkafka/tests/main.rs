@@ -24,5 +24,6 @@ mod prelude;
 mod protobuf_lanes;
 mod protobuf_transcode;
 mod publish_headers;
+mod schema_descriptor;
 mod schema_registry;
 mod secrets;

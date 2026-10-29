@@ -26,7 +26,13 @@ msgpack = ["ruststream/msgpack"]
 cbor = ["ruststream/cbor"]
 # Confluent Schema Registry: the client, the wire-format envelope, and the subscriber-side
 # schema prefetch that keeps the sync codec path free of I/O.
-schema-registry = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:schemars"]
+schema-registry = [
+    "dep:reqwest",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:schemars",
+    "dep:regex",
+]
 # Avro transcoding for the registry middleware: apache-avro's serde path plus the AvroSchema
 # derive for registering subjects from types.
 avro = ["schema-registry", "dep:apache-avro"]
