@@ -6,6 +6,7 @@
 mod avro;
 mod export;
 mod json;
+mod lock;
 mod migrations;
 mod model;
 mod online;
