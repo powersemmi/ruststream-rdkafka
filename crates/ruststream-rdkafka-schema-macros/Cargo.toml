@@ -1,0 +1,26 @@
+[package]
+name = "ruststream-rdkafka-schema-macros"
+description = "The Schema derive of ruststream-rdkafka: checks a message type against the schema migrations of its subjects when the crate compiles. Use it through ruststream-rdkafka's `schema-check` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["kafka", "schema-registry", "avro", "ruststream", "derive"]
+categories = ["development-tools::procedural-macro-helpers", "encoding"]
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.9"

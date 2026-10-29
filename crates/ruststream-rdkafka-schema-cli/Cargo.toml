@@ -1,0 +1,22 @@
+[package]
+name = "ruststream-rdkafka-schema-cli"
+description = "cargo kafka-schema: schema migrations for a Confluent Schema Registry, kept in the repository of the service that owns them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["kafka", "schema-registry", "migrations", "ruststream", "cargo"]
+categories = ["development-tools::cargo-plugins", "command-line-utilities"]
+
+[[bin]]
+name = "cargo-kafka-schema"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ruststream-rdkafka = { workspace = true, features = ["avro", "protobuf"] }

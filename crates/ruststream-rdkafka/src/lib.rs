@@ -30,6 +30,8 @@ pub mod context;
 pub mod prelude;
 #[cfg(feature = "protobuf")]
 pub mod protobuf;
+#[cfg(any(feature = "schema-registry", feature = "schema-check"))]
+pub mod schema;
 #[cfg(feature = "schema-registry")]
 pub mod schema_registry;
 
