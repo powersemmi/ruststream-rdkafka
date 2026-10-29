@@ -20,7 +20,8 @@ An unset setting keeps librdkafka's own default; the crate adds none of its own.
 `config` [passes](./passthrough.md) any other consumer property to librdkafka.
 The subscription's name is the topic: a test reads its deliveries under that name, and the [AsyncAPI document](../asyncapi/channels.md) reports that channel.
 A publish to the topic reaches every group that reads it, so a delayed [retry copy](../settlement/retries.md) goes back to the topic with no setting at the mount site.
-A topic name that Kafka refuses, or a name that starts with `^`, stops the service at startup; a pattern is [`KafkaTopics::pattern`](./patterns.md).
+A topic name that Kafka refuses, or a name that starts with `^`, stops the service at startup; a pattern is [`KafkaTopicPattern`](./patterns.md).
+`schema` turns on [schema checking](./schema.md) for the topic.
 
 ## Example
 

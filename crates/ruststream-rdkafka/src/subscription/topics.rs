@@ -287,11 +287,11 @@ impl SubscriptionSource<ConnectedKafkaBroker> for KafkaTopics {
     }
 
     async fn subscribe(
-        mut self,
+        self,
         connected: &ConnectedKafkaBroker,
     ) -> Result<Self::Subscriber, KafkaError> {
         #[cfg(feature = "schema-registry")]
-        let schemas = std::mem::take(&mut self.schemas);
+        let schemas = self.schemas.clone();
         let plan = self.into_plan()?;
         #[cfg(feature = "schema-registry")]
         if let Reader::Subscribed(topics) = &plan.reader {

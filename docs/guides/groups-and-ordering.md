@@ -86,7 +86,7 @@ The first member reads nothing until the group has assigned the partitions again
 ## Several topics and a pattern
 
 [`KafkaTopics`](../components/subscriptions/kafka-topics.md) reads several topics through one consumer and one group.
-[`KafkaTopics::pattern`](../components/subscriptions/patterns.md) reads every topic whose name matches a regular expression, which must start with `^`.
+[`KafkaTopicPattern`](../components/subscriptions/patterns.md) reads every topic whose name matches a regular expression, which must start with `^`.
 `archive` reads every topic of the bank and records where each record sits.
 
 <Tabs groupId="api">

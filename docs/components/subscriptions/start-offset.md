@@ -1,5 +1,5 @@
 ---
-sidebar_position: 5
+sidebar_position: 6
 title: StartOffset
 description: "StartOffset says where a group starts on a partition with no committed offset: committed reset, earliest or latest."
 ---

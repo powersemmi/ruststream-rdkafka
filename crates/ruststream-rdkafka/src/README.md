@@ -78,7 +78,9 @@ item's own documentation keeps the detail.
   [`default_group`](KafkaBroker::default_group).
 - [KafkaTopic][c-kafka-topic]: [`KafkaTopic`], one topic in one consumer group.
 - [KafkaTopics][c-kafka-topics]: [`KafkaTopics`], a list of topics through one consumer.
-- [Patterns][c-patterns]: [`KafkaTopics::pattern`], every topic a regex matches.
+- [Patterns][c-patterns]: [`KafkaTopicPattern`], every topic a regex matches.
+- [Schema checking][c-schema]: [`KafkaTopic::schema`] and its twins check a topic's registry
+  subjects at startup, with [`schema::Schema`] naming the namespace and subjects.
 - [KafkaPartitions][c-kafka-partitions]: [`KafkaPartitions`], named partitions with no group.
 - [StartOffset][c-start-offset]: [`StartOffset`], where a group with no committed offset starts.
 - [Assignment][c-assignment]: [`Assignment`], the group's rebalance strategy.
@@ -174,6 +176,7 @@ formats on top of it. `asyncapi` contributes the Kafka bindings to the generated
 [c-kafka-topic]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topic/
 [c-kafka-topics]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topics/
 [c-patterns]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/patterns/
+[c-schema]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/schema/
 [c-kafka-partitions]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-partitions/
 [c-start-offset]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/start-offset/
 [c-assignment]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/assignment/

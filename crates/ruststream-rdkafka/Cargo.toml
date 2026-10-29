@@ -241,6 +241,15 @@ path = "examples/manual/kafka_topics.rs"
 required-features = ["testing"]
 
 [[example]]
+name = "kafka_subscriptions_schema"
+required-features = ["testing", "schema-registry"]
+
+[[example]]
+name = "manual_kafka_subscriptions_schema"
+path = "examples/manual/kafka_subscriptions_schema.rs"
+required-features = ["testing", "schema-registry"]
+
+[[example]]
 name = "kafka_multi_topic"
 required-features = ["testing"]
 

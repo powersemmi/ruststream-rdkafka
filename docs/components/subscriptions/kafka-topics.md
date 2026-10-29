@@ -18,6 +18,8 @@ Every topic of the list shares the handler, so every topic carries the handler's
 The subscription's name is the list joined with commas, `orders,cancellations` here.
 No one publish reaches a list again, so a registration over it names where a [retry copy](../settlement/retries.md) goes: `.out_retry(policy).to(topic)`, or [`ToSourceTopic`](../settlement/to-source-topic.md) to send each copy back to the topic it came from.
 A registration that names neither stops the service at startup.
+`schema(topic, namespace)` turns on [schema checking](./schema.md) for one topic of the list, addressed by its name.
+Every topic a regex matches is a [pattern](./patterns.md), a descriptor of its own.
 
 ## Example
 
