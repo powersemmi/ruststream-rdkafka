@@ -12,11 +12,11 @@ pub(crate) fn private() -> TokenStream {
     quote!(::ruststream_rdkafka::schema::__private)
 }
 
-fn option(value: Option<&str>) -> TokenStream {
-    match value {
-        Some(value) => quote!(::core::option::Option::Some(#value)),
-        None => quote!(::core::option::Option::None),
-    }
+pub(crate) fn option(value: Option<&str>) -> TokenStream {
+    value.map_or_else(
+        || quote!(::core::option::Option::None),
+        |value| quote!(::core::option::Option::Some(#value)),
+    )
 }
 
 fn migration_name(name: &FullName) -> TokenStream {

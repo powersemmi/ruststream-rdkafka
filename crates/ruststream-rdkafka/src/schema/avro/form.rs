@@ -51,7 +51,7 @@ pub enum Member {
     /// A field with this name.
     Field(&'static str),
     /// The fields of a flattened type.
-    Flatten(&'static [Member]),
+    Flatten(&'static [Self]),
 }
 
 /// A named type's name as the type declares it.
@@ -227,7 +227,7 @@ impl<T: AvroForm> AvroForm for [T] {
     const FORM: &'static Form = &Form::Array(T::FORM);
 }
 
-impl<T: AvroForm> AvroForm for HashMap<String, T> {
+impl<T: AvroForm, Hasher> AvroForm for HashMap<String, T, Hasher> {
     const FORM: &'static Form = &Form::Map(T::FORM);
 }
 

@@ -7,7 +7,7 @@ use quote::{quote, quote_spanned};
 use super::emit::{self, private};
 use super::parse::{Avro, Enum, Record};
 use super::site_ident;
-use crate::model::{FieldForm, FieldModel, Model, ModelShape};
+use crate::model::{FieldDefault, FieldForm, FieldModel, Model, ModelShape};
 
 /// The type, the subject and the migration a check runs against.
 pub(crate) struct Site<'a> {
@@ -35,7 +35,9 @@ impl Site<'_> {
 /// type's full name.
 pub(crate) fn checks(site: &Site<'_>, def: &Avro) -> syn::Result<TokenStream> {
     match (&site.model.shape, def) {
-        (ModelShape::Record(fields), Avro::Record(record)) => record_checks(site, fields, record, def),
+        (ModelShape::Record(fields), Avro::Record(record)) => {
+            record_checks(site, fields, record, def)
+        }
         (ModelShape::Enum { symbols, default }, Avro::Enum(def)) => {
             enum_checks(site, symbols, default.as_deref(), def)
         }
@@ -69,8 +71,14 @@ fn record_checks(
     let mut errors: Vec<syn::Error> = Vec::new();
     let mut bounds = TokenStream::new();
     let flattens = fields.iter().any(|field| field.form == FieldForm::Flatten);
-    for field in fields.iter().filter(|field| field.form != FieldForm::Flatten) {
-        let declared = record.fields.iter().find(|declared| declared.name == field.name);
+    for field in fields
+        .iter()
+        .filter(|field| field.form != FieldForm::Flatten)
+    {
+        let declared = record
+            .fields
+            .iter()
+            .find(|declared| declared.name == field.name);
         match (declared, site.external) {
             (None, false) => errors.push(syn::Error::new(
                 field.span,
@@ -81,21 +89,22 @@ fn record_checks(
                     site.at()
                 ),
             )),
-            (None, true) => match field.default.known() {
-                Some(Some(_)) => {}
-                Some(None) => errors.push(syn::Error::new(
-                    field.span,
-                    format!(
-                        "field `{}` of `{}` is not in record `{full}` {}, and it has no \
+            // A default the type itself gives is known in the constant, which reports its
+            // absence; one the attributes fix is decided here.
+            (None, true) => {
+                if field.default == FieldDefault::Disabled {
+                    errors.push(syn::Error::new(
+                        field.span,
+                        format!(
+                            "field `{}` of `{}` is not in record `{full}` {}, and it has no \
                          default; a reader needs one for a field the writer lacks",
-                        field.name,
-                        model.ident,
-                        site.at()
-                    ),
-                )),
-                // The type's own default is known in the constant, which reports its absence.
-                None => {}
-            },
+                            field.name,
+                            model.ident,
+                            site.at()
+                        ),
+                    ));
+                }
+            }
             (Some(declared), external) if field.form == FieldForm::Typed => {
                 let ty = &field.ty;
                 let kind = emit::kind(&declared.ty);
@@ -122,14 +131,16 @@ fn record_checks(
             if fields.iter().any(|field| field.name == declared.name) {
                 continue;
             }
-            let how = match &declared.default {
-                None => "without a default".to_owned(),
-                Some(default) => format!(
-                    "with the default `{default}` (migration {}); the type of an owned \
-                     subject has every field of its newest migration",
-                    site.migration
-                ),
-            };
+            let how = declared.default.as_ref().map_or_else(
+                || "without a default".to_owned(),
+                |default| {
+                    format!(
+                        "with the default `{default}` (migration {}); the type of an owned \
+                         subject has every field of its newest migration",
+                        site.migration
+                    )
+                },
+            );
             errors.push(syn::Error::new(
                 site.span(),
                 format!(
@@ -232,20 +243,22 @@ fn enum_checks(
                 format!(
                     "the default symbol of `{}` is {}, and enum `{full}` {} declares {}",
                     model.ident,
-                    default.map_or("none".to_owned(), |symbol| format!("`{symbol}`")),
+                    symbol_text(default),
                     site.at(),
-                    def.default
-                        .as_deref()
-                        .map_or("none".to_owned(), |symbol| format!("`{symbol}`")),
+                    symbol_text(def.default.as_deref()),
                 ),
             ));
         }
     }
-    match errors.into_iter().reduce(|mut all, next| {
-        all.combine(next);
-        all
-    }) {
-        Some(error) => Err(error),
-        None => Ok(TokenStream::new()),
-    }
+    errors
+        .into_iter()
+        .reduce(|mut all, next| {
+            all.combine(next);
+            all
+        })
+        .map_or_else(|| Ok(TokenStream::new()), Err)
+}
+
+fn symbol_text(symbol: Option<&str>) -> String {
+    symbol.map_or_else(|| "none".to_owned(), |symbol| format!("`{symbol}`"))
 }

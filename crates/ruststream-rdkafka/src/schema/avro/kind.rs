@@ -144,12 +144,12 @@ impl<Items, Site, T: Carries<Items, Site>> Carries<array<Items>, Site> for [T] {
 impl<Items, Site, T: Reads<Items, Site>> Reads<array<Items>, Site> for Vec<T> {}
 impl<Items, Site, T: Reads<Items, Site>> Reads<array<Items>, Site> for [T] {}
 
-impl<Values, Site, T: Carries<Values, Site>> Carries<map<Values>, Site>
-    for HashMap<::std::string::String, T>
+impl<Values, Site, T: Carries<Values, Site>, Hasher> Carries<map<Values>, Site>
+    for HashMap<::std::string::String, T, Hasher>
 {
 }
-impl<Values, Site, T: Reads<Values, Site>> Reads<map<Values>, Site>
-    for HashMap<::std::string::String, T>
+impl<Values, Site, T: Reads<Values, Site>, Hasher> Reads<map<Values>, Site>
+    for HashMap<::std::string::String, T, Hasher>
 {
 }
 

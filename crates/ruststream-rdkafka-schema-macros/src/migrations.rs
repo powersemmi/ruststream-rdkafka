@@ -27,10 +27,8 @@ pub(crate) const SUBJECT_FILE: &str = "subject.toml";
 /// manifest directory) when it is set, `schemas/` beside the crate's `Cargo.toml` otherwise.
 pub(crate) fn schema_dir() -> PathBuf {
     let manifest = env::var_os("CARGO_MANIFEST_DIR").map_or_else(PathBuf::new, PathBuf::from);
-    match env::var_os("RUSTSTREAM_SCHEMA_DIR") {
-        Some(dir) => manifest.join(dir),
-        None => manifest.join("schemas"),
-    }
+    env::var_os("RUSTSTREAM_SCHEMA_DIR")
+        .map_or_else(|| manifest.join("schemas"), |dir| manifest.join(dir))
 }
 
 /// The format a subject's schemas are written in.
@@ -156,9 +154,11 @@ impl Subject {
     /// service owns, every pulled version for an external one.
     pub(crate) fn checked_migrations(&self) -> &[Migration] {
         match self.settings.owner {
-            Owner::Service => self.migrations.len().checked_sub(1).map_or(&[], |newest| {
-                &self.migrations[newest..]
-            }),
+            Owner::Service => self
+                .migrations
+                .len()
+                .checked_sub(1)
+                .map_or(&[], |newest| &self.migrations[newest..]),
             Owner::External => &self.migrations,
         }
     }
@@ -170,7 +170,10 @@ impl Subject {
     /// A migration that is not JSON.
     pub(crate) fn named_types_of(migration: &Migration) -> Result<Vec<String>, String> {
         let schema: Value = serde_json::from_str(&migration.content).map_err(|err| {
-            format!("migration `{}` is not JSON: {err}", migration.path.display())
+            format!(
+                "migration `{}` is not JSON: {err}",
+                migration.path.display()
+            )
         })?;
         let mut names = Vec::new();
         avro_named_types(&schema, None, &mut names);

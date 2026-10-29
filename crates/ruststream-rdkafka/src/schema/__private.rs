@@ -9,8 +9,8 @@ pub use apache_avro::AvroSchema;
 pub use serde_json;
 
 pub use super::avro::{
-    AvroFields, AvroForm, Carries, EnumForm, FieldForm, FixedForm, Form, Member, Name, Reads, RecordForm, Shape, Site,
-    assert_equals, assert_reads, kind,
+    AvroFields, AvroForm, Carries, EnumForm, FieldForm, FixedForm, Form, Member, Name, Reads,
+    RecordForm, Shape, Site, assert_equals, assert_reads, kind,
 };
 pub use super::record::{Record, RecordKind, RecordSet};
 

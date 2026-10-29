@@ -17,7 +17,7 @@ pub mod kind;
 
 #[doc(hidden)]
 pub use compare::{Site, assert_equals, assert_reads};
+pub use form::{AvroFields, AvroForm};
 #[doc(hidden)]
 pub use form::{EnumForm, FieldForm, FixedForm, Form, Member, Name, RecordForm, Shape};
-pub use form::{AvroFields, AvroForm};
 pub use kind::{Carries, Reads};

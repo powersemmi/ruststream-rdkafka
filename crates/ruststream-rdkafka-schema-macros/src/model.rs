@@ -76,17 +76,6 @@ pub(crate) enum FieldDefault {
     Json(String),
 }
 
-impl FieldDefault {
-    /// The default when it is known without the type.
-    pub(crate) fn known(&self) -> Option<Option<&str>> {
-        match self {
-            Self::OfType => None,
-            Self::Disabled => Some(None),
-            Self::Json(json) => Some(Some(json)),
-        }
-    }
-}
-
 impl Model {
     /// The record's full name as `AvroSchema::get_schema()` writes it for the type on its own.
     pub(crate) fn full_name(&self) -> String {
@@ -118,11 +107,7 @@ impl Model {
             (_, Some((space, name))) => (Some(space.to_owned()), name.to_owned()),
             (namespace, None) => (namespace, serde_name),
         };
-        let default = avro
-            .default
-            .as_ref()
-            .map(|lit| normalized_json(lit))
-            .transpose()?;
+        let default = avro.default.as_ref().map(normalized_json).transpose()?;
         let shape = match &container.data {
             ast::Data::Struct(_, fields) if container.attrs.transparent() => {
                 let field = fields
@@ -143,7 +128,7 @@ impl Model {
                      a set of input models; a tuple struct is none of them",
                 ));
             }
-            ast::Data::Enum(variants) => read_enum(&input.ident, variants, default.clone())?,
+            ast::Data::Enum(variants) => read_enum(&input.ident, variants, default.as_deref())?,
         };
         Ok(Self {
             ident: input.ident.clone(),
@@ -194,7 +179,7 @@ fn read_fields(fields: &[ast::Field<'_>]) -> syn::Result<Vec<FieldModel>> {
 fn read_enum(
     ident: &Ident,
     variants: &[ast::Variant<'_>],
-    default: Option<String>,
+    default: Option<&str>,
 ) -> syn::Result<ModelShape> {
     let kept: Vec<_> = variants
         .iter()
@@ -205,7 +190,7 @@ fn read_enum(
         .all(|variant| matches!(variant.style, ast::Style::Unit))
     {
         let mut symbols = Vec::new();
-        let mut symbol_default = match default.as_deref().map(serde_json::from_str::<Value>) {
+        let mut symbol_default = match default.map(serde_json::from_str::<Value>) {
             Some(Ok(Value::String(symbol))) => Some(symbol),
             _ => None,
         };
@@ -417,7 +402,12 @@ mod tests {
         let input: DeriveInput = parse_quote!(
             struct Pair(i64, i64);
         );
-        let err = Model::read(&input).err().expect("a tuple struct is refused");
-        assert!(err.to_string().contains("a tuple struct is none of them"), "{err}");
+        let err = Model::read(&input)
+            .err()
+            .expect("a tuple struct is refused");
+        assert!(
+            err.to_string().contains("a tuple struct is none of them"),
+            "{err}"
+        );
     }
 }

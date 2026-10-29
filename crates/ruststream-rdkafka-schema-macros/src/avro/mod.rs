@@ -91,23 +91,28 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
 /// Whether any Avro migration names a type with the model's name (so another type's check may
 /// need the model's form), and the subjects whose checked migrations declare the model's
 /// record under its full name.
-fn names_in<'a>(subjects: &[&'a Subject], model: &Model) -> Result<(bool, Vec<&'a Subject>), String> {
+fn names_in<'a>(
+    subjects: &[&'a Subject],
+    model: &Model,
+) -> Result<(bool, Vec<&'a Subject>), String> {
     let full = model.full_name();
     let mut named = false;
     let mut declaring = Vec::new();
     for subject in subjects {
         let mut declares = false;
-        let mut names = Vec::new();
+        let mut records = Vec::new();
         match subject.settings.owner {
-            Owner::Service => names.extend(subject.declared_records()?),
+            Owner::Service => records.extend(subject.declared_records()?),
             Owner::External => {
                 for migration in subject.checked_migrations() {
-                    names.extend(Subject::named_types_of(migration)?);
+                    records.extend(Subject::named_types_of(migration)?);
                 }
             }
         }
-        for name in names {
-            let simple = name.rsplit_once('.').map_or(name.as_str(), |(_, simple)| simple);
+        for name in records {
+            let simple = name
+                .rsplit_once('.')
+                .map_or(name.as_str(), |(_, simple)| simple);
             named |= simple == model.name;
             declares |= name == full;
         }
@@ -190,14 +195,14 @@ fn own_form(model: &Model) -> TokenStream {
         }
         ModelShape::Enum { symbols, default } => {
             let symbols: Vec<String> = symbols.iter().map(|(symbol, _)| symbol.clone()).collect();
-            (emit::enum_form(model, &symbols, default.as_deref()), Vec::new())
+            (
+                emit::enum_form(model, &symbols, default.as_deref()),
+                Vec::new(),
+            )
         }
         ModelShape::Transparent(_) | ModelShape::Set(_) => return TokenStream::new(),
     };
-    let default = match &model.default {
-        Some(json) => quote!(::core::option::Option::Some(#json)),
-        None => quote!(::core::option::Option::None),
-    };
+    let default = emit::option(model.default.as_deref());
     let (impl_generics, ty_generics, _) = model.generics.split_for_impl();
     let where_clause = generic_where(model, bounds);
     quote! {
@@ -256,9 +261,9 @@ fn set_impls(model: &Model, variants: &[(syn::Ident, syn::Type)]) -> TokenStream
     let records = variants.iter().map(|(_, ty)| {
         quote::quote_spanned!(syn::spanned::Spanned::span(ty)=> <#ty as #p::Record>::RECORD)
     });
-    let kinds = variants.iter().map(|(variant, ty)| {
-        quote!((<#ty as #p::Record>::RECORD, #kind::#variant))
-    });
+    let kinds = variants
+        .iter()
+        .map(|(variant, ty)| quote!((<#ty as #p::Record>::RECORD, #kind::#variant)));
     quote! {
         impl #p::RecordSet for #ident {
             const RECORDS: &'static [&'static str] = &[#(#records),*];
@@ -279,7 +284,7 @@ fn export_test(model: &Model) -> TokenStream {
         )
         .expect("JSON writes")
     };
-    export::test(ident, &model.full_name(), "avsc", schema)
+    export::test(ident, &model.full_name(), "avsc", &schema)
 }
 
 /// The checks of the model against one migration of one subject, and whether the record the

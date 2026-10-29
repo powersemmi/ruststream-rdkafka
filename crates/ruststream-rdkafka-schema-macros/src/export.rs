@@ -8,7 +8,7 @@
 //! The functions the other formats call (keep their signatures):
 //!
 //! - `active() -> bool`: the variable is set, so the derive emits no checks.
-//! - `test(ident: &Ident, record: &str, extension: &str, schema: TokenStream) -> TokenStream`:
+//! - `test(ident: &Ident, record: &str, extension: &str, schema: &TokenStream) -> TokenStream`:
 //!   the hidden test `__ruststream_schema_export_<type snake case>` in a hidden module beside the
 //!   type. `schema` is an expression of type `String` evaluated inside that module (the type is
 //!   `super::<Type>` there); the test writes it to `<dir>/<record>.<extension>`.
@@ -29,8 +29,16 @@ pub(crate) fn active() -> bool {
 
 /// The hidden test that writes `schema` to `<dir>/<record>.<extension>` when the crate was
 /// compiled with `RUSTSTREAM_SCHEMA_EXPORT=<dir>`, and does nothing otherwise.
-pub(crate) fn test(ident: &Ident, record: &str, extension: &str, schema: TokenStream) -> TokenStream {
-    let name = format_ident!("__ruststream_schema_export_{}", snake_case(&ident.to_string()));
+pub(crate) fn test(
+    ident: &Ident,
+    record: &str,
+    extension: &str,
+    schema: &TokenStream,
+) -> TokenStream {
+    let name = format_ident!(
+        "__ruststream_schema_export_{}",
+        snake_case(&ident.to_string())
+    );
     quote! {
         #[cfg(test)]
         #[doc(hidden)]
@@ -73,10 +81,16 @@ mod tests {
             &format_ident!("OrderKey"),
             "com.acme.OrderKey",
             "avsc",
-            quote!(String::new()),
+            &quote!(String::new()),
         )
         .to_string();
-        assert!(tokens.contains("fn __ruststream_schema_export_order_key"), "{tokens}");
-        assert!(tokens.contains("\"com.acme.OrderKey\" , \"avsc\""), "{tokens}");
+        assert!(
+            tokens.contains("fn __ruststream_schema_export_order_key"),
+            "{tokens}"
+        );
+        assert!(
+            tokens.contains("\"com.acme.OrderKey\" , \"avsc\""),
+            "{tokens}"
+        );
     }
 }

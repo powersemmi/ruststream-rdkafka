@@ -147,10 +147,7 @@ impl Avro {
 ///
 /// A schema that is not JSON, not Avro, or that names a type it neither defines nor
 /// references.
-pub(crate) fn parse(
-    text: &str,
-    external: &dyn Fn(&str) -> Option<Avro>,
-) -> Result<Avro, String> {
+pub(crate) fn parse(text: &str, external: &dyn Fn(&str) -> Option<Avro>) -> Result<Avro, String> {
     let value: Value = serde_json::from_str(text).map_err(|err| format!("not JSON: {err}"))?;
     let mut parser = Parser {
         defined: HashMap::new(),
@@ -254,7 +251,9 @@ impl Parser<'_> {
                     .iter()
                     .map(|symbol| symbol.as_str().map(str::to_owned))
                     .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| format!("enum `{}` has a symbol that is not a string", name.full()))?;
+                    .ok_or_else(|| {
+                        format!("enum `{}` has a symbol that is not a string", name.full())
+                    })?;
                 let default = object
                     .get("default")
                     .and_then(Value::as_str)

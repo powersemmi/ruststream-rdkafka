@@ -26,9 +26,11 @@ pub trait RecordSet {
     const RECORDS: &'static [&'static str];
 }
 
-/// The kind of a set of input models (`OrderEventKind` for `OrderEvent`), mapped from the
-/// record each variant carries: the discriminator picks the variant whose record has the full
-/// name the delivery's schema declares.
+/// The kind of a set of input models (`OrderEventKind` for `OrderEvent`), by the record each
+/// variant carries.
+///
+/// The discriminator picks the variant whose record has the full name the delivery's schema
+/// declares.
 ///
 /// `#[derive(Schema)]` on the set implements it for the set's kind.
 pub trait RecordKind: Copy + 'static {

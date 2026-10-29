@@ -571,7 +571,7 @@ const fn reads(reader: &Form, writer: &Form, at: &At) {
         ..*at
     };
     match (reader, writer) {
-        (Form::Null, Form::Null)
+        (Form::Null | Form::Nullable(_), Form::Null)
         | (Form::Boolean, Form::Boolean)
         | (Form::Int, Form::Int)
         | (Form::Long, Form::Int | Form::Long)
@@ -582,7 +582,6 @@ const fn reads(reader: &Form, writer: &Form, at: &At) {
             reads(reader, writer, at);
         }
         (Form::Nullable(reader), Form::Nullable(writer)) => reads(reader, writer, at),
-        (Form::Nullable(_), Form::Null) => {}
         (Form::Nullable(reader), _) => reads(reader, writer, at),
         (_, Form::Nullable(_)) if at.bounded => {}
         (_, Form::Nullable(_)) => at.fail(&[
