@@ -552,6 +552,15 @@ name = "kafka_avro_local"
 required-features = ["avro", "testing"]
 
 [[example]]
+name = "kafka_schema_check"
+required-features = ["avro", "schema-check", "testing"]
+
+[[example]]
+name = "manual_kafka_schema_check"
+path = "examples/manual/kafka_schema_check.rs"
+required-features = ["avro", "schema-check", "testing"]
+
+[[example]]
 name = "manual_kafka_avro_local"
 path = "examples/manual/kafka_avro_local.rs"
 required-features = ["avro", "testing"]

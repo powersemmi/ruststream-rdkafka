@@ -1,0 +1,5 @@
+error: `Order` has no field `id`, which record `com.acme.orders.Order` of subject `orders-value` declares without a default
+ --> tests/ui/fail/missing_field.rs:9:12
+  |
+9 | pub struct Order {
+  |            ^^^^^

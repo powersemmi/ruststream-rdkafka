@@ -1,0 +1,2 @@
+format = "avro"
+record = "com.acme.orders.OrderCreated"

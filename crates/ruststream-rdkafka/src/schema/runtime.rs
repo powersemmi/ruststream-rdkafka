@@ -16,20 +16,6 @@ use super::descriptor::{CompiledSets, Origin, Schema, Side, Subject};
 use crate::error::KafkaError;
 use crate::schema_registry::{SchemaRegistry, SchemaType};
 
-/// The kinds of an enum input whose variants each carry a registry record: what a discriminator
-/// reading a record's writer schema names.
-///
-/// The `Schema` derive implements it on the kind enum the core's `InMessages` derive generates,
-/// one record full name per variant.
-#[doc(hidden)]
-pub trait RecordKind: Sized + Copy + 'static {
-    /// The record full names of the set, one per variant, in the order the variants are written.
-    const RECORDS: &'static [&'static str];
-
-    /// The variant whose record has `full_name`, or `None` when no variant carries it.
-    fn from_record(full_name: &str) -> Option<Self>;
-}
-
 /// Checks the subjects of one topic that opted in with `schema`.
 ///
 /// The value subject must exist and declare a record of the namespace. The key subject is

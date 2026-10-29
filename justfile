@@ -25,8 +25,9 @@ check:
 test:
     # The examples' tests are modules of one test binary, so `--tests` builds none per example;
     # `check` compiles every example on its own. `--tests` leaves the doc examples out, so they
-    # run on their own line.
-    cargo test --workspace --all-features --tests
+    # run on their own line. `RUN_UI_TESTS` runs the `Schema` derive's compile cases, whose
+    # pinned compiler messages are written on stable.
+    RUN_UI_TESTS=1 cargo test --workspace --all-features --tests
     cargo test --workspace --all-features --doc
 
 brokers-up:
