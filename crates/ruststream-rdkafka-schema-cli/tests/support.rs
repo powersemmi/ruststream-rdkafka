@@ -163,7 +163,10 @@ impl Crate {
             .args(args)
             .env_remove("RUSTSTREAM_SCHEMA_DIR")
             .env_remove("RUSTSTREAM_SCHEMA_OFFLINE")
-            .env_remove("RUSTSTREAM_SCHEMA_EXPORT");
+            .env_remove("RUSTSTREAM_SCHEMA_EXPORT")
+            // The export builds the fixture crate. Its build directory stays inside the fixture,
+            // so it goes with it, whatever build directory the machine's cargo config names.
+            .env("CARGO_BUILD_BUILD_DIR", self.path("target/build"));
         match &self.registry {
             Some(url) => command.env("RUSTSTREAM_SCHEMA_REGISTRY", url),
             None => command.env_remove("RUSTSTREAM_SCHEMA_REGISTRY"),
