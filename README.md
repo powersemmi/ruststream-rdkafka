@@ -53,8 +53,8 @@ ruststream-rdkafka = { version = "0.7", features = ["testing"] }
 ```
 
 The crate builds librdkafka from source, so a C toolchain is required. Optional features:
-`testing`, `asyncapi`, `schema-registry`, `avro`, `protobuf`, `msgpack`, `cbor`, `ssl`,
-`ssl-vendored` and `zstd`.
+`testing`, `asyncapi`, `schema-registry`, `avro`, `protobuf`, `schema-check`, `msgpack`, `cbor`,
+`ssl`, `ssl-vendored` and `zstd`.
 
 ## Write a service
 

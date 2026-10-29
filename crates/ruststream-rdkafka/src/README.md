@@ -134,6 +134,8 @@ item's own documentation keeps the detail.
 - [Schema Registry][c-schema-registry]: [`schema_registry`], the Confluent client and wire
   format (feature `schema-registry`).
 - [Avro][c-avro]: [`avro`], the Avro codec (feature `avro`).
+- Schemas as code: [`schema`], the `Schema` derive that checks a message type against the
+  schema migrations of its subjects when the crate compiles (feature `schema-check`).
 - [Protobuf][c-protobuf]: [`protobuf`], `prost` messages under the Confluent envelope (feature
   `protobuf`).
 - [AsyncAPI][c-asyncapi]: the Kafka bindings of the generated document (feature `asyncapi`).
@@ -146,7 +148,8 @@ item's own documentation keeps the detail.
 `json` (default), `msgpack` and `cbor` forward the core's codecs; the default codec is what a
 mount site with no `.codec(..)` step encodes with. `schema-registry` adds the Confluent client,
 the wire-format envelope and the subscriber-side prefetch; `avro` and `protobuf` add those
-formats on top of it. `asyncapi` contributes the Kafka bindings to the generated document,
+formats on top of it. `schema-check` adds the `Schema` derive, which checks a type against
+the migrations in `schemas/` when the crate compiles. `asyncapi` contributes the Kafka bindings to the generated document,
 `testing` adds the in-process mode `TestApp::start` connects the broker through, and `ssl`,
 `ssl-vendored` and `zstd` map onto rdkafka's own backends.
 
