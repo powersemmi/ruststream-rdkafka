@@ -80,7 +80,7 @@ item's own documentation keeps the detail.
 - [KafkaTopics][c-kafka-topics]: [`KafkaTopics`], a list of topics through one consumer.
 - [Patterns][c-patterns]: [`KafkaTopicPattern`], every topic a regex matches.
 - [Schema checking][c-schema]: [`KafkaTopic::schema`] and its twins check a topic's registry
-  subjects at startup, with [`schema::Schema`] naming the namespace and subjects.
+  subjects at startup, with [`schema::Schema`](struct@schema::Schema) naming the namespace and subjects.
 - [KafkaPartitions][c-kafka-partitions]: [`KafkaPartitions`], named partitions with no group.
 - [StartOffset][c-start-offset]: [`StartOffset`], where a group with no committed offset starts.
 - [Assignment][c-assignment]: [`Assignment`], the group's rebalance strategy.

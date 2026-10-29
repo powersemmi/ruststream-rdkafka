@@ -40,7 +40,7 @@ use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 pub(crate) type TopicWatch = Option<std::sync::Arc<crate::schema::SchemaWatch>>;
 /// What a group subscription tells about each topic it is assigned: nothing without a registry.
 #[cfg(not(feature = "schema-registry"))]
-pub(crate) type TopicWatch = ();
+pub(crate) type TopicWatch = Option<std::convert::Infallible>;
 
 #[cfg(feature = "schema-registry")]
 fn notice(watch: &TopicWatch, partitions: &TopicPartitionList) {
@@ -52,6 +52,10 @@ fn notice(watch: &TopicWatch, partitions: &TopicPartitionList) {
 }
 
 #[cfg(not(feature = "schema-registry"))]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "one signature with the registry form, which borrows its watch"
+)]
 const fn notice(_watch: &TopicWatch, _partitions: &TopicPartitionList) {}
 
 /// How long one request resolving start positions waits for the cluster.
