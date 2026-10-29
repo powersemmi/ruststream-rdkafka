@@ -37,7 +37,7 @@ protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
 # Schemas as code: the `Schema` derive that checks a message type against the newest migration of
 # every subject in `schemas/` that declares its record, the traits its assertions name, and the
 # build-script check of a compiled `.proto` against its subject.
-schema-check = ["dep:ruststream-rdkafka-schema-macros"]
+schema-check = ["dep:ruststream-rdkafka-schema-macros", "dep:serde", "dep:toml"]
 # The protocol bindings this crate contributes to the generated AsyncAPI document: the Kafka
 # topic behind a channel, the consumer group of an operation, the schema-registry coordinate of
 # a server. Forwarded from the core, where the document is built.
@@ -75,6 +75,8 @@ prost-reflect = { workspace = true, optional = true }
 protox = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 ruststream-rdkafka-schema-macros = { workspace = true, optional = true }
+# Reads `subject.toml` in the build-script check of a compiled `.proto`.
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = [
