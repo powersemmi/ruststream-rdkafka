@@ -10,6 +10,11 @@ const SCHEMA_DIR: &str = "RUSTSTREAM_SCHEMA_DIR";
 
 #[test]
 fn json_check() {
+    // The snapshots hold the compiler's messages as the stable toolchain words them, so the
+    // cases run where they were written: the stable toolchain, under `RUN_UI_TESTS=1`.
+    if env::var_os("RUN_UI_TESTS").is_none() {
+        return;
+    }
     let schemas = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/json/schemas");
     // Each case compiles outside this crate, so the derive finds the subjects through the
     // environment. The test hands the variable to a run of itself instead of setting it in its
