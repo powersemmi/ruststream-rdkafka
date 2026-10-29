@@ -42,9 +42,6 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
         .filter(|subject| subject.settings.format == Format::Avro)
         .collect();
     let (named, declaring) = names_in(&avro, &model).map_err(|err| syn::Error::new(span, err))?;
-    if named {
-        out.extend(own_form(&model));
-    }
     if !declaring.is_empty() && model.generic {
         return Err(syn::Error::new(
             span,
@@ -58,10 +55,14 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
     }
     let mut checks = TokenStream::new();
     let mut errors: Option<syn::Error> = None;
+    let mut recursive = false;
     for subject in &declaring {
         for migration in subject.checked_migrations() {
             match checks_against(&model, &catalog, subject, migration) {
-                Ok(tokens) => checks.extend(tokens),
+                Ok((tokens, cycle)) => {
+                    checks.extend(tokens);
+                    recursive |= cycle;
+                }
                 Err(err) => match &mut errors {
                     Some(errors) => errors.combine(err),
                     None => errors = Some(err),
@@ -71,6 +72,11 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
     }
     if let Some(errors) = errors {
         return Err(errors);
+    }
+    // A recursive record's form would be an infinite constant, which the compiler rejects as a
+    // cycle the moment it exists; such a record is compared by the migrations tool alone.
+    if named && !recursive {
+        out.extend(own_form(&model));
     }
     let guard = online::guard(&declaring, span)?;
     out.extend(quote! {
@@ -117,8 +123,8 @@ fn runtime_impls(model: &Model) -> TokenStream {
     let p = private();
     let ident = &model.ident;
     let kind = match &model.shape {
-        ModelShape::Record(_) => quote!(#p::kind::Record),
-        ModelShape::Enum { .. } => quote!(#p::kind::Enum),
+        ModelShape::Record(_) => quote!(#p::kind::record),
+        ModelShape::Enum { .. } => quote!(#p::kind::r#enum),
         ModelShape::Transparent(_) | ModelShape::Set(_) => return TokenStream::new(),
     };
     let record = model.full_name();
@@ -276,13 +282,14 @@ fn export_test(model: &Model) -> TokenStream {
     export::test(ident, &model.full_name(), "avsc", schema)
 }
 
-/// The checks of the model against one migration of one subject.
+/// The checks of the model against one migration of one subject, and whether the record the
+/// migration declares for it is recursive.
 fn checks_against(
     model: &Model,
     catalog: &[Subject],
     subject: &Subject,
     migration: &Migration,
-) -> syn::Result<TokenStream> {
+) -> syn::Result<(TokenStream, bool)> {
     let span = model.ident.span();
     let external = |name: &str| reference(catalog, subject, name);
     let schema = parse::parse(&migration.content, &external).map_err(|err| {
@@ -292,7 +299,7 @@ fn checks_against(
         )
     })?;
     let Some(def) = schema.find(&model.full_name()) else {
-        return Ok(TokenStream::new());
+        return Ok((TokenStream::new(), false));
     };
     let site = check::Site {
         model,
@@ -302,10 +309,11 @@ fn checks_against(
     };
     let path = migration.path.display().to_string();
     let checks = check::checks(&site, def)?;
-    Ok(quote! {
+    let tokens = quote! {
         const _: &[u8] = include_bytes!(#path);
         #checks
-    })
+    };
+    Ok((tokens, def.is_recursive()))
 }
 
 /// A named type another subject holds, found through the references of `subject.toml`.

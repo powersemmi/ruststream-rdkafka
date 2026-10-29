@@ -29,3 +29,13 @@ serde_derive_internals = "0.29"
 ureq = { version = "3.5", default-features = false, features = ["rustls"] }
 base64 = "0.22"
 percent-encoding = "2"
+
+[dev-dependencies]
+# The compile-fail and pass cases build against the crate that holds the traits the derive's
+# assertions name, as a service does.
+trybuild = "1"
+ruststream-rdkafka = { workspace = true, features = ["schema-check", "avro"] }
+ruststream = { workspace = true, features = ["macros", "json"] }
+apache-avro = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

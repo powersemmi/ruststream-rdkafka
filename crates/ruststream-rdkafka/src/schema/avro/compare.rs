@@ -41,6 +41,11 @@ struct At {
     record: Option<Name>,
     field: Option<&'static str>,
     reading: bool,
+    /// A direct field of the checked type: a per-field bound already reports a different
+    /// kind there, so the comparison only descends into the named types it holds.
+    bounded: bool,
+    /// The position is the checked type's own record.
+    root_record: bool,
 }
 
 impl At {
@@ -51,6 +56,8 @@ impl At {
             record: None,
             field: None,
             reading: false,
+            bounded: false,
+            root_record: false,
         }
     }
 
@@ -61,6 +68,8 @@ impl At {
             record: Some(record),
             field: None,
             reading: self.reading,
+            bounded: false,
+            root_record: self.record.is_none(),
         }
     }
 
@@ -71,6 +80,8 @@ impl At {
             record: self.record,
             field: Some(field),
             reading: self.reading,
+            bounded: self.root_record,
+            root_record: false,
         }
     }
 
@@ -216,7 +227,10 @@ const fn describe(form: &Form) -> &'static str {
     }
 }
 
-const fn differ(ty: &Form, migration: &Form, at: &At) -> ! {
+const fn differ(ty: &Form, migration: &Form, at: &At) {
+    if at.bounded {
+        return;
+    }
     at.fail(&[
         "the type writes ",
         describe(ty),
@@ -240,6 +254,9 @@ const fn same(ty: &Form, migration: &Form, at: &At) {
         | (Form::Nullable(ty), Form::Nullable(migration)) => same(ty, migration, at),
         (Form::Union(ty), Form::Union(migration)) => {
             if ty.len() != migration.len() {
+                if at.bounded {
+                    return;
+                }
                 at.fail(&["the unions have a different number of branches"]);
             }
             let mut index = 0;
@@ -252,6 +269,40 @@ const fn same(ty: &Form, migration: &Form, at: &At) {
         (Form::Enum(ty), Form::Enum(migration)) => same_enum(ty, migration, at, false),
         (Form::Fixed(ty), Form::Fixed(migration)) => same_fixed(ty, migration, at),
         _ => differ(ty, migration, at),
+    }
+}
+
+/// The two forms have the same structure, names aside.
+const fn shapes_match(ty: &Form, migration: &Form) -> bool {
+    match (ty, migration) {
+        (Form::Array(ty), Form::Array(migration))
+        | (Form::Map(ty), Form::Map(migration))
+        | (Form::Nullable(ty), Form::Nullable(migration)) => shapes_match(ty, migration),
+        (Form::Union(ty), Form::Union(migration)) => {
+            if ty.len() != migration.len() {
+                return false;
+            }
+            let mut index = 0;
+            while index < ty.len() {
+                if !shapes_match(ty[index], migration[index]) {
+                    return false;
+                }
+                index += 1;
+            }
+            true
+        }
+        (Form::Null, Form::Null)
+        | (Form::Boolean, Form::Boolean)
+        | (Form::Int, Form::Int)
+        | (Form::Long, Form::Long)
+        | (Form::Float, Form::Float)
+        | (Form::Double, Form::Double)
+        | (Form::Bytes, Form::Bytes)
+        | (Form::String, Form::String)
+        | (Form::Record(_), Form::Record(_))
+        | (Form::Enum(_), Form::Enum(_))
+        | (Form::Fixed(_), Form::Fixed(_)) => true,
+        _ => false,
     }
 }
 
@@ -463,7 +514,10 @@ const fn same_record(ty: &RecordForm, migration: &RecordForm, outer: &At) {
         }
         if let (Shape::Typed(form), Shape::Typed(expected_form)) = (field.shape, expected.shape) {
             same(form, expected_form, &here);
-            same_default(field, expected, &here);
+            // A field of another kind is reported by its bound; its default follows its kind.
+            if shapes_match(form, expected_form) {
+                same_default(field, expected, &here);
+            }
         }
         index += 1;
     }
@@ -530,6 +584,7 @@ const fn reads(reader: &Form, writer: &Form, at: &At) {
         (Form::Nullable(reader), Form::Nullable(writer)) => reads(reader, writer, at),
         (Form::Nullable(_), Form::Null) => {}
         (Form::Nullable(reader), _) => reads(reader, writer, at),
+        (_, Form::Nullable(_)) if at.bounded => {}
         (_, Form::Nullable(_)) => at.fail(&[
             "the writer may write `null` and the type cannot hold it (make the field an `Option`)",
         ]),
@@ -550,6 +605,7 @@ const fn reads(reader: &Form, writer: &Form, at: &At) {
                 at.fail(&["the fixed sizes differ"]);
             }
         }
+        _ if at.bounded => {}
         _ => at.fail(&[
             "the type reads ",
             describe(reader),
@@ -642,13 +698,48 @@ mod tests {
         assert_reads(order!(ID_LONG), order!(ID_INT), SITE);
     }
 
+    macro_rules! item {
+        ($form:expr) => {
+            FieldForm {
+                name: "item",
+                shape: Shape::Typed($form),
+                default: None,
+            }
+        };
+    }
+
+    macro_rules! item_with_sku {
+        ($sku:expr) => {
+            &Form::Record(&RecordForm {
+                name: Name {
+                    namespace: Some("com.acme.orders"),
+                    name: "Item",
+                },
+                fields: &[FieldForm {
+                    name: "sku",
+                    shape: Shape::Typed($sku),
+                    default: None,
+                }],
+            })
+        };
+    }
+
     #[test]
     #[should_panic(
         expected = "`Order` does not match subject `orders-value` (migration 0002_add_item): \
-                    record `com.acme.orders.Order`, field `id`: the type writes `int` where the \
+                    record `com.acme.orders.Item`, field `sku`: the type writes `int` where the \
                     migration declares `long`"
     )]
-    fn a_different_kind_names_the_record_and_the_field() {
+    fn a_different_kind_in_a_nested_record_names_the_record_and_the_field() {
+        assert_equals(
+            order!(item!(item_with_sku!(&Form::Int))),
+            order!(item!(item_with_sku!(&Form::Long))),
+            SITE,
+        );
+    }
+
+    #[test]
+    fn a_different_kind_of_a_direct_field_is_left_to_its_bound() {
         assert_equals(order!(ID_INT), order!(ID_LONG), SITE);
     }
 
@@ -661,7 +752,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "the type reads `int` and the writer writes `long`")]
     fn a_reader_does_not_narrow() {
-        assert_reads(order!(ID_INT), order!(ID_LONG), SITE);
+        assert_reads(
+            order!(item!(item_with_sku!(&Form::Int))),
+            order!(item!(item_with_sku!(&Form::Long))),
+            SITE,
+        );
     }
 
     #[test]

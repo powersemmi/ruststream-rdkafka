@@ -1,0 +1,29 @@
+error[E0277]: `i32` cannot carry the Avro type `long` declared at `Order__id__in__orders_value__0002_add_item`
+  --> tests/ui/fail/field_kind.rs:10:13
+   |
+10 |     pub id: i32,
+   |             ^^^ this field's type does not match the registered schema
+   |
+   = note: the schema comes from the newest migration of each subject that declares the record; change the field or add a migration (`cargo kafka-schema migrate add <subject> <description>`)
+help: the trait `Carries<long, Order__id__in__orders_value__0002_add_item>` is not implemented for `i32`
+      but trait `Carries<int, Order__id__in__orders_value__0002_add_item>` is implemented for it
+  --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/kind.rs
+   |
+   |           $($(impl<Site> Carries<$kind, Site> for $ty {})+)*
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / carries! {
+   | |     null: ();
+   | |     boolean: bool;
+   | |     int: i8, i16, i32, u8, u16;
+...  |
+   | |     record: Duration;
+   | | }
+   | |_- in this macro invocation
+   = help: for that trait implementation, expected `int`, found `long`
+note: required by a bound in `_::_::{closure#0}::field`
+  --> tests/ui/fail/field_kind.rs:7:46
+   |
+ 7 | #[derive(Serialize, Deserialize, AvroSchema, Schema)]
+   |                                              ^^^^^^ required by this bound in `field`
+   = note: this error originates in the macro `carries` which comes from the expansion of the derive macro `Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

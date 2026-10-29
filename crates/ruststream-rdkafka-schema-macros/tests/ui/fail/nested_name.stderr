@@ -1,0 +1,52 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0002_add_item): record `com.acme.orders.Order`, field `item`: the type is the record `com.acme.catalog.Item` where the migration declares `com.acme.orders.Item`
+ --> tests/ui/fail/nested_name.rs:7:46
+  |
+7 | #[derive(Serialize, Deserialize, AvroSchema, Schema)]
+  |                                              ^^^^^^ evaluation of `_::_` failed inside this call
+  |
+note: inside `ruststream_rdkafka::schema::avro::assert_equals`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |     same(ty, migration, &at);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `ruststream_rdkafka::schema::avro::compare::same`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |         (Form::Record(ty), Form::Record(migration)) => same_record(ty, migration, at),
+  |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `ruststream_rdkafka::schema::avro::compare::same_record`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |             same(form, expected_form, &here);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `ruststream_rdkafka::schema::avro::compare::same`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |         (Form::Record(ty), Form::Record(migration)) => same_record(ty, migration, at),
+  |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `ruststream_rdkafka::schema::avro::compare::same_record`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |         named_differ("record", ty.name, migration.name, outer);
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `ruststream_rdkafka::schema::avro::compare::named_differ`
+ --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  | /     at.fail(&[
+  | |         "the type is the ",
+  | |         what,
+  | |         " `",
+... |
+  | |         "`",
+  | |     ])
+  | |______^
+note: inside `ruststream_rdkafka::schema::avro::compare::At::fail`
+ --> $RUST/core/src/panic.rs
+  |
+  |         $crate::panicking::panic_display(&$arg);
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+  |
+ ::: $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/compare.rs
+  |
+  |         panic!("{}", msg.as_str());
+  |         -------------------------- in this macro invocation

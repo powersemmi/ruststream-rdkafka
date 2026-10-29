@@ -1,0 +1,10 @@
+{"type": "record", "name": "Order", "namespace": "com.acme.orders", "fields": [
+  {"name": "id", "type": "long"},
+  {"name": "item", "type": {"type": "record", "name": "Item", "fields": [
+    {"name": "sku", "type": "string"},
+    {"name": "tags", "type": {"type": "array", "items": "string"}}
+  ]}},
+  {"name": "note", "type": ["null", "string"], "default": null},
+  {"name": "status", "type": {"type": "enum", "name": "Status", "symbols": ["PLACED", "SHIPPED"]}},
+  {"name": "spare", "type": ["null", "Item"], "default": null}
+]}

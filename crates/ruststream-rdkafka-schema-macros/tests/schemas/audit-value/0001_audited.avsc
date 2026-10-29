@@ -1,0 +1,1 @@
+{"type": "record", "name": "Audited", "namespace": "com.acme.audit", "fields": [{"name": "id", "type": "long"}, {"name": "at", "type": {"type": "fixed", "name": "u64", "namespace": "org.apache.avro.rust", "size": 8}}, {"name": "by", "type": "string"}, {"name": "host", "type": "string"}]}

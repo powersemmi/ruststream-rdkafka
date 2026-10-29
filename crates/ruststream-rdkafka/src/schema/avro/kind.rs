@@ -1,8 +1,8 @@
 //! The Avro types a migration declares, as marker types the per-field bounds name.
 //!
-//! A bound reads `i64: Carries<kind::Long, Site>`, where the site names the type, the field,
+//! A bound reads `i64: Carries<kind::long, Site>`, where the site names the type, the field,
 //! the subject and the migration, so a mismatch is reported as
-//! `` `i32` cannot carry the Avro type `Long` declared at `Order__id__in__orders_value__0002_add_item` ``.
+//! `` `i32` cannot carry the Avro type `long` declared at `Order__id__in__orders_value__0002_add_item` ``.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use std::time::Duration;
 ///
 /// The `Schema` derive bounds every field of a type an owned subject declares on it. The crate
 /// implements it for the types `apache_avro`'s `AvroSchema` derive maps, and the derive for the
-/// type it derives (`kind::Record` for a struct, `kind::Enum` for a unit-variant enum).
+/// type it derives (`kind::record` for a struct, `kind::enum` for a unit-variant enum).
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot carry the Avro type `{Kind}` declared at `{Site}`",
     label = "this field's type does not match the registered schema",
@@ -42,48 +42,51 @@ pub trait Reads<Kind, Site> {}
 
 macro_rules! marker {
     ($($(#[$doc:meta])* $name:ident),* $(,)?) => {
-        $($(#[$doc])* #[derive(Debug)] pub enum $name {})*
+        $($(#[$doc])* #[derive(Debug)] #[allow(non_camel_case_types)] pub enum $name {})*
     };
 }
 
 marker! {
     /// `null`.
-    Null,
+    null,
     /// `boolean`.
-    Boolean,
+    boolean,
     /// `int`.
-    Int,
+    int,
     /// `long`.
-    Long,
+    long,
     /// `float`.
-    Float,
+    float,
     /// `double`.
-    Double,
+    double,
     /// `bytes`.
-    Bytes,
+    bytes,
     /// `string`.
-    String,
+    string,
     /// A `record`; its name is compared by the whole-schema constant.
-    Record,
+    record,
     /// An `enum`; its symbols are compared where the derive reads the enum.
-    Enum,
+    r#enum,
     /// A `fixed`; its name and size are compared by the whole-schema constant.
-    Fixed,
+    fixed,
     /// A union other than `["null", T]`.
-    Union,
+    union,
 }
 
 /// An `array` of `Items`.
 #[derive(Debug)]
-pub struct Array<Items>(PhantomData<Items>);
+#[allow(non_camel_case_types)]
+pub struct array<Items>(PhantomData<Items>);
 
 /// A `map` with values of `Values`.
 #[derive(Debug)]
-pub struct Map<Values>(PhantomData<Values>);
+#[allow(non_camel_case_types)]
+pub struct map<Values>(PhantomData<Values>);
 
 /// `["null", T]`: what an `Option<T>` writes.
 #[derive(Debug)]
-pub struct Nullable<Value>(PhantomData<Value>);
+#[allow(non_camel_case_types)]
+pub struct nullable<Value>(PhantomData<Value>);
 
 macro_rules! carries {
     ($($kind:ident: $($ty:ty),+;)*) => {
@@ -92,15 +95,15 @@ macro_rules! carries {
 }
 
 carries! {
-    Null: ();
-    Boolean: bool;
-    Int: i8, i16, i32, u8, u16;
-    Long: i64, u32;
-    Float: f32;
-    Double: f64;
-    String: std::string::String, str, char;
-    Fixed: u64, u128, i128;
-    Record: Duration;
+    null: ();
+    boolean: bool;
+    int: i8, i16, i32, u8, u16;
+    long: i64, u32;
+    float: f32;
+    double: f64;
+    string: ::std::string::String, str, char;
+    fixed: u64, u128, i128;
+    record: Duration;
 }
 
 macro_rules! reads {
@@ -110,16 +113,16 @@ macro_rules! reads {
 }
 
 reads! {
-    Null: ();
-    Boolean: bool;
-    Int: i8, i16, i32, u8, u16, i64, u32, f32, f64;
-    Long: i64, u32, f32, f64;
-    Float: f32, f64;
-    Double: f64;
-    String: std::string::String, str, char;
-    Bytes: std::string::String, str;
-    Fixed: u64, u128, i128;
-    Record: Duration;
+    null: ();
+    boolean: bool;
+    int: i8, i16, i32, u8, u16, i64, u32, f32, f64;
+    long: i64, u32, f32, f64;
+    float: f32, f64;
+    double: f64;
+    string: ::std::string::String, str, char;
+    bytes: ::std::string::String, str;
+    fixed: u64, u128, i128;
+    record: Duration;
 }
 
 macro_rules! passthrough {
@@ -136,22 +139,22 @@ passthrough!(&T, &mut T, Box<T>, Mutex<T>);
 impl<Kind, Site, T: Carries<Kind, Site> + ToOwned + ?Sized> Carries<Kind, Site> for Cow<'_, T> {}
 impl<Kind, Site, T: Reads<Kind, Site> + ToOwned + ?Sized> Reads<Kind, Site> for Cow<'_, T> {}
 
-impl<Items, Site, T: Carries<Items, Site>> Carries<Array<Items>, Site> for Vec<T> {}
-impl<Items, Site, T: Carries<Items, Site>> Carries<Array<Items>, Site> for [T] {}
-impl<Items, Site, T: Reads<Items, Site>> Reads<Array<Items>, Site> for Vec<T> {}
-impl<Items, Site, T: Reads<Items, Site>> Reads<Array<Items>, Site> for [T] {}
+impl<Items, Site, T: Carries<Items, Site>> Carries<array<Items>, Site> for Vec<T> {}
+impl<Items, Site, T: Carries<Items, Site>> Carries<array<Items>, Site> for [T] {}
+impl<Items, Site, T: Reads<Items, Site>> Reads<array<Items>, Site> for Vec<T> {}
+impl<Items, Site, T: Reads<Items, Site>> Reads<array<Items>, Site> for [T] {}
 
-impl<Values, Site, T: Carries<Values, Site>> Carries<Map<Values>, Site>
-    for HashMap<std::string::String, T>
+impl<Values, Site, T: Carries<Values, Site>> Carries<map<Values>, Site>
+    for HashMap<::std::string::String, T>
 {
 }
-impl<Values, Site, T: Reads<Values, Site>> Reads<Map<Values>, Site>
-    for HashMap<std::string::String, T>
+impl<Values, Site, T: Reads<Values, Site>> Reads<map<Values>, Site>
+    for HashMap<::std::string::String, T>
 {
 }
 
-impl<Value, Site, T: Carries<Value, Site>> Carries<Nullable<Value>, Site> for Option<T> {}
-impl<Value, Site, T: Reads<Value, Site>> Reads<Nullable<Value>, Site> for Option<T> {}
+impl<Value, Site, T: Carries<Value, Site>> Carries<nullable<Value>, Site> for Option<T> {}
+impl<Value, Site, T: Reads<Value, Site>> Reads<nullable<Value>, Site> for Option<T> {}
 
 // A reader's `Option` picks its branch by what the writer wrote, so it reads a writer that
 // never writes `null` as well. Listed per kind: a blanket impl would overlap the one above.
@@ -162,8 +165,8 @@ macro_rules! option_reads {
 }
 
 option_reads!(
-    Null, Boolean, Int, Long, Float, Double, Bytes, String, Record, Enum, Fixed, Union
+    null, boolean, int, long, float, double, bytes, string, record, r#enum, fixed, union
 );
 
-impl<Items, Site, T: Reads<Array<Items>, Site>> Reads<Array<Items>, Site> for Option<T> {}
-impl<Values, Site, T: Reads<Map<Values>, Site>> Reads<Map<Values>, Site> for Option<T> {}
+impl<Items, Site, T: Reads<array<Items>, Site>> Reads<array<Items>, Site> for Option<T> {}
+impl<Values, Site, T: Reads<map<Values>, Site>> Reads<map<Values>, Site> for Option<T> {}

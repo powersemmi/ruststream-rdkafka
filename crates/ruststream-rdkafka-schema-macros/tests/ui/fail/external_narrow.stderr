@@ -1,0 +1,29 @@
+error[E0277]: `i32` cannot read the Avro type `long` written at `Stock__count__in__inventory_value__0002`
+  --> tests/ui/fail/external_narrow.rs:11:16
+   |
+11 |     pub count: i32,
+   |                ^^^ this field's type cannot read what the external subject writes
+   |
+   = note: an external subject is read under Avro's resolution rules: `int` promotes to `long`, `float` or `double`, `string` and `bytes` convert, and a field the writer lacks needs a default; change the field, or pull the subject again (`cargo kafka-schema migrate import <subject>`)
+help: the trait `Reads<long, Stock__count__in__inventory_value__0002>` is not implemented for `i32`
+      but trait `Reads<int, Stock__count__in__inventory_value__0002>` is implemented for it
+  --> $WORKSPACE/crates/ruststream-rdkafka/src/schema/avro/kind.rs
+   |
+   |           $($(impl<Site> Reads<$kind, Site> for $ty {})+)*
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / reads! {
+   | |     null: ();
+   | |     boolean: bool;
+   | |     int: i8, i16, i32, u8, u16, i64, u32, f32, f64;
+...  |
+   | |     record: Duration;
+   | | }
+   | |_- in this macro invocation
+   = help: for that trait implementation, expected `int`, found `long`
+note: required by a bound in `_::_::{closure#0}::field`
+  --> tests/ui/fail/external_narrow.rs:7:35
+   |
+ 7 | #[derive(Deserialize, AvroSchema, Schema)]
+   |                                   ^^^^^^ required by this bound in `field`
+   = note: this error originates in the macro `reads` which comes from the expansion of the derive macro `Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

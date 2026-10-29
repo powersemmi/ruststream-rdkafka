@@ -94,30 +94,30 @@ pub(crate) fn kind(avro: &Avro) -> TokenStream {
     let p = private();
     let k = quote!(#p::kind);
     match avro {
-        Avro::Null => quote!(#k::Null),
-        Avro::Boolean => quote!(#k::Boolean),
-        Avro::Int => quote!(#k::Int),
-        Avro::Long => quote!(#k::Long),
-        Avro::Float => quote!(#k::Float),
-        Avro::Double => quote!(#k::Double),
-        Avro::Bytes => quote!(#k::Bytes),
-        Avro::String => quote!(#k::String),
+        Avro::Null => quote!(#k::null),
+        Avro::Boolean => quote!(#k::boolean),
+        Avro::Int => quote!(#k::int),
+        Avro::Long => quote!(#k::long),
+        Avro::Float => quote!(#k::float),
+        Avro::Double => quote!(#k::double),
+        Avro::Bytes => quote!(#k::bytes),
+        Avro::String => quote!(#k::string),
         Avro::Array(items) => {
             let items = kind(items);
-            quote!(#k::Array<#items>)
+            quote!(#k::array<#items>)
         }
         Avro::Map(values) => {
             let values = kind(values);
-            quote!(#k::Map<#values>)
+            quote!(#k::map<#values>)
         }
         Avro::Nullable(value) => {
             let value = kind(value);
-            quote!(#k::Nullable<#value>)
+            quote!(#k::nullable<#value>)
         }
-        Avro::Union(_) => quote!(#k::Union),
-        Avro::Record(_) | Avro::Recursive(_) => quote!(#k::Record),
-        Avro::Enum(_) => quote!(#k::Enum),
-        Avro::Fixed(_) => quote!(#k::Fixed),
+        Avro::Union(_) => quote!(#k::union),
+        Avro::Record(_) | Avro::Recursive(_) => quote!(#k::record),
+        Avro::Enum(_) => quote!(#k::r#enum),
+        Avro::Fixed(_) => quote!(#k::fixed),
     }
 }
 

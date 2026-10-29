@@ -68,7 +68,6 @@ fn record_checks(
     let full = model.full_name();
     let mut errors: Vec<syn::Error> = Vec::new();
     let mut bounds = TokenStream::new();
-    let mut defaults = TokenStream::new();
     let flattens = fields.iter().any(|field| field.form == FieldForm::Flatten);
     for field in fields.iter().filter(|field| field.form != FieldForm::Flatten) {
         let declared = record.fields.iter().find(|declared| declared.name == field.name);
@@ -94,23 +93,8 @@ fn record_checks(
                         site.at()
                     ),
                 )),
-                None => {
-                    let ty = &field.ty;
-                    let message = format!(
-                        "field `{}` of `{}` is not in record `{full}` {}, and its type gives it \
-                         no default; a reader needs one for a field the writer lacks (add \
-                         `#[avro(default = ..)]` or make it an `Option`)",
-                        field.name,
-                        model.ident,
-                        site.at()
-                    );
-                    defaults.extend(quote_spanned! {field.span=>
-                        const _: () = ::core::assert!(
-                            <#ty as #p::AvroForm>::FIELD_DEFAULT.is_some(),
-                            #message,
-                        );
-                    });
-                }
+                // The type's own default is known in the constant, which reports its absence.
+                None => {}
             },
             (Some(declared), external) if field.form == FieldForm::Typed => {
                 let ty = &field.ty;
@@ -164,7 +148,6 @@ fn record_checks(
     let compare = compare(site, def);
     Ok(quote! {
         #bounds
-        #defaults
         #compare
     })
 }
