@@ -3,6 +3,10 @@
 //! Use it through `ruststream-rdkafka`'s `schema-check` feature, as
 //! `ruststream_rdkafka::schema::Schema`: the assertions it emits name traits that live there.
 
+// The derive is a stub until the checks land; these modules are what it will call.
+#[allow(dead_code)]
+mod lock;
+#[allow(dead_code)]
 mod migrations;
 
 use proc_macro::TokenStream;
