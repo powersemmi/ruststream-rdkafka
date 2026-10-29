@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `closed-value` (migration 0001_init): Order: the schema's object at `#` is closed (additionalProperties: false), and the flattened map writes properties it does not declare
+  --> tests/json/fail/closed_flattened_map.rs:10:12
+   |
+10 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

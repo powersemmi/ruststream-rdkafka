@@ -113,3 +113,9 @@ pub use record::{Record, RecordKind, RecordSet};
 #[cfg(feature = "schema-check")]
 #[doc(hidden)]
 pub mod __private;
+
+#[cfg(feature = "schema-check")]
+pub mod json;
+#[cfg(feature = "schema-check")]
+#[doc(hidden)]
+pub use json::__private as __json;

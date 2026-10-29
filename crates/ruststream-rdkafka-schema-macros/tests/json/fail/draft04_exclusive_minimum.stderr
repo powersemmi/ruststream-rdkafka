@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `draft04-value` (migration 0001_init): Order.qty: the schema uses `exclusiveMinimum` at `#/properties/qty/exclusiveMinimum`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/draft04_exclusive_minimum.rs:8:12
+  |
+8 | pub struct Order {
+  |            ^^^^^ evaluation of `_` failed here

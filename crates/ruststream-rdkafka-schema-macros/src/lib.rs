@@ -83,11 +83,7 @@ use syn::{DeriveInput, parse_macro_input};
 #[proc_macro_derive(Schema, attributes(schema))]
 pub fn derive_schema(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    let expanded = if input
-        .attrs
-        .iter()
-        .any(|attr| attr.path().is_ident("schema"))
-    {
+    let expanded = if json::has_namespace(&input) {
         json::derive(&input)
     } else {
         avro::derive(&input)

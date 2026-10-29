@@ -1,0 +1,2 @@
+format = "json"
+record = "schema.any_of.Order"
