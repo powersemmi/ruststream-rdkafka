@@ -4,3 +4,14 @@
 
 #[cfg(feature = "schema-check")]
 pub use ruststream_rdkafka_schema_macros::Schema;
+
+#[cfg(feature = "schema-check")]
+pub mod avro;
+#[cfg(feature = "schema-check")]
+mod record;
+#[cfg(feature = "schema-check")]
+pub use record::{Record, RecordKind, RecordSet};
+
+#[cfg(feature = "schema-check")]
+#[doc(hidden)]
+pub mod __private;

@@ -151,6 +151,33 @@ impl Subject {
     }
 }
 
+impl Subject {
+    /// The migrations the derive checks a type against: the newest one for a subject this
+    /// service owns, every pulled version for an external one.
+    pub(crate) fn checked_migrations(&self) -> &[Migration] {
+        match self.settings.owner {
+            Owner::Service => self.migrations.len().checked_sub(1).map_or(&[], |newest| {
+                &self.migrations[newest..]
+            }),
+            Owner::External => &self.migrations,
+        }
+    }
+
+    /// The full names of the named types an Avro migration defines, nested ones included.
+    ///
+    /// # Errors
+    ///
+    /// A migration that is not JSON.
+    pub(crate) fn named_types_of(migration: &Migration) -> Result<Vec<String>, String> {
+        let schema: Value = serde_json::from_str(&migration.content).map_err(|err| {
+            format!("migration `{}` is not JSON: {err}", migration.path.display())
+        })?;
+        let mut names = Vec::new();
+        avro_named_types(&schema, None, &mut names);
+        Ok(names)
+    }
+}
+
 /// Every subject directory under `dir`, sorted by subject name. A missing directory is an
 /// empty catalog: a crate with no migrations derives `Schema` with no checks.
 ///
