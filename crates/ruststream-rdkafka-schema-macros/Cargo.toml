@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+readme = "../../README.md"
 authors.workspace = true
 keywords = ["kafka", "schema-registry", "avro", "ruststream", "derive"]
 categories = ["development-tools::procedural-macro-helpers", "encoding"]
