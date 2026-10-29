@@ -30,6 +30,10 @@ allow = [
     # rustls-tls stack); CDLA-Permissive-2.0 covers that certificate data only
     # and is permissive.
     "CDLA-Permissive-2.0",
+    # The migrations tool's JSON Schema validator reaches `borrow-or-share` (MIT-0) through
+    # `fluent-uri`, and `foldhash` (Zlib). Both are permissive.
+    "MIT-0",
+    "Zlib",
 ]
 
 [bans]

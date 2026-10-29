@@ -89,6 +89,9 @@
 //! [checking]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/schema/
 
 #[cfg(feature = "schema-check")]
+pub mod build;
+
+#[cfg(feature = "schema-check")]
 pub use ruststream_rdkafka_schema_macros::Schema;
 
 #[cfg(feature = "schema-registry")]

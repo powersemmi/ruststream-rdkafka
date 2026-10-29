@@ -43,7 +43,13 @@ protobuf = ["schema-registry", "dep:prost", "dep:prost-reflect", "dep:protox"]
 # Schemas as code: the `Schema` derive that checks a message type against the newest migration of
 # every subject in `schemas/` that declares its record, the traits its assertions name, and the
 # build-script check of a compiled `.proto` against its subject.
-schema-check = ["dep:ruststream-rdkafka-schema-macros", "dep:serde_json", "dep:schemars"]
+schema-check = [
+    "dep:ruststream-rdkafka-schema-macros",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:schemars",
+    "dep:toml",
+]
 # The JSON Schema check's shapes of `uuid::Uuid` and the `chrono` date types, and their schemas in
 # the export `cargo kafka-schema` runs.
 uuid = ["dep:uuid", "schemars?/uuid1"]
@@ -87,6 +93,8 @@ regex = { workspace = true, optional = true }
 ruststream-rdkafka-schema-macros = { workspace = true, optional = true }
 uuid = { version = "1", optional = true }
 chrono = { version = "0.4", optional = true, default-features = false }
+# Reads `subject.toml` in the build-script check of a compiled `.proto`.
+toml = { workspace = true, optional = true }
 
 [dev-dependencies]
 ruststream = { workspace = true, features = [

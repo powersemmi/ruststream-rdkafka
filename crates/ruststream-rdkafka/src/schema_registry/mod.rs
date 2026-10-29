@@ -41,6 +41,7 @@
 //! [envelope]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/envelope/
 //! [third-party]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/third-party/
 
+pub mod admin;
 mod cache;
 mod client;
 mod name;
