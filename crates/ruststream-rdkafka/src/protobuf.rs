@@ -180,6 +180,7 @@ impl ProtobufFraming {
         self.subjects.set_strategy(strategy);
     }
 
+    #[cfg(feature = "asyncapi")]
     pub(crate) fn strategy(&self) -> SubjectStrategy {
         self.subjects.strategy()
     }
