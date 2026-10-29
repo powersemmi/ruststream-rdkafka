@@ -13,8 +13,10 @@
 //! belong in what every implementation has to answer.
 
 use std::fmt;
-use std::str::FromStr;
 
+use reqwest::header::ACCEPT;
+use reqwest::{Client, Error as HttpError, Method, RequestBuilder, Response, StatusCode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -22,116 +24,9 @@ use super::client::{Auth, HttpConfig};
 use super::{SchemaRegistry, SchemaType};
 use crate::error::KafkaError;
 
-/// The compatibility level a registry holds a subject to.
-///
-/// A `_TRANSITIVE` level checks a new schema against every version of the subject; the plain
-/// level checks it against the latest one only.
-///
-/// # Examples
-///
-/// ```
-/// use ruststream_rdkafka::schema_registry::admin::CompatibilityLevel;
-///
-/// fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // What `subject.toml` says, parsed the way the registry spells it.
-///     let level: CompatibilityLevel = "BACKWARD_TRANSITIVE".parse()?;
-///     println!("new schemas must read every version: {}", level.checks_backward());
-///     Ok(())
-/// }
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CompatibilityLevel {
-    /// No check.
-    None,
-    /// A reader of the new schema reads data written with the latest version.
-    Backward,
-    /// A reader of the new schema reads data written with every version.
-    BackwardTransitive,
-    /// A reader of the latest version reads data written with the new schema.
-    Forward,
-    /// A reader of every version reads data written with the new schema.
-    ForwardTransitive,
-    /// Both [`Backward`](Self::Backward) and [`Forward`](Self::Forward).
-    Full,
-    /// Both [`BackwardTransitive`](Self::BackwardTransitive) and
-    /// [`ForwardTransitive`](Self::ForwardTransitive).
-    FullTransitive,
-}
+mod level;
 
-impl CompatibilityLevel {
-    /// The name the registry's API uses (`BACKWARD_TRANSITIVE`, ..).
-    #[must_use]
-    pub const fn as_api(self) -> &'static str {
-        match self {
-            Self::None => "NONE",
-            Self::Backward => "BACKWARD",
-            Self::BackwardTransitive => "BACKWARD_TRANSITIVE",
-            Self::Forward => "FORWARD",
-            Self::ForwardTransitive => "FORWARD_TRANSITIVE",
-            Self::Full => "FULL",
-            Self::FullTransitive => "FULL_TRANSITIVE",
-        }
-    }
-
-    /// Whether a reader of the new schema must read what the older versions wrote.
-    #[must_use]
-    pub const fn checks_backward(self) -> bool {
-        matches!(
-            self,
-            Self::Backward | Self::BackwardTransitive | Self::Full | Self::FullTransitive
-        )
-    }
-
-    /// Whether a reader of the older versions must read what the new schema writes.
-    #[must_use]
-    pub const fn checks_forward(self) -> bool {
-        matches!(
-            self,
-            Self::Forward | Self::ForwardTransitive | Self::Full | Self::FullTransitive
-        )
-    }
-
-    /// Whether the check covers every version rather than the latest one.
-    #[must_use]
-    pub const fn is_transitive(self) -> bool {
-        matches!(
-            self,
-            Self::BackwardTransitive | Self::ForwardTransitive | Self::FullTransitive
-        )
-    }
-}
-
-impl fmt::Display for CompatibilityLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_api())
-    }
-}
-
-/// A compatibility level name the registry does not know.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "`{0}` is not a compatibility level; the registry knows NONE, BACKWARD, \
-     BACKWARD_TRANSITIVE, FORWARD, FORWARD_TRANSITIVE, FULL and FULL_TRANSITIVE"
-)]
-pub struct ParseCompatibilityLevelError(String);
-
-impl FromStr for CompatibilityLevel {
-    type Err = ParseCompatibilityLevelError;
-
-    fn from_str(name: &str) -> Result<Self, Self::Err> {
-        Ok(match name {
-            "NONE" => Self::None,
-            "BACKWARD" => Self::Backward,
-            "BACKWARD_TRANSITIVE" => Self::BackwardTransitive,
-            "FORWARD" => Self::Forward,
-            "FORWARD_TRANSITIVE" => Self::ForwardTransitive,
-            "FULL" => Self::Full,
-            "FULL_TRANSITIVE" => Self::FullTransitive,
-            other => return Err(ParseCompatibilityLevelError(other.to_owned())),
-        })
-    }
-}
+pub use level::{CompatibilityLevel, ParseCompatibilityLevelError};
 
 /// A schema another schema refers to: a Protobuf import, a JSON Schema `$ref`, a member of an
 /// Avro union, held by a subject of its own.
@@ -395,7 +290,7 @@ struct RegistryErrorBody {
 #[derive(Clone)]
 pub struct RegistryAdmin {
     config: HttpConfig,
-    http: reqwest::Client,
+    http: Client,
 }
 
 impl fmt::Debug for RegistryAdmin {
@@ -433,7 +328,7 @@ impl SchemaRegistry {
         let config = self.inner.shipped.clone()?;
         Some(RegistryAdmin {
             config,
-            http: reqwest::Client::new(),
+            http: Client::new(),
         })
     }
 }
@@ -449,10 +344,8 @@ impl RegistryAdmin {
     /// request, and [`KafkaError::SchemaRegistryTimeout`] when it does not answer in time.
     pub async fn versions(&self, subject: &str) -> Result<Vec<u32>, KafkaError> {
         let path = format!("/subjects/{subject}/versions");
-        let response = self
-            .send(self.request(reqwest::Method::GET, &path), &path)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let response = self.send(self.request(Method::GET, &path), &path).await?;
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(Vec::new());
         }
         let mut versions: Vec<u32> = self.read(response, &path).await?;
@@ -469,9 +362,7 @@ impl RegistryAdmin {
     /// not answer in time.
     pub async fn version(&self, subject: &str, version: u32) -> Result<SubjectVersion, KafkaError> {
         let path = format!("/subjects/{subject}/versions/{version}");
-        let response = self
-            .send(self.request(reqwest::Method::GET, &path), &path)
-            .await?;
+        let response = self.send(self.request(Method::GET, &path), &path).await?;
         let found: VersionResponse = self.read(response, &path).await?;
         Ok(found.into())
     }
@@ -492,11 +383,9 @@ impl RegistryAdmin {
         draft: &SchemaDraft,
     ) -> Result<Option<SubjectVersion>, KafkaError> {
         let path = format!("/subjects/{subject}");
-        let request = self
-            .request(reqwest::Method::POST, &path)
-            .json(&draft.body());
+        let request = self.request(Method::POST, &path).json(&draft.body());
         let response = self.send(request, &path).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let found: VersionResponse = self.read(response, &path).await?;
@@ -522,11 +411,9 @@ impl RegistryAdmin {
         // `/versions` without a number is the check registration itself runs; `/versions/latest`
         // compares with the latest version alone, even under a `_TRANSITIVE` level.
         let path = format!("/compatibility/subjects/{subject}/versions?verbose=true");
-        let request = self
-            .request(reqwest::Method::POST, &path)
-            .json(&draft.body());
+        let request = self.request(Method::POST, &path).json(&draft.body());
         let response = self.send(request, &path).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(CompatibilityVerdict {
                 compatible: true,
                 messages: Vec::new(),
@@ -549,9 +436,7 @@ impl RegistryAdmin {
     /// [`KafkaError::SchemaRegistryTimeout`] when it does not answer in time.
     pub async fn register(&self, subject: &str, draft: &SchemaDraft) -> Result<u32, KafkaError> {
         let path = format!("/subjects/{subject}/versions");
-        let request = self
-            .request(reqwest::Method::POST, &path)
-            .json(&draft.body());
+        let request = self.request(Method::POST, &path).json(&draft.body());
         let response = self.send(request, &path).await?;
         let registered: RegisterResponse = self.read(response, &path).await?;
         Ok(registered.id)
@@ -570,10 +455,8 @@ impl RegistryAdmin {
         subject: &str,
     ) -> Result<Option<CompatibilityLevel>, KafkaError> {
         let path = format!("/config/{subject}?defaultToGlobal=false");
-        let response = self
-            .send(self.request(reqwest::Method::GET, &path), &path)
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let response = self.send(self.request(Method::GET, &path), &path).await?;
+        if response.status() == StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let config: ConfigResponse = self.read(response, &path).await?;
@@ -598,23 +481,20 @@ impl RegistryAdmin {
     ) -> Result<(), KafkaError> {
         let path = format!("/config/{subject}");
         let request = self
-            .request(reqwest::Method::PUT, &path)
+            .request(Method::PUT, &path)
             .json(&json!({ "compatibility": level.as_api() }));
         let response = self.send(request, &path).await?;
         let _: serde_json::Value = self.read(response, &path).await?;
         Ok(())
     }
 
-    fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let url = format!("{}{path}", self.config.base_url);
         let request = self
             .http
             .request(method, url)
             .timeout(self.config.timeout)
-            .header(
-                reqwest::header::ACCEPT,
-                "application/vnd.schemaregistry.v1+json",
-            );
+            .header(ACCEPT, "application/vnd.schemaregistry.v1+json");
         match &self.config.auth {
             Auth::None => request,
             Auth::Basic { user, password } => request.basic_auth(user, Some(password)),
@@ -622,20 +502,16 @@ impl RegistryAdmin {
         }
     }
 
-    async fn send(
-        &self,
-        request: reqwest::RequestBuilder,
-        path: &str,
-    ) -> Result<reqwest::Response, KafkaError> {
+    async fn send(&self, request: RequestBuilder, path: &str) -> Result<Response, KafkaError> {
         request.send().await.map_err(|err| self.failed(path, err))
     }
 
     /// Reads a successful answer, or turns a failing one into an error that carries the
     /// registry's own code and message: the difference between "422" and "the schema does not
     /// parse at line 3".
-    async fn read<Answer: serde::de::DeserializeOwned>(
+    async fn read<Answer: DeserializeOwned>(
         &self,
-        response: reqwest::Response,
+        response: Response,
         path: &str,
     ) -> Result<Answer, KafkaError> {
         let status = response.status();
@@ -655,7 +531,7 @@ impl RegistryAdmin {
         response.json().await.map_err(|err| self.failed(path, err))
     }
 
-    fn failed(&self, path: &str, err: reqwest::Error) -> KafkaError {
+    fn failed(&self, path: &str, err: HttpError) -> KafkaError {
         if err.is_timeout() {
             return KafkaError::SchemaRegistryTimeout {
                 request: path.to_owned(),
@@ -694,42 +570,6 @@ mod tests {
             "id": id,
             "schema": ORDER,
         })
-    }
-
-    #[test]
-    fn levels_parse_from_their_api_names_and_back() {
-        for level in [
-            CompatibilityLevel::None,
-            CompatibilityLevel::Backward,
-            CompatibilityLevel::BackwardTransitive,
-            CompatibilityLevel::Forward,
-            CompatibilityLevel::ForwardTransitive,
-            CompatibilityLevel::Full,
-            CompatibilityLevel::FullTransitive,
-        ] {
-            assert_eq!(level.as_api().parse::<CompatibilityLevel>(), Ok(level));
-        }
-        let err = "backward"
-            .parse::<CompatibilityLevel>()
-            .expect_err("lower case");
-        assert!(
-            err.to_string()
-                .contains("`backward` is not a compatibility level")
-        );
-    }
-
-    #[test]
-    fn levels_name_their_directions() {
-        assert!(CompatibilityLevel::Backward.checks_backward());
-        assert!(!CompatibilityLevel::Backward.checks_forward());
-        assert!(!CompatibilityLevel::Backward.is_transitive());
-        assert!(CompatibilityLevel::ForwardTransitive.checks_forward());
-        assert!(!CompatibilityLevel::ForwardTransitive.checks_backward());
-        assert!(CompatibilityLevel::FullTransitive.checks_backward());
-        assert!(CompatibilityLevel::FullTransitive.checks_forward());
-        assert!(CompatibilityLevel::FullTransitive.is_transitive());
-        assert!(!CompatibilityLevel::None.checks_backward());
-        assert!(!CompatibilityLevel::None.checks_forward());
     }
 
     struct Foreign;

@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use clap::ValueEnum;
 use ruststream_rdkafka::schema_registry::SchemaType;
 use ruststream_rdkafka::schema_registry::admin::CompatibilityLevel;
 use serde::{Deserialize, Serialize};
@@ -18,7 +19,7 @@ pub(crate) const SUBJECT_FILE: &str = "subject.toml";
 pub(crate) const LOCK_FILE: &str = "kafka-schema.lock";
 
 /// The format a subject's schemas are written in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Format {
     Avro,
@@ -63,7 +64,7 @@ impl Format {
 
 /// Who writes a subject: this service registers it, or another service does and this one only
 /// pulls its versions.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Owner {
     #[default]

@@ -17,6 +17,7 @@ mod testdir;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use crate::catalog::{Format, Owner};
@@ -220,7 +221,7 @@ fn main() -> ExitCode {
     }
 }
 
-async fn dispatch(args: KafkaSchema) -> anyhow::Result<()> {
+async fn dispatch(args: KafkaSchema) -> Result<()> {
     let workspace = commands::Workspace::open(args.krate, &args.registry)?;
     match args.command {
         Command::Migrate(Migrate::Add {

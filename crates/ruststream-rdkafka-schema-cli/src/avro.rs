@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use apache_avro::Schema;
+use apache_avro::error::CompatibilityError;
 use apache_avro::schema_compatibility::{Compatibility, SchemaCompatibility};
 
 use crate::catalog::{Catalog, Migration, Subject};
@@ -57,7 +58,7 @@ pub(crate) fn check(
     Ok(())
 }
 
-fn verdict(result: Result<Compatibility, apache_avro::error::CompatibilityError>) -> Result<()> {
+fn verdict(result: Result<Compatibility, CompatibilityError>) -> Result<()> {
     match result {
         Ok(Compatibility::Full) => Ok(()),
         // A partial resolution fails on some data (a union branch or an enum symbol the reader

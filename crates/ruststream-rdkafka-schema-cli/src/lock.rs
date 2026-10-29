@@ -2,6 +2,7 @@
 //! schema id; per subject its full version list as of the last sync.
 
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -57,7 +58,7 @@ impl Lock {
     pub(crate) fn read(path: &Path) -> Result<Self> {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Self::new()),
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Self::new()),
             Err(err) => return Err(err).with_context(|| format!("reading `{}`", path.display())),
         };
         let lock: Self = toml::from_str(&text)
