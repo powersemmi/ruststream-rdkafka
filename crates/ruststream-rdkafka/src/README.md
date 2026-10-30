@@ -80,7 +80,8 @@ item's own documentation keeps the detail.
 - [KafkaTopics][c-kafka-topics]: [`KafkaTopics`], a list of topics through one consumer.
 - [Patterns][c-patterns]: [`KafkaTopicPattern`], every topic a regex matches.
 - [Schema checking][c-schema]: [`KafkaTopic::schema`] and its twins check a topic's registry
-  subjects at startup, with [`schema::Schema`](struct@schema::Schema) naming the namespace and subjects.
+  subjects at startup, with [`schema::Schema`](struct@schema::Schema) naming the namespace and
+  subjects.
 - [KafkaPartitions][c-kafka-partitions]: [`KafkaPartitions`], named partitions with no group.
 - [StartOffset][c-start-offset]: [`StartOffset`], where a group with no committed offset starts.
 - [Assignment][c-assignment]: [`Assignment`], the group's rebalance strategy.
@@ -151,9 +152,9 @@ item's own documentation keeps the detail.
 mount site with no `.codec(..)` step encodes with. `schema-registry` adds the Confluent client,
 the wire-format envelope and the subscriber-side prefetch; `avro` and `protobuf` add those
 formats on top of it. `schema-check` adds the `Schema` derive, which checks a type against
-the migrations in `schemas/` when the crate compiles. `asyncapi` contributes the Kafka bindings to the generated document,
-`testing` adds the in-process mode `TestApp::start` connects the broker through, and `ssl`,
-`ssl-vendored` and `zstd` map onto rdkafka's own backends.
+the migrations in `schemas/` when the crate compiles. `asyncapi` contributes the Kafka bindings
+to the generated document, `testing` adds the in-process mode `TestApp::start` connects the
+broker through, and `ssl`, `ssl-vendored` and `zstd` map onto rdkafka's own backends.
 
 [guides]: https://powersemmi.github.io/ruststream-rdkafka/latest/
 [g-start]: https://powersemmi.github.io/ruststream-rdkafka/latest/guides/getting-started/
