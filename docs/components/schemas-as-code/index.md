@@ -13,7 +13,7 @@ import TabItem from '@theme/TabItem';
 
 The repository holds the schemas this service owns, one directory per subject, one file per subject version.
 [`cargo kafka-schema`](./migrations.md) writes those files and keeps them in step with the registry.
-The derive comes with the `schema-check` feature as [`schema::Schema`](api:ruststream_rdkafka::schema::Schema).
+The derive comes with the `schema-check` feature as [`schema::Schema`](api:derive@ruststream_rdkafka::schema::Schema).
 
 The type is bound to its migrations by its record's full name: `#[avro(namespace = ..)]` plus the type's name, `com.acme.orders.Order`.
 The derive finds every subject whose newest migration declares that record and checks the type against each of them.
