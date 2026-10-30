@@ -8,33 +8,6 @@ description: "cargo kafka-schema keeps every subject this service owns as number
 
 `cargo kafka-schema` keeps every subject this service owns as numbered migrations in the repository and synchronizes them with the registry.
 
-```text
-schemas/
-  kafka-schema.lock            # written by the tool, committed
-  orders-value/
-    subject.toml               # format = "avro", compatibility = "BACKWARD_TRANSITIVE"
-    0001_create_order.avsc
-    0002_add_item.avsc
-  payments-value/
-    subject.toml               # format = "protobuf", source = "proto/payments.proto"
-    0001_init.proto
-  inventory-value/
-    subject.toml               # owner = "external": pulled, never registered by this service
-    0001.avsc
-```
-
-```sh
-cargo install ruststream-rdkafka-schema-cli
-
-cargo kafka-schema migrate add orders-value add_item
-cargo kafka-schema migrate add orders-key create_order_key --record com.acme.orders.OrderKey
-cargo kafka-schema migrate import inventory-value
-cargo kafka-schema migrate status
-cargo kafka-schema migrate run [--dry-run]
-cargo kafka-schema prepare [--check]
-cargo kafka-schema check
-```
-
 A directory is a subject, and a migration is the full schema of one subject version.
 Migrations are numbered per subject, so two branches that change one subject conflict in git.
 `subject.toml` holds the format, the compatibility level, the owner, the record the subject declares, the `.proto` source of a Protobuf subject, and the references to other subjects.
@@ -57,6 +30,39 @@ The rules:
 `RUSTSTREAM_SCHEMA_REGISTRY` names the registry, with credentials in the URL or in their own variables; the tool never prints them.
 Without it, every command but `migrate import` and `migrate run` works from the migrations and the lock.
 
+## Example
+
+The migrations of three subjects, one owned in Avro, one owned in Protobuf and one pulled from another team:
+
+```text
+schemas/
+  kafka-schema.lock            # written by the tool, committed
+  orders-value/
+    subject.toml               # format = "avro", compatibility = "BACKWARD_TRANSITIVE"
+    0001_create_order.avsc
+    0002_add_item.avsc
+  payments-value/
+    subject.toml               # format = "protobuf", source = "proto/payments.proto"
+    0001_init.proto
+  inventory-value/
+    subject.toml               # owner = "external": pulled, never registered by this service
+    0001.avsc
+```
+
+The commands:
+
+```sh
+cargo install ruststream-rdkafka-schema-cli
+
+cargo kafka-schema migrate add orders-value add_item
+cargo kafka-schema migrate add orders-key create_order_key --record com.acme.orders.OrderKey
+cargo kafka-schema migrate import inventory-value
+cargo kafka-schema migrate status
+cargo kafka-schema migrate run [--dry-run]
+cargo kafka-schema prepare [--check]
+cargo kafka-schema check
+```
+
 A CI pipeline:
 
 ```yaml
@@ -72,6 +78,7 @@ A CI pipeline:
 `prost-build` generates the types from the `.proto`, so the type equals its source by construction.
 [`schema::build::check_proto`](api:ruststream_rdkafka::schema::build::check_proto) in the build script fails the build when the compiled `.proto` differs from the subject's newest migration:
 
+{/* inline-rust: a build script, which no example of this crate can be */}
 ```rust
 // build.rs
 use ruststream_rdkafka::schema::build::check_proto;

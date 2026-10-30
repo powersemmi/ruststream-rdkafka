@@ -8,35 +8,14 @@ description: "#[schema(namespace = ..)] compares a type's serde shape with the J
 
 `#[derive(Schema)]` with `#[schema(namespace = ..)]` compares the type's serde shape with the JSON Schema of every subject that declares it.
 
-```rust
-#[derive(Serialize, Deserialize, JsonSchema, Schema)]
-#[serde(rename_all = "camelCase")]
-#[schema(namespace = "com.acme.orders")] // the anchor: com.acme.orders.Order
-pub struct Order {
-    pub order_id: i64,
-    pub items: Vec<Item>,
-    pub note: Option<String>,
-    #[serde(default)]
-    pub priority: i32,
-}
-```
-
 The claim is about serde, not about the struct's fields.
 Every value the type serializes is valid under the subject's schema, and every value the schema admits deserializes into the type.
 An owned subject is checked in both directions; an external one in the second only, because the service only reads it.
-A JSON Schema names no record, so the subject's `subject.toml` records the anchor as `record = "com.acme.orders.Order"`.
+A JSON Schema names no record, so the subject's `subject.toml` records the anchor, `record = "com.acme.carts.Cart"`: the namespace plus the type's name.
 
 The derive reads serde's own attributes with `serde_derive_internals`: `rename`, `rename_all`, `default`, `skip`, `skip_serializing_if`, `flatten`, `deny_unknown_fields`, `transparent` and enum tagging mean what serde makes of them.
 The standard types carry their shape: integers, floats, `bool`, `String`, `Option`, `Vec`, string maps and `serde_json::Value`, and with the `uuid` and `chrono` features their types.
 A field of another type contributes that type's shape, so nested types keep their own attributes.
-
-The first difference fails the build with its path:
-
-```text
-error[E0080]: evaluation panicked: `Order` does not match subject `orders-value`
-              (migration 0001_create_order): Order.items[].qty: the integer type writes values
-              outside the schema's range
-```
 
 What is compared:
 - `properties` and `required`: property names equal the serde names; a required property is written on every value, an optional one deserializes when absent.
@@ -49,3 +28,19 @@ What is compared:
 A construct a Rust type cannot promise (`pattern`, `minLength`, `multipleOf`, `not`, `if`, `patternProperties`, `oneOf` against an untagged enum, tuples, a recursive `$ref`) is a compile error that names the keyword and its JSON pointer.
 `#[schema(unchecked)]` on the field then checks its presence and optionality only, and `cargo kafka-schema check` still compares the exported schema with the migration exactly.
 Drafts 04 to 2020-12 are read.
+
+## Example
+
+`Cart` and `Item` match the JSON Schema of `carts-value`.
+
+{/* single-form: message types are plain derives, the same in both forms */}
+```rust reference="examples/kafka_schema_json.rs#model"
+```
+
+The first difference fails the build with its path:
+
+```text
+error[E0080]: evaluation panicked: `Cart` does not match subject `carts-value`
+              (migration 0001_create_cart): Cart.items[].qty: the integer type writes values
+              outside the schema's range
+```
