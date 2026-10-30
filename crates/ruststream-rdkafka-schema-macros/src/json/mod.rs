@@ -121,7 +121,7 @@ fn check(input: &DeriveInput, subject: &Subject, catalog: &[Subject]) -> syn::Re
     let files = reader.files.iter().map(|file| file.display().to_string());
     Ok(quote_spanned! {ident.span()=>
         const _: () = {
-            #(let _ = ::core::include_bytes!(#files);)*
+            #(const _: &[u8] = ::core::include_bytes!(#files);)*
             const SCHEMA: #private::Node = #node;
             const CHECK: #private::Check = #private::Check {
                 type_name: #name,
