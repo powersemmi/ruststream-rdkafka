@@ -2,6 +2,10 @@
 //! form against a migration's, as equality for an owned subject and under Avro's resolution
 //! rules for an external one. The first difference panics, which fails the build with a
 //! message naming the nested record and the field that differ.
+//!
+//! Every function on the way to that panic is `#[track_caller]`: the compiler leaves such frames
+//! out of the error, so the message points at the derive alone instead of tracing through this
+//! module into the standard library's `panic!`, whose source not every toolchain installs.
 
 use super::form::{EnumForm, FieldForm, FixedForm, Form, Member, Name, RecordForm, Shape};
 
@@ -18,6 +22,7 @@ pub struct Site {
 
 /// Fails the build unless the type's form equals the migration's: the rule of an owned subject.
 #[doc(hidden)]
+#[track_caller]
 pub const fn assert_equals(ty: &Form, migration: &Form, site: Site) {
     let at = At::root(site);
     same(ty, migration, &at);
@@ -26,6 +31,7 @@ pub const fn assert_equals(ty: &Form, migration: &Form, site: Site) {
 /// Fails the build unless the type reads what the migration writes under Avro's resolution
 /// rules: the rule of an external subject, checked once per pulled version.
 #[doc(hidden)]
+#[track_caller]
 pub const fn assert_reads(ty: &Form, migration: &Form, site: Site) {
     let at = At::root(site);
     reads(ty, migration, &at);
@@ -86,6 +92,7 @@ impl At {
     }
 
     /// Fails the build with `problem` at this position.
+    #[track_caller]
     const fn fail(&self, problem: &[&str]) -> ! {
         let mut msg = Message::new();
         msg.push("`");
@@ -227,6 +234,7 @@ const fn describe(form: &Form) -> &'static str {
     }
 }
 
+#[track_caller]
 const fn differ(ty: &Form, migration: &Form, at: &At) {
     if at.bounded {
         return;
@@ -239,6 +247,7 @@ const fn differ(ty: &Form, migration: &Form, at: &At) {
     ])
 }
 
+#[track_caller]
 const fn same(ty: &Form, migration: &Form, at: &At) {
     match (ty, migration) {
         (Form::Null, Form::Null)
@@ -306,6 +315,7 @@ const fn shapes_match(ty: &Form, migration: &Form) -> bool {
     }
 }
 
+#[track_caller]
 const fn named_differ(what: &'static str, ty: Name, migration: Name, at: &At) -> ! {
     let mut name = Message::new();
     push_name(
@@ -328,6 +338,7 @@ const fn named_differ(what: &'static str, ty: Name, migration: Name, at: &At) ->
     ])
 }
 
+#[track_caller]
 const fn same_fixed(ty: &FixedForm, migration: &FixedForm, at: &At) {
     if !same_name(ty.name, migration.name, at.enclosing) {
         named_differ("fixed", ty.name, migration.name, at);
@@ -337,6 +348,7 @@ const fn same_fixed(ty: &FixedForm, migration: &FixedForm, at: &At) {
     }
 }
 
+#[track_caller]
 const fn same_enum(ty: &EnumForm, migration: &EnumForm, at: &At, reading: bool) {
     if reading {
         if !str_eq(ty.name.name, migration.name.name) {
@@ -427,6 +439,7 @@ const fn has_member(members: &[Member], name: &str) -> bool {
 }
 
 /// Every field a flattened type contributes is one the migration declares.
+#[track_caller]
 const fn members_declared(members: &[Member], migration: &[FieldForm], at: &At) {
     let mut index = 0;
     while index < members.len() {
@@ -445,6 +458,7 @@ const fn members_declared(members: &[Member], migration: &[FieldForm], at: &At) 
 
 /// Every field a flattened type contributes is one the writer writes: a flattened field has
 /// no default of its own.
+#[track_caller]
 const fn members_written(members: &[Member], writer: &RecordForm, at: &At) {
     let mut index = 0;
     while index < members.len() {
@@ -462,6 +476,7 @@ const fn members_written(members: &[Member], writer: &RecordForm, at: &At) {
     }
 }
 
+#[track_caller]
 const fn same_default(ty: &FieldForm, migration: &FieldForm, at: &At) {
     match (ty.default, migration.default) {
         (None, None) => {}
@@ -486,6 +501,7 @@ const fn same_default(ty: &FieldForm, migration: &FieldForm, at: &At) {
     }
 }
 
+#[track_caller]
 const fn same_record(ty: &RecordForm, migration: &RecordForm, outer: &At) {
     if !same_name(ty.name, migration.name, outer.enclosing) {
         named_differ("record", ty.name, migration.name, outer);
@@ -527,6 +543,7 @@ const fn same_record(ty: &RecordForm, migration: &RecordForm, outer: &At) {
     }
 }
 
+#[track_caller]
 const fn same_fields_by_presence(ty: &[FieldForm], migration: &[FieldForm], at: &At) {
     let mut index = 0;
     while index < migration.len() {
@@ -565,6 +582,7 @@ const fn same_fields_by_presence(ty: &[FieldForm], migration: &[FieldForm], at: 
 }
 
 /// Avro's resolution rules, with the type as the reader and the migration as the writer.
+#[track_caller]
 const fn reads(reader: &Form, writer: &Form, at: &At) {
     let at = &At {
         reading: true,
@@ -615,6 +633,7 @@ const fn reads(reader: &Form, writer: &Form, at: &At) {
     }
 }
 
+#[track_caller]
 const fn reads_record(reader: &RecordForm, writer: &RecordForm, outer: &At) {
     // Avro matches a reader's record to the writer's by the unqualified name.
     if !str_eq(reader.name.name, writer.name.name) {
@@ -646,6 +665,7 @@ const fn reads_record(reader: &RecordForm, writer: &RecordForm, outer: &At) {
     }
 }
 
+#[track_caller]
 const fn absent(field: &FieldForm, at: &At) {
     if field.default.is_none() {
         at.fail(&[
