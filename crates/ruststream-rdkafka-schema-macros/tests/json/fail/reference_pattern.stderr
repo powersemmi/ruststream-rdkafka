@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: `Shipment` does not match subject `shipments-value` (migration 0001_init): Shipment.part.code: the schema uses `pattern` at `parts-value#/properties/code/pattern`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/reference_pattern.rs:8:12
+  |
+8 | pub struct Shipment {
+  |            ^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: `Part` does not match subject `parts-value` (migration 0001_init): Part.code: the schema uses `pattern` at `#/properties/code/pattern`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+  --> tests/json/fail/reference_pattern.rs:14:12
+   |
+14 | pub struct Part {
+   |            ^^^^ evaluation of `_` failed here

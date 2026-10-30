@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `pattern-value` (migration 0001_init): Order.sku: the schema uses `pattern` at `#/properties/sku/pattern`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/schema_pattern.rs:8:12
+  |
+8 | pub struct Order {
+  |            ^^^^^ evaluation of `_` failed here

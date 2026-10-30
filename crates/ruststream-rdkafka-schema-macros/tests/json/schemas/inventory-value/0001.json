@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sku": {
+      "type": "string"
+    },
+    "qty": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "sku",
+    "qty"
+  ]
+}

@@ -1,0 +1,7 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0002_add_item): record `com.acme.orders.Order`, field `note`: the type's default is `"none"` where the migration declares `null`
+ --> tests/ui/fail/default.rs:7:46
+  |
+7 | #[derive(Serialize, Deserialize, AvroSchema, Schema)]
+  |                                              ^^^^^^ evaluation of `_::_` failed here
+  |
+  = note: this error originates in the derive macro `Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

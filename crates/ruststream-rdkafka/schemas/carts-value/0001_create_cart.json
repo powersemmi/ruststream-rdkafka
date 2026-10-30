@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cart",
+  "type": "object",
+  "properties": {
+    "customerId": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "priority": {
+      "type": "integer",
+      "format": "int32",
+      "default": 0
+    }
+  },
+  "required": [
+    "customerId",
+    "items"
+  ],
+  "$defs": {
+    "Item": {
+      "type": "object",
+      "properties": {
+        "qty": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sku": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sku",
+        "qty"
+      ]
+    }
+  }
+}

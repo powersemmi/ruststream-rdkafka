@@ -34,6 +34,30 @@ use crate::error::KafkaError;
 use crate::record::{Cart, HeldRecord};
 use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
+/// What a group subscription tells about each topic it is assigned: the schema sets of a pattern
+/// subscription, checked as their topics appear.
+#[cfg(feature = "schema-registry")]
+pub(crate) type TopicWatch = Option<std::sync::Arc<crate::schema::SchemaWatch>>;
+/// What a group subscription tells about each topic it is assigned: nothing without a registry.
+#[cfg(not(feature = "schema-registry"))]
+pub(crate) type TopicWatch = Option<std::convert::Infallible>;
+
+#[cfg(feature = "schema-registry")]
+fn notice(watch: &TopicWatch, partitions: &TopicPartitionList) {
+    if let Some(watch) = watch {
+        for element in partitions.elements() {
+            watch.appeared(element.topic());
+        }
+    }
+}
+
+#[cfg(not(feature = "schema-registry"))]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "one signature with the registry form, which borrows its watch"
+)]
+const fn notice(_watch: &TopicWatch, _partitions: &TopicPartitionList) {}
+
 /// How long one request resolving start positions waits for the cluster.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -157,6 +181,8 @@ pub(crate) struct Startup {
     literals: Vec<String>,
     /// Whether a subscribed name is a pattern.
     patterns: bool,
+    /// Told the topics of every assignment, off the delivery path.
+    watch: TopicWatch,
 }
 
 impl std::fmt::Debug for Startup {
@@ -171,7 +197,11 @@ impl std::fmt::Debug for Startup {
 impl Startup {
     /// A group subscription to `names`, kept until its stream starts, and the wait for its first
     /// assignment.
-    pub(crate) fn kept(names: &[String], reset: Reset) -> (Self, oneshot::Receiver<Opened>) {
+    pub(crate) fn kept(
+        names: &[String],
+        reset: Reset,
+        watch: TopicWatch,
+    ) -> (Self, oneshot::Receiver<Opened>) {
         let (opened, wait) = oneshot::channel();
         let startup = Self {
             released: AtomicBool::new(false),
@@ -190,6 +220,7 @@ impl Startup {
                 .cloned()
                 .collect(),
             patterns: names.iter().any(|name| name.starts_with('^')),
+            watch,
         };
         (startup, wait)
     }
@@ -209,6 +240,7 @@ impl Startup {
             reset: Reset::Latest,
             literals: Vec::new(),
             patterns: false,
+            watch: TopicWatch::default(),
         }
     }
 
@@ -281,6 +313,7 @@ impl Startup {
         {
             warn!(error = %err, "a kept subscription could not pause its partitions");
         }
+        notice(&self.watch, partitions);
         let mut state = self.lock();
         for element in partitions.elements() {
             if matches!(element.offset(), Offset::Offset(_)) {

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0001_create_order): Order.items[].price: the float type has the number format `float`, and the schema declares `double`
+  --> tests/json/fail/float_narrower.rs:14:12
+   |
+14 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

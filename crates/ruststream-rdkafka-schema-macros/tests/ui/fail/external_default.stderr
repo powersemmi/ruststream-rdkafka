@@ -1,0 +1,7 @@
+error[E0080]: evaluation panicked: `Stock` cannot read subject `inventory-value` (migration 0001): record `com.acme.inventory.Stock`, field `warehouse`: the writer has no such field and the type gives it no default (add `#[avro(default = ..)]` or make it an `Option`)
+ --> tests/ui/fail/external_default.rs:7:35
+  |
+7 | #[derive(Deserialize, AvroSchema, Schema)]
+  |                                   ^^^^^^ evaluation of `_::_` failed here
+  |
+  = note: this error originates in the derive macro `Schema` (in Nightly builds, run with -Z macro-backtrace for more info)

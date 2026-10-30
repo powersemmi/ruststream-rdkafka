@@ -1,0 +1,1 @@
+{"type": "record", "name": "Tree", "namespace": "com.acme", "fields": [{"name": "value", "type": "long"}, {"name": "children", "type": {"type": "array", "items": "Tree"}}]}

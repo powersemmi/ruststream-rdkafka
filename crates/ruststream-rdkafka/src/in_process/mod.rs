@@ -314,6 +314,12 @@ impl Cluster {
 
     /// Every record visible on `topic`, in the order it was produced: what a `read_committed`
     /// reader of the whole topic reads, keyed the way a delivery reports its headers.
+    /// The names of the topics the cluster holds now.
+    #[cfg(feature = "schema-registry")]
+    pub(crate) fn topic_names(&self) -> Vec<String> {
+        self.lock().topics.keys().cloned().collect()
+    }
+
     pub(crate) fn published(&self, topic: &str) -> Vec<RawMessage> {
         let mut records: Vec<Arc<Stored>> = {
             let state = self.lock();

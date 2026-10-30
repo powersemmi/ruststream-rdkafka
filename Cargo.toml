@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/ruststream-rdkafka", "crates/ruststream-rdkafka-bench"]
+members = [
+    "crates/ruststream-rdkafka",
+    "crates/ruststream-rdkafka-bench",
+    "crates/ruststream-rdkafka-schema-macros",
+    "crates/ruststream-rdkafka-schema-cli",
+]
 # cargo-generate scaffolds: their sources carry `{{project-name}}` placeholders that are not valid
 # Rust/TOML until rendered, so they stay out of the workspace. `exclude` alone is not enough:
 # cargo's git-source package discovery ignores it and parses every `Cargo.toml` in the repository,
@@ -18,9 +23,10 @@ homepage = "https://powersemmi.github.io/ruststream-rdkafka/latest/"
 authors = ["RustStream contributors"]
 
 [workspace.dependencies]
-ruststream-rdkafka = { path = "crates/ruststream-rdkafka" }
+ruststream-rdkafka = { path = "crates/ruststream-rdkafka", version = "0.7.1" }
+ruststream-rdkafka-schema-macros = { path = "crates/ruststream-rdkafka-schema-macros", version = "0.7.1" }
 
-ruststream = { version = "0.7", default-features = false }
+ruststream = { version = "0.7.6", default-features = false }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
@@ -43,6 +49,9 @@ apache-avro = { version = "0.22", features = ["derive"] }
 prost = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.10"
+# `subject.toml` of the migrations directory, read by the derive, the build-script check and the
+# migrations tool.
+toml = "0.9"
 # The in-process cluster's pattern subscriptions, behind the `testing` feature.
 regex = "1"
 

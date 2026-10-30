@@ -1,5 +1,5 @@
 ---
-sidebar_position: 8
+sidebar_position: 9
 title: Passthrough
 description: "A descriptor's config passes any consumer property; one the commit mode owns is refused at startup, naming the property."
 ---

@@ -109,7 +109,7 @@ mod pattern {
 
     // --8<-- [start:pattern]
     /// Reads every topic whose name starts with `audit.`, those created later included.
-    #[subscriber(KafkaTopics::pattern("^audit\\..*").group("audit-archive"))]
+    #[subscriber(KafkaTopicPattern::new("^audit\\..*").group("audit-archive"))]
     async fn archive(event: &OrderEvent, Ctx(topic): Ctx<Topic>) -> HandlerOutcome {
         tracing::info!(event.id, %topic, "archived");
         HandlerOutcome::ack()

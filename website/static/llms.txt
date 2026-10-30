@@ -33,7 +33,11 @@ This site holds the guides, one page per component and the architecture of the c
 - [Subscriptions](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/): a topic name in `#[subscriber]` and the descriptors that carry every other setting
 - [KafkaTopic](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topic/): one topic in one consumer group
 - [KafkaTopics](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-topics/): a list of topics through one consumer and one group
-- [Patterns](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/patterns/): `KafkaTopics::pattern`, every topic a `^` regex matches, later ones included
+- [Patterns](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/patterns/): `KafkaTopicPattern`, every topic a `^` regex matches, later ones included
+- [Schema checking](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/schema/): `.schema(namespace)` on a descriptor, the topic's registry subjects checked at startup
+- [Schema derive](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schemas-as-code/): `#[derive(Schema)]`, a message type checked against its subjects' migrations when the crate compiles
+- [JSON Schema check](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schemas-as-code/json/): a type's serde shape against its subject's JSON Schema
+- [Migrations](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schemas-as-code/migrations/): `cargo kafka-schema`, schema migrations in the repository synchronized with the registry, and `check_proto`
 - [KafkaPartitions](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/kafka-partitions/): a fixed list of partitions with no group and no rebalance
 - [StartOffset](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/start-offset/): where a group starts on a partition with no committed offset
 - [Assignment](https://powersemmi.github.io/ruststream-rdkafka/latest/components/subscriptions/assignment/): the group's rebalance strategy, eager or cooperative sticky

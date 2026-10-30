@@ -41,6 +41,7 @@
 //! [envelope]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/envelope/
 //! [third-party]: https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/third-party/
 
+pub mod admin;
 mod cache;
 mod client;
 mod name;
@@ -258,6 +259,7 @@ impl SchemaRegistry {
 
     /// The registry's base URL, when this client is the shipped HTTP one. `None` for a
     /// caller-supplied [`RegistryClient`], whose coordinate this crate does not know.
+    #[cfg(feature = "asyncapi")]
     pub(crate) fn base_url(&self) -> Option<&str> {
         self.inner
             .shipped

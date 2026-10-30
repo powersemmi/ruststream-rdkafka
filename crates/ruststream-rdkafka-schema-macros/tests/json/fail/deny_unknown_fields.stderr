@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0001_create_order): Order.items[]: the schema's object at `#/$defs/Item` is open (additionalProperties absent or true), and `Item` denies unknown fields
+  --> tests/json/fail/deny_unknown_fields.rs:14:12
+   |
+14 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

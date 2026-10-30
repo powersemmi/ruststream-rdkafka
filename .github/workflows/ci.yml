@@ -287,6 +287,10 @@ jobs:
       - name: cargo test (in-process only, no live broker)
         # `--tests` and not every target: the examples' tests are modules of one test binary, so
         # an example needs no binary of its own, and clippy has already compiled each one.
+        # The compile-fail cases of the schema derive run on stable only: their snapshots hold
+        # the compiler's messages, which another toolchain words differently.
+        env:
+          RUN_UI_TESTS: "1"
         run: |
           cargo test --locked --workspace --all-features --no-fail-fast --tests
           cargo test --locked --workspace --all-features --no-fail-fast --doc

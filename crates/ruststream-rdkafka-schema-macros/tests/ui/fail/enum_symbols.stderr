@@ -1,0 +1,11 @@
+error: variant `LOST` of `Status` is not a symbol of enum `com.acme.orders.Status` of subject `orders-value` (migration 0002_add_item)
+  --> tests/ui/fail/enum_symbols.rs:12:5
+   |
+12 |     Lost,
+   |     ^^^^
+
+error: `Status` has no variant for the symbol `SHIPPED`, which enum `com.acme.orders.Status` of subject `orders-value` (migration 0002_add_item) declares
+  --> tests/ui/fail/enum_symbols.rs:10:10
+   |
+10 | pub enum Status {
+   |          ^^^^^^
