@@ -72,11 +72,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_checked_model_reaches_the_handler() -> Result<(), Box<dyn Error>> {
+        let json = br#"{"cartId":7,"items":[{"sku":"kettle","qty":2}]}"#;
         let tb = TestApp::start(app()).await?;
         let kafka = tb.broker::<KafkaBroker>();
 
         kafka
-            .message(&Wire(br#"{"cartId":7,"items":[{"sku":"kettle","qty":2}]}"#.to_vec()))
+            .message(&Wire(json.to_vec()))
             .to("carts")
             .publish()
             .await?;
