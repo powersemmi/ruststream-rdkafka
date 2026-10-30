@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 #[schema(namespace = "com.acme.carts")] // the anchor: com.acme.carts.Cart
 struct Cart {
-    cart_id: i64,
+    customer_id: i64,
     items: Vec<Item>,
     note: Option<String>,
     #[serde(default)]
@@ -33,7 +33,7 @@ struct Item {
 
 #[subscriber("carts")]
 async fn on_cart(cart: &Cart) -> HandlerOutcome {
-    tracing::info!(cart.cart_id, items = cart.items.len(), "cart received");
+    tracing::info!(cart.customer_id, items = cart.items.len(), "cart received");
     HandlerOutcome::ack()
 }
 
@@ -60,7 +60,7 @@ mod tests {
 
     fn cart() -> Cart {
         Cart {
-            cart_id: 7,
+            customer_id: 7,
             items: vec![Item {
                 sku: "kettle".to_owned(),
                 qty: 2,
@@ -72,7 +72,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_checked_model_reaches_the_handler() -> Result<(), Box<dyn Error>> {
-        let json = br#"{"cartId":7,"items":[{"sku":"kettle","qty":2}]}"#;
+        let json = br#"{"customerId":7,"items":[{"sku":"kettle","qty":2}]}"#;
         let tb = TestApp::start(app()).await?;
         let kafka = tb.broker::<KafkaBroker>();
 

@@ -3,7 +3,7 @@
   "title": "Cart",
   "type": "object",
   "properties": {
-    "cartId": {
+    "customerId": {
       "type": "integer",
       "format": "int64"
     },
@@ -26,7 +26,7 @@
     }
   },
   "required": [
-    "cartId",
+    "customerId",
     "items"
   ],
   "$defs": {
