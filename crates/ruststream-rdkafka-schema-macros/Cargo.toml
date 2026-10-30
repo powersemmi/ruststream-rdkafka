@@ -38,8 +38,9 @@ percent-encoding = "2"
 
 [dev-dependencies]
 # The compile-fail and pass cases build against the crate that holds the traits the derive's
-# assertions name, as a service does.
-trybuild = "1"
+# assertions name, as a service does. The bound is the release the pinned messages were written
+# with: the early 1.0 releases no longer build against their own dependencies.
+trybuild = "1.0.122"
 ruststream-rdkafka = { workspace = true, features = ["schema-check", "schema-registry", "avro", "uuid", "chrono"] }
 ruststream = { workspace = true, features = ["macros", "json"] }
 apache-avro = { workspace = true }
