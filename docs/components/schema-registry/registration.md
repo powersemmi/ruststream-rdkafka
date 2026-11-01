@@ -16,7 +16,7 @@ The registry keeps the id of a schema it already holds, so registering the same 
 A schema that the subject's compatibility level refuses fails the call, and the error carries the registry's account of what differs.
 Each call caches the subject, so the [`SchemaFrame`](./json-transcode.md) layer finds it without a request.
 
-`register_json::<T>` registers the JSON Schema that [`JsonSchema`](api:ruststream_rdkafka::schema_registry::JsonSchema) (schemars, re-exported) derives for `T`.
+`register_json::<T>` registers the JSON Schema that [`JsonSchema`](api:derive@ruststream_rdkafka::schema_registry::JsonSchema) (schemars, re-exported) derives for `T`.
 `register_avro::<T>` registers the Avro schema that `AvroSchema` derives, in full: field defaults, aliases and docs stay, because a later reader resolves an older writer's datum with them.
 `register` takes a [`SchemaType`](api:ruststream_rdkafka::schema_registry::SchemaType) and the definition text, which is how a Protobuf subject is registered from its `.proto` source.
 The registry paths of this crate read Protobuf schemas whose imports come from the well-known types.

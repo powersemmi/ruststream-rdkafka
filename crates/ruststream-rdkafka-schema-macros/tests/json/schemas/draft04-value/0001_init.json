@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-04/schema#",
+  "id": "urn:acme:order",
+  "type": "object",
+  "properties": {
+    "qty": {
+      "type": "integer",
+      "minimum": 0,
+      "exclusiveMinimum": true
+    }
+  },
+  "required": [
+    "qty"
+  ]
+}

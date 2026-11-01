@@ -1,0 +1,6 @@
+error: this field is renamed differently for serializing and deserializing, and one property cannot carry two names
+  --> tests/json/fail/two_names.rs:32:5
+   |
+32 | /     #[serde(rename(serialize = "sku", deserialize = "SKU"))]
+33 | |     pub sku: String,
+   | |___________________^

@@ -1,0 +1,5 @@
+error: the Schema derive checks a record with named fields, a unit-variant enum, or a set of input models; a tuple struct is none of them
+ --> tests/ui/fail/tuple_struct.rs:6:12
+  |
+6 | pub struct Pair(i64, i64);
+  |            ^^^^

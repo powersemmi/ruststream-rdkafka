@@ -1,15 +1,19 @@
 //! The subscription descriptors and the group settings they share.
 //!
-//! Kafka reads a topic in three shapes, and each is a type of its own because they differ in
-//! what a deferred retry copy can be published to: [`KafkaTopic`] reads one topic and a publish
-//! to that topic reaches it again, while [`KafkaTopics`] (several topics, or a regex) and
-//! [`KafkaPartitions`] (named partitions of one topic) read a set no single publish addresses.
+//! Kafka reads a topic in four shapes, and each is a type of its own because they differ in what
+//! a deferred retry copy can be published to and in how a topic opts into schema checking:
+//! [`KafkaTopic`] reads one topic and a publish to that topic reaches it again, while
+//! [`KafkaTopics`] (several topics by name), [`KafkaTopicPattern`] (every topic a regex matches)
+//! and [`KafkaPartitions`] (named partitions of one topic) read a set no single publish
+//! addresses.
 
 mod partitions;
+mod pattern;
 mod topic;
 mod topics;
 
 pub use partitions::KafkaPartitions;
+pub use pattern::KafkaTopicPattern;
 pub use topic::KafkaTopic;
 pub use topics::KafkaTopics;
 
@@ -234,7 +238,7 @@ pub(crate) fn reject_pattern(name: &str, form: &str) -> Result<(), KafkaError> {
     if name.starts_with('^') {
         return Err(KafkaError::InvalidOptions(format!(
             "{form} reads one topic, and {name:?} is a librdkafka topic regex (the leading '^' \
-             is its anchor); subscribe to a pattern with `KafkaTopics::pattern`"
+             is its anchor); subscribe to a pattern with `KafkaTopicPattern`"
         )));
     }
     Ok(())

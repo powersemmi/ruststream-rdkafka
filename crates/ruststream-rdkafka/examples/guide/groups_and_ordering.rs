@@ -89,7 +89,7 @@ struct Archived {
     offset: i64,
 }
 
-#[subscriber(KafkaTopics::pattern("^bank\\..*").group("archive"), reply)]
+#[subscriber(KafkaTopicPattern::new("^bank\\..*").group("archive"), reply)]
 async fn archive(
     _record: &serde_json::Value,
     Ctx(topic): Ctx<Topic>,

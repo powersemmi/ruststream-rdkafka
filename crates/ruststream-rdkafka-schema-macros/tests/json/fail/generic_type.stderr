@@ -1,0 +1,5 @@
+error: subject `generic-value` declares `schema.generic.Page`, and a generic type has no single shape to compare; declare the record on a type without parameters
+ --> tests/json/fail/generic_type.rs:8:16
+  |
+8 | pub struct Page<Item> {
+  |                ^^^^^^

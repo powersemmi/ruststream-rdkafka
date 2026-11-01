@@ -1,0 +1,3 @@
+{"type": "record", "name": "Order", "namespace": "com.acme.orders", "fields": [
+  {"name": "id", "type": "long"}
+]}

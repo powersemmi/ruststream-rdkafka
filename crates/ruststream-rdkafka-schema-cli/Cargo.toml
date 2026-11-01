@@ -1,0 +1,58 @@
+[package]
+name = "ruststream-rdkafka-schema-cli"
+description = "cargo kafka-schema: schema migrations for a Confluent Schema Registry, kept in the repository of the service that owns them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+keywords = ["kafka", "schema-registry", "migrations", "ruststream", "cargo"]
+categories = ["development-tools::cargo-plugins", "command-line-utilities"]
+autotests = false
+
+[[bin]]
+name = "cargo-kafka-schema"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ruststream-rdkafka = { workspace = true, features = ["avro", "protobuf"] }
+# The command line: derive-based parsing, built once into the binary; it costs build time only.
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1"
+apache-avro = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+# The checksum of a migration's normalized content in the lock.
+sha2 = "0.10"
+# The export directory the derive's hidden test writes into.
+tempfile = "3"
+# The `.proto` parser `protox` builds on: the field numbers and `reserved` ranges of a migration.
+protox-parse = "0.10"
+prost-types = "0.14"
+# Validates a JSON Schema migration against its draft's metaschema. The default features add the
+# HTTP and file resolvers, which a metaschema check never needs.
+jsonschema = { version = "0.58", default-features = false }
+# Credentials in the user part of the registry URL arrive percent-encoded.
+percent-encoding = "2"
+# Parses the registry URL to take the credentials out of its user part.
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# The live scenarios delete registry versions, which the tool never does.
+reqwest = { workspace = true }
+
+# Every file under `tests/` is a module of one test binary.
+[[test]]
+name = "suite"
+path = "tests/main.rs"

@@ -45,10 +45,20 @@ beforeAll(() => {
   write('runtime/index.html', '<h2 id="subscribers">Subscribers</h2>');
   write(
     'all.html',
-    '<ul class="all-items"><li><a href="struct.KafkaBroker.html">KafkaBroker</a></li></ul>',
+    [
+      '<ul class="all-items"><li><a href="struct.KafkaBroker.html">KafkaBroker</a></li>',
+      '<li><a href="schema/struct.Schema.html">schema::Schema</a></li></ul>',
+      '<ul class="all-items"><li><a href="schema/derive.Schema.html">schema::Schema</a></li></ul>',
+    ].join(''),
     'ruststream_rdkafka',
   );
   write('struct.KafkaBroker.html', '<section id="method.new"></section>', 'ruststream_rdkafka');
+  write(
+    'schema/struct.Schema.html',
+    '<section id="method.namespace"></section>',
+    'ruststream_rdkafka',
+  );
+  write('schema/derive.Schema.html', '<h1>Schema</h1>', 'ruststream_rdkafka');
 });
 
 afterAll(() => {
@@ -108,6 +118,33 @@ describe('remarkApiLinks', () => {
       'https://docs.rs/ruststream-rdkafka/0.7/ruststream_rdkafka/struct.KafkaBroker.html#method.new',
       'https://docs.rs/ruststream/0.7/ruststream/struct.AppId.html',
     ]);
+  });
+
+  it('takes the kind prefix where a struct and a derive macro share a path', async () => {
+    expect(
+      await links(
+        '[a](api:derive@ruststream_rdkafka::schema::Schema) [b](api:struct@ruststream_rdkafka::schema::Schema)',
+      ),
+    ).toEqual([
+      'https://docs.rs/ruststream-rdkafka/0.7/ruststream_rdkafka/schema/derive.Schema.html',
+      'https://docs.rs/ruststream-rdkafka/0.7/ruststream_rdkafka/schema/struct.Schema.html',
+    ]);
+  });
+
+  it('sends a member to the one of two same-named items that has it', async () => {
+    expect(await links('[a](api:ruststream_rdkafka::schema::Schema::namespace)')).toEqual([
+      'https://docs.rs/ruststream-rdkafka/0.7/ruststream_rdkafka/schema/struct.Schema.html#method.namespace',
+    ]);
+  });
+
+  it('fails on a path that names two items without a kind, naming both kinds', async () => {
+    await expect(links('[x](api:ruststream_rdkafka::schema::Schema)')).rejects.toThrow(
+      /schema::Schema.*struct@, derive@/s,
+    );
+  });
+
+  it('fails on a prefix that is no item kind', async () => {
+    await expect(links('[x](api:thing@ruststream::AppId)')).rejects.toThrow(/'thing@' is no item kind/);
   });
 
   it('fails on a crate the site does not document, naming the crate', async () => {

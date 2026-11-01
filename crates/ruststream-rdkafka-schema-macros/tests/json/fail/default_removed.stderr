@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0001_create_order): Order.priority: the schema lets it be absent and the field has no default (make it an Option or add #[serde(default)])
+  --> tests/json/fail/default_removed.rs:14:12
+   |
+14 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

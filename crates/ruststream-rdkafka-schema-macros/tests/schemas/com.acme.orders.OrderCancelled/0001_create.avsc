@@ -1,0 +1,1 @@
+{"type": "record", "name": "OrderCancelled", "namespace": "com.acme.orders", "fields": [{"name": "id", "type": "long"}, {"name": "reason", "type": "string"}]}

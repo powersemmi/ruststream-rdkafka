@@ -87,7 +87,7 @@ Kafka читает тему только в составе группы, поэ�
 ## Несколько тем и шаблон
 
 [`KafkaTopics`](../components/subscriptions/kafka-topics.md) читает несколько тем через один консьюмер и одну группу.
-[`KafkaTopics::pattern`](../components/subscriptions/patterns.md) читает все темы, имя которых подходит под регулярное выражение. Выражение должно начинаться с `^`.
+[`KafkaTopicPattern`](../components/subscriptions/patterns.md) читает все темы, имя которых подходит под регулярное выражение. Выражение должно начинаться с `^`.
 `archive` читает все темы банка и запоминает, где лежит каждая запись.
 
 <Tabs groupId="api">

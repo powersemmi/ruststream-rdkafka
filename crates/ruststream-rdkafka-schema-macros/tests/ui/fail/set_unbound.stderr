@@ -1,0 +1,12 @@
+error[E0277]: `OrderCreated` is bound to no schema record
+  --> tests/ui/fail/set_unbound.rs:14:13
+   |
+14 |     Created(OrderCreated),
+   |             ^^^^^^^^^^^^ derive `Schema` on this type
+   |
+help: the trait `Record` is not implemented for `OrderCreated`
+  --> tests/ui/fail/set_unbound.rs:8:1
+   |
+ 8 | pub struct OrderCreated {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[derive(Schema)]` names the record a migration in `schemas/` declares

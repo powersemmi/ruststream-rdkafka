@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0001_create_order): Order.payment<Crypto>: `Payment` writes this variant and no oneOf branch admits it
+  --> tests/json/fail/variant_added.rs:14:12
+   |
+14 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here

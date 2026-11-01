@@ -1,0 +1,5 @@
+error: this field holds `Node` again, and the schema check rejects a recursive type; mark the field `#[schema(unchecked)]`
+  --> tests/json/fail/recursive_type.rs:10:15
+   |
+10 |     pub next: Option<Box<Node>>,
+   |               ^^^^^^^^^^^^^^^^^

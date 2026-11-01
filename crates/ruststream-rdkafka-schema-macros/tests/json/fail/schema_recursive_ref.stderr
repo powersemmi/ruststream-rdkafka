@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Node` does not match subject `recursive-value` (migration 0001_init): Node.next: the schema uses `$ref` at `#/properties/next/anyOf/0/$ref`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/schema_recursive_ref.rs:8:12
+  |
+8 | pub struct Node {
+  |            ^^^^ evaluation of `_` failed here

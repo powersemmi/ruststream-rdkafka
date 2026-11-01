@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `orders-value` (migration 0001_create_order): Order.trace: the string format differs: the type has no format, the schema declares `uuid`
+  --> tests/json/fail/format_changed.rs:13:12
+   |
+13 | pub struct Order {
+   |            ^^^^^ evaluation of `_` failed here
