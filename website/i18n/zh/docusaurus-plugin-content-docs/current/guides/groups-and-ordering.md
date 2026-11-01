@@ -87,7 +87,7 @@ Kafka 只在组内读取主题，所以两者都没有的服务会在启动时�
 ## 多个主题与模式 {/* #several-topics-and-a-pattern */}
 
 [`KafkaTopics`](../components/subscriptions/kafka-topics.md) 通过一个消费者和一个组读取多个主题。
-[`KafkaTopics::pattern`](../components/subscriptions/patterns.md) 读取名字匹配某个正则表达式的所有主题，该表达式必须以 `^` 开头。
+[`KafkaTopicPattern`](../components/subscriptions/patterns.md) 读取名字匹配某个正则表达式的所有主题，该表达式必须以 `^` 开头。
 `archive` 读取银行的所有主题，并记下每条记录所在的位置。
 
 <Tabs groupId="api">

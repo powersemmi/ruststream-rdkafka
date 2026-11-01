@@ -1,0 +1,23 @@
+error[E0277]: `Item` has no JSON shape for the schema check
+  --> tests/json/fail/no_shape.rs:16:16
+   |
+16 |     pub items: Vec<Item>,
+   |                ^^^^^^^^^ this field's type has no JSON shape
+   |
+help: the trait `JsonShape` is not implemented for `Item`
+  --> tests/json/fail/no_shape.rs:30:1
+   |
+30 | pub struct Item {
+   | ^^^^^^^^^^^^^^^
+   = note: derive `Schema` with `#[schema(namespace = "..")]` on `Item`, or mark the field `#[schema(unchecked)]` to check only its presence and optionality
+   = help: the following other types implement trait `JsonShape`:
+             &T
+             Address
+             Arc<T>
+             Audit
+             BTreeMap<String, T>
+             Box<T>
+             Channel
+             DateTime<Zone>
+           and $N others
+   = note: required for `Vec<Item>` to implement `JsonShape`

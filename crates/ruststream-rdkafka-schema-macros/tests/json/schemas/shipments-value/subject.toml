@@ -1,0 +1,6 @@
+format = "json"
+record = "schema.reference.Shipment"
+
+[[references]]
+name = "part.json"
+subject = "parts-value"

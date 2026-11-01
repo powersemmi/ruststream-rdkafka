@@ -10,7 +10,7 @@ import TabItem from '@theme/TabItem';
 [`AvroCodec::registry`](api:ruststream_rdkafka::avro::AvroCodec::registry) reads each delivery with its writer schema and frames each value with the id of its subject.
 
 [`AvroCodec`](api:ruststream_rdkafka::avro::AvroCodec) is a codec, so a handler on it takes and returns ordinary serde structs.
-A model derives `AvroSchema` from `apache-avro`, which the crate re-exports as [`avro::AvroSchema`](api:ruststream_rdkafka::avro::AvroSchema).
+A model derives `AvroSchema` from `apache-avro`, which the crate re-exports as [`avro::AvroSchema`](api:derive@ruststream_rdkafka::avro::AvroSchema).
 The codec is built from a [`SchemaPrefetch`](../schema-registry/schema-prefetch.md), and the same prefetch is attached to the broker with [`KafkaBroker::schema_prefetch`](api:ruststream_rdkafka::KafkaBroker::schema_prefetch).
 The codec itself is synchronous and reads only the prefetch's cache, so its encode and decode reach no network.
 

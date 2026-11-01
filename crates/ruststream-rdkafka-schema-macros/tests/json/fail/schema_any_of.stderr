@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `any-of-value` (migration 0001_init): Order.id: the schema uses `anyOf` at `#/properties/id/anyOf`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/schema_any_of.rs:8:12
+  |
+8 | pub struct Order {
+  |            ^^^^^ evaluation of `_` failed here

@@ -11,7 +11,9 @@ import {visit} from 'unist-util-visit';
  * (`api:ruststream_rdkafka::schema_registry`), a member of a type
  * (`api:ruststream_rdkafka::KafkaBroker::new`), or a section of a page
  * (`api:ruststream_rdkafka#subscribing`). The path starts with the crate: this crate, or the core
- * it builds on (`api:ruststream::testing::TestApp`). The link resolves against the rustdoc of the
+ * it builds on (`api:ruststream::testing::TestApp`). A path that names two items, a struct and the
+ * derive macro of the same name, takes rustdoc's kind prefix
+ * (`api:derive@ruststream_rdkafka::schema::Schema`); a member resolves on the one item that has it. The link resolves against the rustdoc of the
  * checkout being built, which `scripts/site_rustdoc.sh` produces for both crates the way docs.rs
  * renders them; a crate, a path or a section that rustdoc does not have fails the build with the
  * page and the path. The rustdoc is read on the first such link, so a build whose pages have
@@ -38,26 +40,48 @@ const MEMBER_ANCHORS = [
   'associatedconstant',
 ];
 const ITEM = /<li><a href="([^"]+)">([^<]+)<\/a><\/li>/g;
+// rustdoc's kind prefixes, to the start of the page name rustdoc gives an item of that kind.
+const KINDS: Record<string, string> = {
+  struct: 'struct',
+  enum: 'enum',
+  union: 'union',
+  trait: 'trait',
+  fn: 'fn',
+  function: 'fn',
+  derive: 'derive',
+  macro: 'macro',
+  attr: 'attr',
+  type: 'type',
+  const: 'constant',
+  constant: 'constant',
+  static: 'static',
+};
 const ID = /\bid="([^"]+)"/g;
 
 class Rustdoc {
-  private readonly items = new Map<string, Map<string, string>>();
+  private readonly items = new Map<string, Map<string, string[]>>();
   private readonly anchors = new Map<string, Set<string>>();
 
   constructor(private readonly dir: string) {}
 
-  /** The page of an item or module, relative to the crate's directory, or undefined. */
-  page(crate: string, itemPath: string[]): string | undefined {
+  /**
+   * The pages of the items or the module a path names, relative to the crate's directory: one
+   * page, or one per item when a struct and a derive macro share the name. `kind` keeps the
+   * items of that kind only.
+   */
+  pages(crate: string, itemPath: string[], kind?: string): string[] {
     const items = this.itemsOf(crate);
     if (itemPath.length === 0) {
-      return 'index.html';
+      return kind ? [] : ['index.html'];
     }
-    const page = items.get(itemPath.join('::'));
-    if (page) {
-      return page;
+    const pages = (items.get(itemPath.join('::')) ?? []).filter(
+      (page) => !kind || path.basename(page).startsWith(`${kind}.`),
+    );
+    if (pages.length > 0 || kind) {
+      return pages;
     }
     const module = `${itemPath.join('/')}/index.html`;
-    return fs.existsSync(path.join(this.dir, crate, module)) ? module : undefined;
+    return fs.existsSync(path.join(this.dir, crate, module)) ? [module] : [];
   }
 
   hasAnchor(crate: string, page: string, anchor: string): boolean {
@@ -70,7 +94,7 @@ class Rustdoc {
     return ids.has(anchor);
   }
 
-  private itemsOf(crate: string): Map<string, string> {
+  private itemsOf(crate: string): Map<string, string[]> {
     let items = this.items.get(crate);
     if (!items) {
       const list = path.join(this.dir, crate, 'all.html');
@@ -80,9 +104,10 @@ class Rustdoc {
             'run `scripts/site_rustdoc.sh` in the repository first',
         );
       }
-      items = new Map(
-        Array.from(fs.readFileSync(list, 'utf8').matchAll(ITEM), (m) => [m[2]!, m[1]!]),
-      );
+      items = new Map<string, string[]>();
+      for (const [, page, name] of fs.readFileSync(list, 'utf8').matchAll(ITEM)) {
+        items.set(name!, [...(items.get(name!) ?? []), page!]);
+      }
       this.items.set(crate, items);
     }
     return items;
@@ -95,7 +120,14 @@ function resolve(
   docsRs: Record<string, string>,
   target: string,
 ): string | Error {
-  const [itemPath, section] = target.split('#') as [string, string | undefined];
+  const [prefixed, section] = target.split('#') as [string, string | undefined];
+  const at = prefixed.indexOf('@');
+  const prefix = at === -1 ? undefined : prefixed.slice(0, at);
+  const itemPath = prefixed.slice(at + 1);
+  const kind = prefix === undefined ? undefined : KINDS[prefix];
+  if (prefix !== undefined && !kind) {
+    return new Error(`'${prefix}@' is no item kind; use one of ${Object.keys(KINDS).join(', ')}`);
+  }
   const [crate, ...rest] = itemPath.split('::');
   if (!crate) {
     return new Error('the path names no crate');
@@ -106,20 +138,28 @@ function resolve(
       `the site documents no crate '${crate}'; links name one of ${Object.keys(docsRs).join(', ')}`,
     );
   }
-  let page = rustdoc.page(crate, rest);
+  const pages = rustdoc.pages(crate, rest, kind);
+  if (pages.length > 1) {
+    return new Error(
+      `the path names ${pages.join(' and ')}; prefix the kind of the one meant (${pages
+        .map((page) => `${path.basename(page).split('.')[0]}@`)
+        .join(', ')})`,
+    );
+  }
+  let page = pages[0];
   let anchor = section;
   if (!page && rest.length > 1 && !section) {
     // The last segment may be a member on the page of its type.
     const member = rest[rest.length - 1]!;
-    const owner = rustdoc.page(crate, rest.slice(0, -1));
-    const found = owner
-      ? MEMBER_ANCHORS.map((kind) => `${kind}.${member}`).find((id) =>
-          rustdoc.hasAnchor(crate, owner, id),
-        )
-      : undefined;
-    if (owner && found) {
-      page = owner;
-      anchor = found;
+    for (const owner of rustdoc.pages(crate, rest.slice(0, -1), kind)) {
+      const found = MEMBER_ANCHORS.map((memberKind) => `${memberKind}.${member}`).find((id) =>
+        rustdoc.hasAnchor(crate, owner, id),
+      );
+      if (found) {
+        page = owner;
+        anchor = found;
+        break;
+      }
     }
   }
   if (!page) {

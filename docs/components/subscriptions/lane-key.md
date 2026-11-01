@@ -1,5 +1,5 @@
 ---
-sidebar_position: 7
+sidebar_position: 8
 title: LaneKey
 description: "LaneKey decides what workers(n, by_key) keys a lane by: the source partition, or the record key."
 ---

@@ -1,0 +1,6 @@
+{"type": "record", "name": "Stock", "namespace": "com.acme.inventory", "fields": [
+  {"name": "sku", "type": "bytes"},
+  {"name": "count", "type": "long"},
+  {"name": "warehouse", "type": "string"},
+  {"name": "audit", "type": ["null", "string"], "default": null}
+]}

@@ -1,5 +1,5 @@
 ---
-sidebar_position: 9
+sidebar_position: 10
 title: Batches
 description: "A slice handler reads one fetched delivery plus what librdkafka already holds, up to the size the mount site names."
 ---

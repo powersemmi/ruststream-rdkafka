@@ -1,0 +1,9 @@
+format = "avro"
+
+[[references]]
+name = "com.acme.orders.OrderCreated"
+subject = "com.acme.orders.OrderCreated"
+
+[[references]]
+name = "com.acme.orders.OrderCancelled"
+subject = "com.acme.orders.OrderCancelled"

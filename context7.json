@@ -27,6 +27,7 @@
     "Carry a Protobuf message on the core's byte lanes with `#[wire(..)]` and frame it at publish time with `KafkaPublish::framed(&registry)` or the app-wide `ProtobufFrame` layer; a `prost` message can never be a codec's value.",
     "Test a service by handing the app `main` runs to `ruststream::testing::TestApp::start`, which connects `KafkaBroker` in process with the `testing` feature, and address it as `tb.broker::<KafkaBroker>()`; write no mocks and build no second app.",
     "Run the in-process test body against a running cluster with `TestApp::start_live` for what only Kafka has; keep `TestApp::start` for the rest of the suite.",
-    "Reach any librdkafka property this crate does not surface through `KafkaBroker::config`, `KafkaBroker::producer_config` or the descriptor's `config`, which is applied last and wins over the typed options."
+    "Reach any librdkafka property this crate does not surface through `KafkaBroker::config`, `KafkaBroker::producer_config` or the descriptor's `config`, which is applied last and wins over the typed options.",
+    "Keep the schemas a service owns as migrations in `schemas/` managed by `cargo kafka-schema`, derive `ruststream_rdkafka::schema::Schema` on the models (feature `schema-check`) so a drifted type fails the build, and opt a topic into the startup subject check with `.schema(namespace)` on its descriptor."
   ]
 }

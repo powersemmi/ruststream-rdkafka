@@ -1,0 +1,7 @@
+{"type": "record", "name": "Order", "namespace": "com.acme.orders", "fields": [
+  {"name": "id", "type": "long"},
+  {"name": "item", "type": {"type": "record", "name": "Item", "fields": [
+    {"name": "sku", "type": "string"}
+  ]}},
+  {"name": "note", "type": ["null", "string"], "default": null}
+]}

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `nullable-value` (migration 0001_init): Order.note: the field is an Option and writes null, which the schema does not admit
+ --> tests/json/fail/schema_not_nullable.rs:8:12
+  |
+8 | pub struct Order {
+  |            ^^^^^ evaluation of `_` failed here

@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: `Order` does not match subject `tuple-value` (migration 0001_init): Order.pair: the schema uses `prefixItems` at `#/properties/pair/prefixItems`, which a Rust type cannot promise; mark the field #[schema(unchecked)] to check only its presence and optionality
+ --> tests/json/fail/schema_prefix_items.rs:8:12
+  |
+8 | pub struct Order {
+  |            ^^^^^ evaluation of `_` failed here

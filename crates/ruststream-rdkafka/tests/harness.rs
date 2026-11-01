@@ -20,7 +20,7 @@ use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::context::keys::Topic;
 use ruststream_rdkafka::{
     Commit, KafkaBroker, KafkaOptions, KafkaPublish, KafkaPublishSteps as _, KafkaTopic,
-    KafkaTopics, PARTITION_KEY_HEADER, RoundRobin, ToSourceTopic,
+    KafkaTopicPattern, KafkaTopics, PARTITION_KEY_HEADER, RoundRobin, ToSourceTopic,
 };
 use serde::{Deserialize, Serialize};
 
@@ -118,7 +118,7 @@ async fn each_group_reads_a_record_once() {
     tb.shutdown().await.expect("shutdown");
 }
 
-#[subscriber(KafkaTopics::pattern("^orders\\..*").group("regions"))]
+#[subscriber(KafkaTopicPattern::new("^orders\\..*").group("regions"))]
 async fn regional(order: &Order, ctx: &mut Context<'_, KafkaContext>) -> HandlerOutcome {
     let _ = (order, ctx);
     HandlerOutcome::ack()

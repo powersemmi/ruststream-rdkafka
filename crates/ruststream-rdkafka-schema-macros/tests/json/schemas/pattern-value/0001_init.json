@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "sku": {
+      "type": "string",
+      "pattern": "^[A-Z]+$"
+    },
+    "qty": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "sku",
+    "qty"
+  ]
+}
