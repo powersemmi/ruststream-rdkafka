@@ -1,0 +1,118 @@
+{
+  "schema": 3,
+  "crate": "ruststream-rdkafka",
+  "crate_version": "0.7.0",
+  "core_version": "0.7.2",
+  "measured_at": "2026-10-17",
+  "environment": {
+    "cpu": "AMD Ryzen 9 7900X 12-Core Processor",
+    "architecture": "x86_64",
+    "cpu_frequency": "427-5912 MHz",
+    "cores": "12 physical, 24 logical",
+    "memory": "62.4 GiB",
+    "memory_speed": "unknown",
+    "os": "Linux 7.2.10-x64v3-xanmod1-1",
+    "broker": "apache/kafka:4.0.0 in Docker on localhost",
+    "rustc": "1.99.0",
+    "profile": "bench, inheriting release (opt-level = 3, lto = fat, codegen-units = 16, debug = line-tables-only)",
+    "features": "ruststream-rdkafka default (json), ruststream macros,json",
+    "rustflags": "none (the recipe clears RUSTFLAGS, so the numbers are not tied to this CPU)",
+    "round_trip": "78 \u00b5s (one metadata request and its answer)",
+    "valgrind": "3.25.1"
+  },
+  "scenarios": [
+    {
+      "name": "consumer group, auto-commit, 512 B JSON",
+      "unit": "msg/s",
+      "messages": 8488446,
+      "pairs": 3,
+      "raw": {
+        "best": 1610947,
+        "median": 1492199,
+        "worst": 1479698
+      },
+      "adapter": {
+        "best": 1543835,
+        "median": 1459819,
+        "worst": 1448050
+      },
+      "framework": {
+        "best": 1411671,
+        "median": 1270883,
+        "worst": 1207226
+      },
+      "adapter_overhead_percent": 4.2,
+      "overhead_percent": 12.4,
+      "adapter_verdict": "indistinguishable",
+      "verdict": "indistinguishable",
+      "broker_bound": false
+    },
+    {
+      "name": "consumer group, tracked commits, 512 B JSON, ack each",
+      "unit": "msg/s",
+      "messages": 9559207,
+      "pairs": 3,
+      "raw": {
+        "best": 1615939,
+        "median": 1603120,
+        "worst": 1461582
+      },
+      "adapter": {
+        "best": 1366726,
+        "median": 1317848,
+        "worst": 1300516
+      },
+      "framework": {
+        "best": 1429085,
+        "median": 1324713,
+        "worst": 1097087
+      },
+      "adapter_overhead_percent": 15.4,
+      "overhead_percent": 11.6,
+      "adapter_verdict": "measured",
+      "verdict": "indistinguishable",
+      "broker_bound": false
+    }
+  ],
+  "code": [
+    {
+      "name": "consumer group, JSON decode into a small struct, ack each",
+      "messages": 1000,
+      "framework": {
+        "instructions": 3114.2,
+        "allocations": 1.0
+      },
+      "cold": {
+        "instructions": 978377,
+        "allocations": 276
+      },
+      "gated": true
+    },
+    {
+      "name": "reply through this crate's publisher, delivery report awaited",
+      "messages": 1000,
+      "framework": {
+        "instructions": 7823.8,
+        "allocations": 5.0
+      },
+      "cold": {
+        "instructions": 1310777,
+        "allocations": 372
+      },
+      "gated": true
+    },
+    {
+      "name": "consumer group in batches of 64, from what librdkafka fetched",
+      "messages": 1000,
+      "framework": {
+        "instructions": 3176.4,
+        "allocations": 1.0
+      },
+      "cold": {
+        "instructions": 977306,
+        "allocations": 277
+      },
+      "gated": true
+    }
+  ]
+}

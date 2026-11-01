@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkruststream_rdkafka_website=self.webpackChunkruststream_rdkafka_website||[]).push([["1928"],{96443(e,s,t){t.d(s,{AskAIWidget:()=>n});var r=t(96540),a=t(40941);let n=(0,r.forwardRef)(function(e,s){return(0,r.useImperativeHandle)(s,()=>({open:()=>(0,a.gD)(),close:a.K3,openWithNewSession:e=>(0,a.gD)(e)})),null})}}]);
