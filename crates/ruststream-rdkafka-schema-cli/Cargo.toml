@@ -31,7 +31,7 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
 # The checksum of a migration's normalized content in the lock.
-sha2 = "0.10"
+sha2 = "0.11"
 # The export directory the derive's hidden test writes into.
 tempfile = "3"
 # The `.proto` parser `protox` builds on: the field numbers and `reserved` ranges of a migration.
