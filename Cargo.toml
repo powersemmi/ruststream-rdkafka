@@ -51,7 +51,7 @@ prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.10"
 # `subject.toml` of the migrations directory, read by the derive, the build-script check and the
 # migrations tool.
-toml = "0.9"
+toml = "1.1"
 # The in-process cluster's pattern subscriptions, behind the `testing` feature.
 regex = "1"
 
