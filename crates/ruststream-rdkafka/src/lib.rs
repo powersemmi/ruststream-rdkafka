@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod attention;
+mod batch;
 #[cfg(feature = "asyncapi")]
 mod bindings;
 mod broker;

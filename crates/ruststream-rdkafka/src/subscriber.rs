@@ -16,9 +16,12 @@ use rdkafka::consumer::Consumer as _;
 use rdkafka::error::RDKafkaErrorCode;
 #[cfg(feature = "schema-registry")]
 use ruststream::IncomingMessage;
-use ruststream::{BatchSubscriber, Seekable, Str, Subscriber};
+use ruststream::{BatchStream, BatchSubscriber, Seekable, Str, Subscriber};
 use tracing::{debug, warn};
 
+#[cfg(feature = "testing")]
+use crate::batch::Arm;
+use crate::batch::Refill;
 use crate::broker::ConnState;
 use crate::convert;
 use crate::eos::EOS_SOURCE_HEADER;
@@ -310,11 +313,17 @@ impl KafkaSubscriber {
         &self.topic
     }
 
-    /// The registry middleware: transcodes a framed payload to plain JSON on the async
-    /// consume path, so handlers and the default codec see JSON regardless of the wire
-    /// format. A no-op without an attached registry or for non-framed payloads.
+    /// The registry middleware over one delivery of a batch, as the stream runs it over each
+    /// delivery (see [`finish_delivery`]): the schema prefetch reads the envelope, then a framed
+    /// payload is transcoded to plain JSON, so handlers and the default codec see JSON
+    /// regardless of the wire format. A no-op without an attached registry or prefetch.
     #[cfg(feature = "schema-registry")]
-    async fn transcode(&self, item: &mut KafkaMessage) {
+    async fn finish_in_place(&self, item: &mut KafkaMessage) {
+        if let Some(prefetch) = &self.schema_prefetch {
+            prefetch
+                .warm_delivery(IncomingMessage::payload(item))
+                .await;
+        }
         if let Some(registry) = &self.schema_registry
             && let Some(json) = registry
                 .incoming_to_json(IncomingMessage::payload(item))
@@ -659,15 +668,20 @@ impl BatchSubscriber for KafkaSubscriber {
     fn batches(
         &mut self,
         size: NonZeroUsize,
-    ) -> impl Stream<Item = Result<Self::Batch, <Self as Subscriber>::Error>> + Send + '_ {
+    ) -> impl BatchStream<Self::Batch, Error = <Self as Subscriber>::Error> + Send + '_ {
         let size = size.get();
+        // The stream's own buffer, allocated once per stream: it alternates with the slot the
+        // runtime lends, so no batch allocates (see `batch`).
+        let buffer = Vec::with_capacity(size);
         // See `stream`: the consumer is held beside the subscriber, not through it.
         let cart = match &self.source {
             Source::Kafka(cart) => Arc::clone(cart),
             #[cfg(feature = "testing")]
             Source::InProcess(member, shared) => {
                 let (member, shared) = (Arc::clone(member), Arc::clone(shared));
-                return Either::Right(in_process::batches(self, member, shared, size));
+                return Arm::InProcess {
+                    stream: in_process::batches(self, member, shared, size, buffer),
+                };
             }
         };
         cart.consumer
@@ -675,9 +689,11 @@ impl BatchSubscriber for KafkaSubscriber {
             .startup
             .hand_over(&cart.consumer, &self.tracker);
         let tracker = Arc::clone(&self.tracker);
-        let batches = futures::stream::unfold(
-            (self, tracker, cart),
-            move |(sub, tracker, cart)| async move {
+        // The size rides the state: an async closure that captured it could not be called again.
+        let batches = Refill::new(
+            (self, tracker, cart, size),
+            buffer,
+            async move |(sub, tracker, cart, size), mut batch: Vec<KafkaMessage>| {
                 // Wait for the batch's first delivery, or for what waits ahead of the fetch
                 // queue - see `stream` for why the wait is a select and not a check.
                 let first = loop {
@@ -686,7 +702,7 @@ impl BatchSubscriber for KafkaSubscriber {
                         Some(Ok(delivery)) => break delivery,
                         Some(Err(err)) => {
                             drop(woken);
-                            return Some((Err(err), (sub, tracker, cart)));
+                            return (Some(Err(err)), (sub, tracker, cart, size), batch);
                         }
                         None => {}
                     }
@@ -699,13 +715,13 @@ impl BatchSubscriber for KafkaSubscriber {
                         Ok(record) => break sub.map_delivery(record),
                         Err(err) if is_transient(&err) => sub.note_transient(&err),
                         Err(err) => {
-                            return Some((Err(KafkaError::consume(err)), (sub, tracker, cart)));
+                            let failed = Some(Err(KafkaError::consume(err)));
+                            return (failed, (sub, tracker, cart, size), batch);
                         }
                     }
                 };
                 sub.note_recovered();
 
-                let mut batch = Vec::with_capacity(size.min(64));
                 batch.push(first);
                 // Drain what is already fetched, stopping at the batch size; recv is cancel safe,
                 // so dropping the probe future loses nothing.
@@ -726,13 +742,13 @@ impl BatchSubscriber for KafkaSubscriber {
                 }
                 #[cfg(feature = "schema-registry")]
                 for item in &mut batch {
-                    sub.transcode(item).await;
+                    sub.finish_in_place(item).await;
                 }
-                Some((Ok(batch), (sub, tracker, cart)))
+                (Some(Ok(())), (sub, tracker, cart, size), batch)
             },
         );
         #[cfg(feature = "testing")]
-        let batches = Either::Left(batches);
+        let batches = Arm::Live { stream: batches };
         batches
     }
 }
@@ -744,8 +760,10 @@ mod in_process {
     use std::sync::Arc;
 
     use futures::Stream;
+    use ruststream::BatchStream;
 
     use super::{KafkaSubscriber, attended};
+    use crate::batch::Refill;
     use crate::error::KafkaError;
     use crate::in_process::{InProcessRecord, Member};
     use crate::message::KafkaMessage;
@@ -824,22 +842,23 @@ mod in_process {
         member: Arc<Member>,
         shared: Arc<Shared>,
         size: usize,
-    ) -> impl Stream<Item = Result<Vec<KafkaMessage>, KafkaError>> + Send + '_ {
+        buffer: Vec<KafkaMessage>,
+    ) -> impl BatchStream<Vec<KafkaMessage>, Error = KafkaError> + Send + '_ {
         // The size rides the state: an async closure that captured it could not be called again.
-        futures::stream::unfold(
+        Refill::new(
             (sub, member, shared, size, None::<KafkaError>),
-            async move |(sub, member, shared, size, failed)| {
+            buffer,
+            async move |(sub, member, shared, size, failed), mut batch: Vec<KafkaMessage>| {
                 if let Some(err) = failed {
-                    return Some((Err(err), (sub, member, shared, size, None)));
+                    return (Some(Err(err)), (sub, member, shared, size, None), batch);
                 }
                 let first = match turn(&member, &shared.tracker).await {
                     Turn::Attended(Ok(delivery)) => delivery,
                     Turn::Fetched(Ok(record)) => deliver(sub, &shared, record),
                     Turn::Attended(Err(err)) | Turn::Fetched(Err(err)) => {
-                        return Some((Err(err), (sub, member, shared, size, None)));
+                        return (Some(Err(err)), (sub, member, shared, size, None), batch);
                     }
                 };
-                let mut batch = Vec::with_capacity(size.min(64));
                 batch.push(first);
                 let mut failed = None;
                 while batch.len() < size {
@@ -855,14 +874,10 @@ mod in_process {
                     }
                 }
                 #[cfg(feature = "schema-registry")]
-                let batch = {
-                    let mut finished = Vec::with_capacity(batch.len());
-                    for item in batch {
-                        finished.push(finish(sub, item).await);
-                    }
-                    finished
-                };
-                Some((Ok(batch), (sub, member, shared, size, failed)))
+                for item in &mut batch {
+                    sub.finish_in_place(item).await;
+                }
+                (Some(Ok(())), (sub, member, shared, size, failed), batch)
             },
         )
     }
