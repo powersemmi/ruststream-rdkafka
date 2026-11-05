@@ -66,7 +66,9 @@ use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::client::{ClientContext, DefaultClientContext};
 use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::producer::{BaseProducer, BaseRecord, DeliveryResult, Producer as _, ProducerContext};
-use ruststream::runtime::{AppInfo, BrokerScope, Identity, RunningApp, RustStream};
+use ruststream::runtime::{
+    AppInfo, BrokerScope, Identity, MountChain, MountRoutes, RunningApp, RustStream,
+};
 use ruststream_rdkafka::KafkaBroker;
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
@@ -325,13 +327,16 @@ pub struct Pending {
     messages: usize,
 }
 
-/// The mount a scenario passes in: what `with_broker` does with the scope.
-pub type Mount<'a> = &'a mut BrokerScope<KafkaBroker, Identity, (), Latch>;
+/// The scope a scenario's mount takes: what `with_broker` hands the closure that returns the chain.
+pub type Mount = BrokerScope<KafkaBroker, Identity, (), Latch>;
 
 /// Builds a one-handler service on a fresh topic and group, and publishes the primer the cold
 /// region takes. `messages` is what the drain region handles after it; zero leaves the run at the
 /// cold start alone.
-pub fn pending(messages: usize, mount: impl FnOnce(Mount<'_>)) -> Pending {
+pub fn pending<Chain>(messages: usize, mount: impl FnOnce(Mount) -> Chain) -> Pending
+where
+    Chain: MountChain<Routes: MountRoutes<KafkaBroker, Identity, Latch>>,
+{
     let url = env::var("KAFKA_TEST_URL")
         .expect("KAFKA_TEST_URL names the cluster to measure against; `just bench-code` sets it");
     let names = Names::fresh();

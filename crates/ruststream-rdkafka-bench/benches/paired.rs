@@ -84,7 +84,9 @@ use rdkafka::producer::{
 };
 use rdkafka::statistics::Statistics;
 use ruststream::runtime::RunningApp;
-use ruststream::{Broker as _, ConnectedBroker as _, IncomingMessage as _, Subscriber as _};
+use ruststream::{
+    Broker as _, ConnectedBroker as _, IncomingMessage as _, Settle as _, Subscriber as _,
+};
 use ruststream_rdkafka::prelude::*;
 use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
@@ -684,6 +686,9 @@ async fn tracked_consume(order: &Order, ctx: &mut Context<'_, (), Run>) -> Handl
     HandlerOutcome::ack()
 }
 
+// The app's start future is not `Send` since the core 0.8 (it starts on the runtime that
+// awaits it), and the bench awaits it on its own runtime, so this future is not either.
+#[allow(clippy::future_not_send)]
 async fn start(url: &str, run: Run, tracked: bool) -> RunningApp {
     let app = RustStream::new(AppInfo::new("kafka-bench", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(run));
@@ -699,6 +704,9 @@ async fn start(url: &str, run: Run, tracked: bool) -> RunningApp {
     .expect("the service starts")
 }
 
+// The app's start future is not `Send` since the core 0.8 (it starts on the runtime that
+// awaits it), and the bench awaits it on its own runtime, so this future is not either.
+#[allow(clippy::future_not_send)]
 async fn framework(url: &str, names: &Names, messages: usize, tracked: bool) -> Sample {
     create_topic(url, names).await;
     let run = Run::new(messages);
@@ -903,6 +911,9 @@ struct Measured {
     broker_bound: bool,
 }
 
+// The app's start future is not `Send` since the core 0.8 (it starts on the runtime that
+// awaits it), and the bench awaits it on its own runtime, so this future is not either.
+#[allow(clippy::future_not_send)]
 async fn measure(
     scenario: Scenario,
     url: &str,
