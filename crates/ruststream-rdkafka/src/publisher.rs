@@ -21,8 +21,8 @@ use rdkafka::util::Timeout;
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{OutPipeline, PublishBuilder, PublishSink, Slot};
 use ruststream::{
-    DefaultPublish, Lend, OutgoingMessage, PairError, PublishPolicy, Publisher,
-    TransactionalPublisher,
+    DefaultPublish, Lend, OutgoingMessage, PairError, PublishMessageError, PublishOutcome,
+    PublishPolicy, Publisher, TransactionalPublisher,
 };
 use tokio::sync::OnceCell;
 use tokio::task;
@@ -466,31 +466,42 @@ impl KafkaPublisher {
     }
 }
 
+/// What a publish of this crate returns: librdkafka copies the payload into its own queue, so a
+/// refused record is always the caller's message to hand back.
+pub(crate) type KafkaOutcome<'msg> = PublishOutcome<'msg, KafkaError, Lend>;
+
+/// The refusal of `msg` with `error`, the message handed back unsent.
+pub(crate) fn refused(error: KafkaError, msg: OutgoingMessage<'_>) -> KafkaOutcome<'_> {
+    Err(PublishMessageError::with_message(error, msg))
+}
+
 /// Sends one record through `producer` and awaits its delivery report.
-async fn send_via(
+async fn send_via<'msg>(
     producer: &FutureProducer,
     queue_timeout: Option<Duration>,
-    msg: OutgoingMessage<'_>,
+    msg: OutgoingMessage<'msg>,
     options: Option<&KafkaOptions>,
-) -> Result<(), KafkaError> {
-    let parts = convert::headers_for_publish(msg.headers());
-    let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
-    if let Some(key) = &parts.key {
-        record = record.key(key.as_ref());
+) -> KafkaOutcome<'msg> {
+    let sent = {
+        let parts = convert::headers_for_publish(msg.headers());
+        let mut record = FutureRecord::<[u8], [u8]>::to(msg.name()).payload(msg.payload());
+        if let Some(key) = &parts.key {
+            record = record.key(key.as_ref());
+        }
+        if let Some(partition) = options.and_then(|options| options.partition_setting()) {
+            // An explicit partition wins over the partitioner and the record key.
+            record = record.partition(partition);
+        }
+        if let Some(headers) = parts.headers {
+            record = record.headers(headers);
+        }
+        let queue_timeout = queue_timeout.map_or(Timeout::Never, Timeout::After);
+        producer.send(record, queue_timeout).await
+    };
+    match sent {
+        Ok(_delivery) => Ok(()),
+        Err((err, _record)) => refused(KafkaError::publish(err), msg),
     }
-    if let Some(partition) = options.and_then(|options| options.partition_setting()) {
-        // An explicit partition wins over the partitioner and the record key.
-        record = record.partition(partition);
-    }
-    if let Some(headers) = parts.headers {
-        record = record.headers(headers);
-    }
-    let queue_timeout = queue_timeout.map_or(Timeout::Never, Timeout::After);
-    producer
-        .send(record, queue_timeout)
-        .await
-        .map(|_delivery| ())
-        .map_err(|(err, _record)| KafkaError::publish(err))
 }
 
 impl Publisher for KafkaPublisher {
@@ -512,17 +523,25 @@ impl Publisher for KafkaPublisher {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
-    async fn publish(
+    async fn publish<'msg>(
         &self,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&Self::Options>,
-    ) -> Result<(), Self::Error> {
-        self.state.ensure_open(msg.name())?;
+    ) -> KafkaOutcome<'msg> {
+        if let Err(error) = self.state.ensure_open(msg.name()) {
+            return refused(error, msg);
+        }
         #[cfg(feature = "testing")]
         if let Some(cluster) = self.state.in_process() {
-            return produce_in_process(cluster, &msg, options, None);
+            return match produce_in_process(cluster, &msg, options, None) {
+                Ok(()) => Ok(()),
+                Err(error) => refused(error, msg),
+            };
         }
-        send_via(self.state.producer()?, self.queue_timeout, msg, options).await
+        match self.state.producer() {
+            Ok(producer) => send_via(producer, self.queue_timeout, msg, options).await,
+            Err(error) => refused(error, msg),
+        }
     }
 }
 
@@ -1055,30 +1074,32 @@ impl Publisher for KafkaTransactionalPublisher {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in flight, delivered or not.
-    async fn publish(
+    async fn publish<'msg>(
         &self,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&Self::Options>,
-    ) -> Result<(), Self::Error> {
-        self.inner.state.ensure_open(msg.name())?;
+    ) -> KafkaOutcome<'msg> {
+        if let Err(error) = self.inner.state.ensure_open(msg.name()) {
+            return refused(error, msg);
+        }
         let producer = match &self.inner.producer {
             TxProducer::Kafka(producer) => producer,
             #[cfg(feature = "testing")]
             TxProducer::InProcess { cluster, id } => {
                 let transaction = self.is_open().then_some(id);
-                return produce_in_process(cluster, &msg, options, transaction);
+                return match produce_in_process(cluster, &msg, options, transaction) {
+                    Ok(()) => Ok(()),
+                    Err(error) => refused(error, msg),
+                };
             }
         };
         if self.is_open() {
             return send_via(producer, self.inner.queue_timeout, msg, options).await;
         }
-        send_via(
-            self.inner.state.producer()?,
-            self.inner.queue_timeout,
-            msg,
-            options,
-        )
-        .await
+        match self.inner.state.producer() {
+            Ok(shared) => send_via(shared, self.inner.queue_timeout, msg, options).await,
+            Err(error) => refused(error, msg),
+        }
     }
 }
 

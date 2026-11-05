@@ -20,7 +20,7 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
-    Lend, OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
+    Lend, OutgoingMessage, PublishMessageError, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -29,7 +29,7 @@ use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
 use crate::publisher::{
-    KafkaOptions, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
+    KafkaOptions, KafkaOutcome, refused, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
 };
 use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
@@ -420,13 +420,16 @@ impl EosPipeline {
     ///
     /// Panics when the internal window mutex is poisoned, which requires a prior panic
     /// inside the pipeline (an invariant violation, not an operational failure).
-    pub async fn publish(
+    pub async fn publish<'msg>(
         &self,
         source: &SourceOffset,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&KafkaOptions>,
-    ) -> Result<(), KafkaError> {
-        let epoch = self.admit(source).await?;
+    ) -> KafkaOutcome<'msg> {
+        let epoch = match self.admit(source).await {
+            Ok(epoch) => epoch,
+            Err(error) => return refused(error, msg),
+        };
         let sent = self.inner.publisher.publish(msg, options).await;
         if sent.is_err() {
             let mut window = self.inner.window.lock().expect("window mutex poisoned");
@@ -959,30 +962,45 @@ impl Publisher for EosPipeline {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in the window's transaction.
-    async fn publish(
+    async fn publish<'msg>(
         &self,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&Self::Options>,
-    ) -> Result<(), Self::Error> {
+    ) -> KafkaOutcome<'msg> {
         let Some(source) = msg
             .headers()
             .get_str(EOS_SOURCE_HEADER)
             .and_then(decode_source)
         else {
-            return Err(KafkaError::InvalidOptions(
+            return refused(KafkaError::InvalidOptions(
                 "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
                  relay them (add the `EosReplies` transform to the mount site's chain, \
                  `.out_reply(KafkaEosPublish::new(id)).transform(EosReplies)`)"
                     .to_owned(),
-            ));
+            ), msg);
         };
         // The reply is rebuilt without the coordinates, so the map the publish filled moves into
         // the record rather than being copied into it.
         let (topic, payload, mut headers) = msg.into_parts();
-        headers.remove(EOS_SOURCE_HEADER);
+        let coordinates = headers.remove(EOS_SOURCE_HEADER);
         let stripped = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
-        self.publish(&source, stripped, options).await
+        self.publish(&source, stripped, options)
+            .await
+            .map_err(|failed| {
+                // The message goes back the way it came, coordinates included, so a caller that
+                // publishes it again reaches the same window.
+                let (error, unsent) = failed.into_parts();
+                let Some(unsent) = unsent else {
+                    return PublishMessageError::new(error);
+                };
+                let (topic, payload, mut headers) = unsent.into_parts();
+                if let Some(coordinates) = coordinates {
+                    headers.insert(Str::from_static(EOS_SOURCE_HEADER), coordinates);
+                }
+                let restored = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
+                PublishMessageError::with_message(error, restored)
+            })
     }
 }
 

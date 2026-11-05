@@ -33,7 +33,10 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor};
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{Outgoing, PublishLayer, PublishNext, PublishPipeline};
-use ruststream::{OutgoingFor, OutgoingMessage, PairError, PublishPolicy, Publisher};
+use ruststream::{
+    OutgoingFor, OutgoingMessage, PairError, PublishMessageError, PublishOutcome, PublishPolicy,
+    Publisher,
+};
 
 use crate::broker::ConnectedKafkaBroker;
 use crate::error::KafkaError;
@@ -423,7 +426,7 @@ impl ProtobufFrame {
 impl PublishLayer for ProtobufFrame {
     async fn on_publish<'a, N: PublishPipeline, P: Publisher>(
         &'a self,
-        out: &'a mut Outgoing<'a>,
+        out: &'a mut Outgoing<'_>,
         next: PublishNext<'a, N, P>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Every "nothing to do" is a pass-through here: this layer sees every topic the app
@@ -657,16 +660,20 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
     /// # Cancel safety
     ///
     /// Not cancel safe, for the same reason [`KafkaPublisher::publish`] is not.
-    async fn publish(
+    async fn publish<'msg>(
         &self,
-        msg: OutgoingFor<'_, Self::Payload>,
+        msg: OutgoingFor<'msg, Self::Payload>,
         options: Option<&Self::Options>,
-    ) -> Result<(), Self::Error> {
-        let framed = match self.framing.frame(msg.name(), msg.payload()).await? {
+    ) -> PublishOutcome<'msg, Self::Error, Self::Payload> {
+        let framing = match self.framing.frame(msg.name(), msg.payload()).await {
+            Ok(framing) => framing,
+            Err(error) => return Err(PublishMessageError::with_message(error, msg)),
+        };
+        let framed = match framing {
             Framing::Framed(framed) => framed,
             Framing::AlreadyFramed => return self.inner.publish(msg, options).await,
             Framing::NoSubject => {
-                return Err(KafkaError::SchemaRegistry(
+                let error = KafkaError::SchemaRegistry(
                     format!(
                         "topic {:?} publishes through a framing publisher, but the registry \
                          holds no subject {:?} to frame its records with. Register the schema, \
@@ -677,23 +684,40 @@ impl<P: Publisher<Error = KafkaError> + Send + Sync> Publisher for KafkaFramedPu
                         self.framing.subject_for(msg.name()),
                     )
                     .into(),
-                ));
+                );
+                return Err(PublishMessageError::with_message(error, msg));
             }
             Framing::OtherFormat(format) => {
-                return Err(KafkaError::InvalidOptions(format!(
+                let error = KafkaError::InvalidOptions(format!(
                     "subject {:?}, which topic {:?} publishes under, holds a {format:?} schema; a \
                      framing publisher writes Protobuf. Use the codec for that format, or the \
                      transcoding SchemaFrame layer.",
                     self.framing.subject_for(msg.name()),
                     msg.name(),
-                )));
+                ));
+                return Err(PublishMessageError::with_message(error, msg));
             }
         };
         // The message is rebuilt around the framed payload, so the map the publish filled moves
-        // into the new one instead of being copied into it.
-        let (topic, _payload, headers) = msg.into_parts();
+        // into the new one instead of being copied into it. The caller's payload is kept: a
+        // refused record goes back as it was handed over, unframed.
+        let (topic, payload, headers) = msg.into_parts();
         let framed = OutgoingMessage::new(topic, &framed).with_headers(headers);
-        self.inner.publish(framed, options).await
+        match self.inner.publish(framed, options).await {
+            Ok(()) => Ok(()),
+            Err(failed) => {
+                let (error, unsent) = failed.into_parts();
+                Err(match unsent {
+                    Some(unsent) => {
+                        let (_topic, _framed, headers) = unsent.into_parts();
+                        let restored =
+                            OutgoingMessage::with_payload(topic, payload).with_headers(headers);
+                        PublishMessageError::with_message(error, restored)
+                    }
+                    None => PublishMessageError::new(error),
+                })
+            }
+        }
     }
 }
 
