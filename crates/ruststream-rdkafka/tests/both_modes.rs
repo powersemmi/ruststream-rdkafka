@@ -58,6 +58,8 @@ fn app(servers: &str, group: &str) -> impl App<State = ()> {
 }
 
 /// The body both modes run.
+// A test drives the app on its own task; the app's cold path carries no Send.
+#[allow(clippy::future_not_send)]
 async fn a_deferred_order_is_taken_when_its_copy_comes_back(tb: TestApp<()>) {
     tb.broker::<KafkaBroker>()
         .message(&Order { id: 1 })

@@ -108,11 +108,11 @@ impl PartitionText {
 ///
 /// Under `Commit::Tracked`:
 ///
-/// - [`ack`](IncomingMessage::ack) settles the offset and advances the stored position across
+/// - [`ack`](Settle::ack) settles the offset and advances the stored position across
 ///   everything settled below it.
-/// - [`nack(false)`](IncomingMessage::nack) drops the message: the offset settles so the
+/// - [`nack(false)`](Settle::nack) drops the message: the offset settles so the
 ///   position can move past it.
-/// - [`nack(true)`](IncomingMessage::nack) hands the delivery back to its subscription, which
+/// - [`nack(true)`](Settle::nack) hands the delivery back to its subscription, which
 ///   delivers it again ahead of what it fetches next. Its offset stays unsettled meanwhile, so
 ///   the committed position stays below it: were the process to stop first, Kafka redelivers
 ///   the record from there to whoever reads the partition next. A rebalance or a seek that

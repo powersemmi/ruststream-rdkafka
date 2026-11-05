@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(Some(Ok(()))));
         slot.clear();
         assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(None));
-        assert!(slot.is_empty());
+        assert_eq!(slot, Vec::<u32>::new());
         assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(None));
     }
 
@@ -205,7 +205,7 @@ mod tests {
             fill(stream.as_mut(), &mut slot),
             Poll::Ready(Some(Err("fetch failed")))
         );
-        assert!(slot.is_empty());
+        assert_eq!(slot, Vec::<u32>::new());
         assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(Some(Ok(()))));
         assert_eq!(slot, [7]);
     }

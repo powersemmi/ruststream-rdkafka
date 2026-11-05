@@ -17,7 +17,7 @@
 //! - **raw** - a librdkafka `StreamConsumer`, driven directly.
 //! - **adapter** - this crate's own consumer: the broker, the topic descriptor, the
 //!   [`Subscriber`](ruststream::Subscriber) stream it yields and the
-//!   [`ack`](ruststream::IncomingMessage::ack) that settles a delivery. A loop in this file pulls
+//!   [`ack`](ruststream::Settle::ack) that settles a delivery. A loop in this file pulls
 //!   from that stream, decodes and settles; there is no handler, no app and no dispatch in it.
 //! - **framework** - the service a user writes: a `#[subscriber]` handler, the app, the runtime.
 //!

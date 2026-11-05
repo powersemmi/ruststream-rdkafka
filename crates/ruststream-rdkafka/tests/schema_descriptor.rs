@@ -42,6 +42,8 @@ fn broker(server: &MockServer) -> KafkaBroker {
         .schema_prefetch(SchemaPrefetch::new(SchemaRegistry::new(server.uri())))
 }
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#[allow(clippy::future_not_send)]
 async fn start_error(app: RustStream) -> String {
     match TestApp::start(app).await {
         Ok(_) => panic!("the app must not start"),

@@ -7,6 +7,9 @@
 //! cargo run --example manual_guide_replay -- run
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::{Future, ready};

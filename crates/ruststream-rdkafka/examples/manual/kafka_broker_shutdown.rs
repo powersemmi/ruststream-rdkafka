@@ -7,6 +7,8 @@
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --example manual_kafka_broker_shutdown --features testing
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 

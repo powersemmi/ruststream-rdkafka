@@ -5,6 +5,9 @@
 //! cargo test --example guide_testing --features testing
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
+
 use std::time::Duration;
 
 use ruststream_rdkafka::context::keys::Key;
