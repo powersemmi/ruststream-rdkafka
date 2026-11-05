@@ -23,12 +23,10 @@ async fn confirm(order: &Order) -> Confirmation {
 
 #[ruststream::app]
 fn app() -> impl App {
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
-        KafkaBroker::new(["localhost:9092"]),
-        |b| {
-            b.include(confirm).out_reply(Publish::default());
-        },
-    )
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+            b.include(confirm).out_reply(Publish::default())
+        })
 }
 // --8<-- [end:app]
 

@@ -135,14 +135,14 @@ fn app() -> impl App<State = Clients> {
                 // Five deliveries of one refund, the first included; then the dead-letter topic.
                 b.include(process_refund)
                     .max_attempts(nonzero!(5u32))
-                    .dead_letter("refunds.dlq");
-                b.include(review);
-                // A set of topics names where a copy goes: back to the topic it came from.
-                b.include(process_regional_refund)
+                    .dead_letter("refunds.dlq")
+                    .include(review)
+                    // A set of topics names where a copy goes: back to the topic it came from.
+                    .include(process_regional_refund)
                     .max_attempts(nonzero!(5u32))
                     .dead_letter("refunds.dlq")
                     .out_retry(Publish::default())
-                    .transform(ToSourceTopic);
+                    .transform(ToSourceTopic)
             },
         )
 }

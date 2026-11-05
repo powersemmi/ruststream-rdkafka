@@ -86,9 +86,8 @@ mod by_record_key {
 
     fn app() -> impl App<State = ()> {
         let broker = KafkaBroker::new(["localhost:9092"]);
-        RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-            b.include(on_order);
-        })
+        RustStream::new(AppInfo::new("orders", "0.1.0"))
+            .with_broker(broker, |b| b.include(on_order))
     }
 
     #[tokio::test(start_paused = true)]
@@ -125,9 +124,7 @@ mod by_partition {
 
     fn app() -> impl App<State = ()> {
         let broker = KafkaBroker::new(["localhost:9092"]);
-        RustStream::new(AppInfo::new("audit", "0.1.0")).with_broker(broker, |b| {
-            b.include(on_audit);
-        })
+        RustStream::new(AppInfo::new("audit", "0.1.0")).with_broker(broker, |b| b.include(on_audit))
     }
 
     #[tokio::test(start_paused = true)]

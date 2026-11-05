@@ -30,9 +30,7 @@ fn app() -> impl App {
         // The producer only.
         .producer_config("compression.type", "lz4")
         .producer_config("message.max.bytes", "65536");
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(ship);
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| b.include(ship))
 }
 // --8<-- [end:app]
 
@@ -99,9 +97,8 @@ mod tests {
         let broker = KafkaBroker::new(["localhost:9092"])
             .default_group("orders-svc")
             .producer_config("acks", "sometimes");
-        let app = RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-            b.include(ship);
-        });
+        let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
+            .with_broker(broker, |b| b.include(ship));
 
         let refused = TestApp::start(app).await.err().map(|err| err.to_string());
         assert!(

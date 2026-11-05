@@ -151,20 +151,20 @@ fn service(broker: KafkaBroker) -> impl App {
         // One transactional id per service instance.
         b.include(ship)
             .out(Shipments, Publish::default().transactional_id("shipping-1"))
-            .build();
-        // One transactional id per source partition: "invoicing-1-p0", "invoicing-1-p1", ...
-        b.include(invoice)
+            .build()
+            // One transactional id per source partition: "invoicing-1-p0", "invoicing-1-p1", ...
+            .include(invoice)
             .out(
                 DefaultSlot,
                 Publish::default()
                     .transactional_id("invoicing-1")
                     .per_partition(),
             )
-            .build();
-        // The pipeline's id is the one the subscription's commit mode names.
-        b.include(enrich)
+            .build()
+            // The pipeline's id is the one the subscription's commit mode names.
+            .include(enrich)
             .out_reply(EosPublish::new("enrichment-1"))
-            .transform(EosReplies);
+            .transform(EosReplies)
     })
 }
 

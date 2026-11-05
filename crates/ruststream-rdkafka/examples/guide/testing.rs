@@ -60,7 +60,7 @@ fn service(broker: KafkaBroker) -> RustStream {
         b.include(charge)
             .max_attempts(nonzero!(3u32))
             .dead_letter("card-payments.review")
-            .out_reply(Publish::default());
+            .out_reply(Publish::default())
     })
 }
 

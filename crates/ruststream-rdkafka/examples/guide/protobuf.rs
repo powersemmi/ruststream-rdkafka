@@ -56,7 +56,7 @@ async fn print_label(parcel: &Parcel) -> Result<Label, HandlerOutcome> {
 fn service(broker: KafkaBroker, registry: &SchemaRegistry) -> RustStream {
     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker(broker, |b| {
         b.include(print_label)
-            .out_reply(KafkaPublish::framed(registry));
+            .out_reply(KafkaPublish::framed(registry))
     })
 }
 
