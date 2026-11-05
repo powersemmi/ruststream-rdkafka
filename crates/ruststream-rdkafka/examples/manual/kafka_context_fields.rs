@@ -77,7 +77,7 @@ fn app() -> impl App {
         |b| {
             let audit = subscriber("orders", Audit).map_source(|_| audited());
             b.include(audit.reply().build())
-                .out_reply(Publish::default());
+                .out_reply(Publish::default())
         },
     )
 }

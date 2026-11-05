@@ -18,7 +18,7 @@ A production cluster asks for [authentication and TLS](../components/broker/secu
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["ssl"] }
+ruststream-rdkafka = { version = "0.8", features = ["ssl"] }
 ```
 
 The deployment provides the address and the credentials in environment variables.

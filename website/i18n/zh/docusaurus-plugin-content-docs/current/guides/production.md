@@ -19,7 +19,7 @@ import TabItem from '@theme/TabItem';
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["ssl"] }
+ruststream-rdkafka = { version = "0.8", features = ["ssl"] }
 ```
 
 部署环境通过环境变量提供地址和凭据。

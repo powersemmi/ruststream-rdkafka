@@ -44,7 +44,7 @@ fn broker(password: &str, ca: &str) -> KafkaBroker {
 /// The service, with the password and the certificate authority the deployment hands it.
 fn service(password: &str, ca: &str) -> impl App + use<> {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker(password, ca), |b| {
-        b.include(subscriber("orders", Place).build());
+        b.include(subscriber("orders", Place).build())
     })
 }
 
@@ -107,9 +107,8 @@ mod tests {
         let broker = KafkaBroker::new(["kafka-1.internal:9093"])
             .default_group("orders-svc")
             .config("security.protocol", "SASL_TLS");
-        let app = RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-            b.include(subscriber("orders", Place).build());
-        });
+        let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
+            .with_broker(broker, |b| b.include(subscriber("orders", Place).build()));
 
         let refused = TestApp::start(app).await.err().map(|err| err.to_string());
         assert!(

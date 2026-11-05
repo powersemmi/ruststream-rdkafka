@@ -47,7 +47,7 @@ async fn dispatch(
 /// The service on the cluster `broker` connects to.
 fn service(broker: KafkaBroker) -> impl App {
     RustStream::new(AppInfo::new("dispatch", "0.1.0")).with_broker(broker, |b| {
-        b.include(dispatch).out(Lanes, Publish::default()).build();
+        b.include(dispatch).out(Lanes, Publish::default()).build()
     })
 }
 

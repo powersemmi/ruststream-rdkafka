@@ -43,7 +43,7 @@ fn app(registry: SchemaRegistry) -> impl App {
 
     let replies = codec.clone();
     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker_codec(broker, codec, |b| {
-        b.include(ship).out_reply(Publish::default()).codec(replies);
+        b.include(ship).out_reply(Publish::default()).codec(replies)
     })
 }
 

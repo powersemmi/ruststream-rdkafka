@@ -29,9 +29,7 @@ async fn archive(invoice: &Invoice) -> HandlerOutcome {
 
 fn app(servers: &str, group: &str) -> impl App {
     let broker = KafkaBroker::new([servers]).default_group(group);
-    RustStream::new(AppInfo::new("archive", "0.1.0")).with_broker(broker, |b| {
-        b.include(archive);
-    })
+    RustStream::new(AppInfo::new("archive", "0.1.0")).with_broker(broker, |b| b.include(archive))
 }
 
 // The scenario is the test above; the command in the header runs it.

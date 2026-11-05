@@ -45,10 +45,10 @@ fn app(registry: &str) -> impl App {
         .default_group("orders-svc")
         .schema_prefetch(prefetch);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(on_order);
-        b.include(on_settlement)
+        b.include(on_order)
+            .include(on_settlement)
             .out_retry(Publish::default())
-            .to("settlements.retry");
+            .to("settlements.retry")
     })
 }
 // --8<-- [end:schema]

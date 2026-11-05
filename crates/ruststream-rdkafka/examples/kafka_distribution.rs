@@ -39,7 +39,7 @@ fn service(broker: KafkaBroker) -> impl App {
         // its placement. The count matches the partitions of `planner.work-items`.
         b.include(plan)
             .out_reply(Publish::default())
-            .transform(RoundRobin::partitions(8));
+            .transform(RoundRobin::partitions(8))
     })
 }
 // --8<-- [end:round_robin]

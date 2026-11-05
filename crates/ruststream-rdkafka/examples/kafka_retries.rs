@@ -94,8 +94,8 @@ fn app() -> impl App<State = AppState> {
             // "payments.dlq" instead, payload and headers as they arrived.
             b.include(charge)
                 .max_attempts(nonzero!(5u32))
-                .dead_letter("payments.dlq");
-            b.include(on_dead_letter);
+                .dead_letter("payments.dlq")
+                .include(on_dead_letter)
         })
 }
 // --8<-- [end:declaration]

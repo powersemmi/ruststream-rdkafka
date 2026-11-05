@@ -50,7 +50,7 @@ use crate::subscriber::KafkaSubscriber;
 /// fn app() -> RustStream {
 ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///             b.include(place);
+///             b.include(place)
 ///         })
 /// }
 /// # let _ = app;
@@ -110,7 +110,7 @@ impl KafkaTopic {
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(on_order);
+    ///         b.include(on_order)
     ///     })
     /// }
     /// # let _ = app;
@@ -199,7 +199,7 @@ impl KafkaTopic {
     /// fn app() -> RustStream {
     ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
     ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-    ///             b.include(place);
+    ///             b.include(place)
     ///         })
     /// }
     /// # let _ = app;

@@ -84,7 +84,7 @@ mod whole {
                     .workers(nonzero!(4))
                     .build()
                     .map_source(|_| orders),
-            );
+            )
         })
     }
     // --8<-- [end:handler]
@@ -163,7 +163,7 @@ mod per_element {
                     .build()
                     .map_source(|_| payments),
             )
-            .out_retry(Publish::default());
+            .out_retry(Publish::default())
         })
     }
     // --8<-- [end:selective]

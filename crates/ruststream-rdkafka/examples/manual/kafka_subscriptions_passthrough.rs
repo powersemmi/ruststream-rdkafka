@@ -58,7 +58,7 @@ fn app() -> impl App<State = ()> {
             subscriber("payments", Settle)
                 .build()
                 .map_source(|_| payments),
-        );
+        )
     })
 }
 // --8<-- [end:config]
@@ -105,7 +105,7 @@ mod tests {
                     subscriber("payments", Settle)
                         .build()
                         .map_source(|_| untracked),
-                );
+                )
             },
         );
 

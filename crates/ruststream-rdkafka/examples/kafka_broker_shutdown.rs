@@ -8,6 +8,8 @@
 //! KAFKA_TEST_URL=127.0.0.1:9092 cargo test --example kafka_broker_shutdown --features testing
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
@@ -27,9 +29,7 @@ async fn ship(order: &Order) -> Shipment {
 }
 
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(ship);
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| b.include(ship))
 }
 
 // --8<-- [start:broker]

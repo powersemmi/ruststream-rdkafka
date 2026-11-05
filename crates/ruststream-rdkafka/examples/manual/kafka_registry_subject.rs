@@ -64,7 +64,7 @@ fn app(registry: SchemaRegistry) -> impl App {
     RustStream::new(AppInfo::new("refunds", "0.1.0"))
         .publish_layer(SchemaFrame::new(registry).subject("refunds", refunds))
         .with_broker(broker, |b| {
-            b.include(subscriber("returns", Reimburse).reply().build());
+            b.include(subscriber("returns", Reimburse).reply().build())
         })
 }
 

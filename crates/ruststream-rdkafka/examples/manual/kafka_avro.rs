@@ -73,7 +73,7 @@ fn app(registry: SchemaRegistry) -> impl App {
             Ok::<_, KafkaError>(())
         })
         .with_broker(broker, |b| {
-            b.include(subscriber("tickets", Confirm).reply().build());
+            b.include(subscriber("tickets", Confirm).reply().build())
         })
 }
 

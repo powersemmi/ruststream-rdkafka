@@ -61,7 +61,7 @@
 //!     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
 //!         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
 //!         |b| {
-//!             b.include(confirm).out_reply(Publish::default());
+//!             b.include(confirm).out_reply(Publish::default())
 //!         },
 //!     )
 //! }
@@ -74,8 +74,8 @@ pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
 pub use crate::context::keys::{Partition, Position, SeekHandle, Source, Topic};
 pub use crate::{
-    Assignment, Commit, EosReplies, KafkaBroker, KafkaEosPublish as EosPublish, KafkaOptions,
-    KafkaPartitionedPublish as PartitionedPublish, KafkaPartitions, KafkaPosition,
+    Assignment, Commit, EosReplies, EosWindow, KafkaBroker, KafkaEosPublish as EosPublish,
+    KafkaOptions, KafkaPartitionedPublish as PartitionedPublish, KafkaPartitions, KafkaPosition,
     KafkaPublish as Publish, KafkaPublishSteps, KafkaSeeker, KafkaTopic, KafkaTopicPattern,
     KafkaTopics, KafkaTransactionalPublish as TransactionalPublish, LaneKey, PartitionLanes,
     RoundRobin, StartOffset, ToSourceTopic,

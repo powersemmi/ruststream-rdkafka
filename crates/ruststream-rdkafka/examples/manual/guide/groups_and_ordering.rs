@@ -237,8 +237,8 @@ fn service(broker: KafkaBroker) -> impl App<State = ()> {
                 .build(),
         )
         .out(Entries, Publish::default())
-        .build();
-        b.include(
+        .build()
+        .include(
             subscriber("transfers", Screen)
                 .map_source(|_| {
                     KafkaTopic::new("transfers")
@@ -247,25 +247,25 @@ fn service(broker: KafkaBroker) -> impl App<State = ()> {
                         .assignment(Assignment::CooperativeSticky)
                 })
                 .build(),
-        );
+        )
         // A set of topics has no single topic to send a retry copy to, so the mount site names it.
-        b.include(
+        .include(
             subscriber("^bank\\..*", Archive)
                 .map_source(|_| KafkaTopics::pattern("^bank\\..*").group("archive"))
                 .reply()
                 .build(),
         )
         .out_retry(Publish::default())
-        .transform(ToSourceTopic);
+        .transform(ToSourceTopic)
         // Partitions 0 and 1 share the regular cases evenly; partition 2 stays for urgent ones.
-        b.include(
+        .include(
             subscriber("card-disputes", OpenCase)
                 .map_source(|_| KafkaTopic::new("card-disputes").group("case-intake"))
                 .build(),
         )
         .out(Cases, Publish::default())
         .transform(RoundRobin::partitions(2))
-        .build();
+        .build()
     })
 }
 

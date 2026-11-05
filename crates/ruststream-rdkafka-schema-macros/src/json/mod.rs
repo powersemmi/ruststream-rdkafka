@@ -51,6 +51,14 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
         }
     };
     let export = export_test(input, &record);
+    let private_path = private();
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    // The record the type is: what a registry codec's frame names it by.
+    let record_impl = quote! {
+        impl #impl_generics #private_path::Record for #ident #ty_generics #where_clause {
+            const RECORD: &'static str = #record;
+        }
+    };
     let triggers = quote! {
         const _: () = {
             let _ = ::core::option_env!("RUSTSTREAM_SCHEMA_EXPORT");
@@ -59,7 +67,7 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
     };
     // Export mode emits no checks, so a changed type exports before its migration exists.
     if env::var_os("RUSTSTREAM_SCHEMA_EXPORT").is_some() {
-        return Ok(quote!(#shape #export #triggers));
+        return Ok(quote!(#shape #record_impl #export #triggers));
     }
     let catalog = migrations::read_catalog(&migrations::schema_dir())
         .map_err(|err| syn::Error::new_spanned(&input.ident, err))?;
@@ -80,7 +88,7 @@ pub(crate) fn derive(input: &DeriveInput) -> syn::Result<TokenStream> {
         checks.push(check(input, subject, &catalog)?);
     }
     let guard = online::guard(&subjects, input.ident.span())?;
-    Ok(quote!(#shape #(#checks)* #guard #export #triggers))
+    Ok(quote!(#shape #record_impl #(#checks)* #guard #export #triggers))
 }
 
 /// The JSON subjects whose `record` is `record`.

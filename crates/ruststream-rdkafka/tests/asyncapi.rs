@@ -50,11 +50,7 @@ fn document() -> Value {
         KafkaBroker::new(["broker-1:9092", "broker-2:9092"]).schema_registry(SchemaRegistry::new(
             "http://svc:hunter2@registry.internal:8081",
         )),
-        |b| {
-            b.include(confirm);
-            b.include(audit);
-            b.include(ledger);
-        },
+        |b| b.include(confirm).include(audit).include(ledger),
     );
     let json = build_spec(&app)
         .to_json()
@@ -139,7 +135,7 @@ fn a_published_channel_reports_the_topic_it_publishes_to() {
             b.include(place)
                 .out_reply(KafkaPublish::default())
                 .out(Shipments, KafkaPublish::default())
-                .build();
+                .build()
         },
     );
     let json = build_spec(&app)

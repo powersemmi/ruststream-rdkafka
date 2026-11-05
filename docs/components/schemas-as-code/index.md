@@ -27,6 +27,8 @@ For an external subject (`owner = "external"`) the type is a reader of every pul
 
 An enum whose variants each wrap one model, the core's `#[derive(InMessages)]` set, derives `Schema` too.
 It maps each variant to its model's record full name, and each model is checked by its own derive.
+With `#[in_messages(by_codec)]` the registry codec picks the variant by the record the delivery's schema names: an Avro record, or a JSON Schema `title` matched against the record's simple name.
+Under a codec without a frame, such as `JsonCodec` alone, such a set does not compile.
 
 The check is constants, uncalled code and trait bounds.
 A release binary holds no schema text, and the delivery and publish paths are the same as without it.

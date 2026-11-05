@@ -49,9 +49,7 @@ fn app(registry: SchemaRegistry) -> impl App {
         .schema_registry(registry.clone());
     RustStream::new(AppInfo::new("receipts", "0.1.0"))
         .publish_layer(SchemaFrame::new(registry))
-        .with_broker(broker, |b| {
-            b.include(acknowledge);
-        })
+        .with_broker(broker, |b| b.include(acknowledge))
 }
 
 #[ruststream::app]

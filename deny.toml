@@ -34,6 +34,9 @@ allow = [
     # `fluent-uri`, and `foldhash` (Zlib). Both are permissive.
     "MIT-0",
     "Zlib",
+    # assert_no_alloc, the failing allocator of the core's no-heap test leg, reached through the
+    # framework's `testing` feature; permissive.
+    "BSD-1-Clause",
 ]
 
 [bans]

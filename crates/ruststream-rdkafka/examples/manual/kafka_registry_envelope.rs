@@ -101,7 +101,7 @@ fn reframe(record: &[u8]) -> Result<Reframed, HandlerOutcome> {
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("registry-migration");
     RustStream::new(AppInfo::new("registry-migration", "0.1.0")).with_broker(broker, |b| {
-        b.include(subscriber("orders", Reframe).reply().build());
+        b.include(subscriber("orders", Reframe).reply().build())
     })
 }
 

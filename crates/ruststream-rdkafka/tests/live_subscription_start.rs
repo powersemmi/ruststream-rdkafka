@@ -19,7 +19,7 @@ use ruststream::runtime::{AppInfo, HandlerOutcome, RustStream, SubscriberSetting
 #[cfg(feature = "testing")]
 use ruststream::testing::TestApp;
 use ruststream::{
-    Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Subscriber,
+    Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Publisher, Settle, Subscriber,
 };
 #[cfg(feature = "testing")]
 use ruststream::{Outgoing, subscriber};
@@ -209,7 +209,7 @@ async fn a_timestamp_past_the_log_receives_what_follows() {
                 take_order
                     .map_source(move |_| source)
                     .start_at(KafkaPosition::timestamp(now)),
-            );
+            )
         },
     );
     let tb = TestApp::start_live_within(app, WAIT)

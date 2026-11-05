@@ -75,7 +75,7 @@ fn app() -> impl App<State = AppState> {
     RustStream::new(AppInfo::new("jobs", "0.1.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(AppState::default()))
         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-            b.include(drain.batch(nonzero!(128usize)));
+            b.include(drain.batch(nonzero!(128usize)))
         })
 }
 

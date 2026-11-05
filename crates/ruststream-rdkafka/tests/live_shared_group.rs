@@ -77,8 +77,8 @@ async fn subscriptions_sharing_a_group_read_what_follows_startup() {
     let app = RustStream::new(AppInfo::new("shared", "0.1.0")).with_broker(
         KafkaBroker::new([url.clone()]).default_group(format!("shared-group-{run}")),
         |b| {
-            b.include(take_order.map_source(move |_| orders_source));
-            b.include(take_refund.map_source(move |_| refunds_source));
+            b.include(take_order.map_source(move |_| orders_source))
+                .include(take_refund.map_source(move |_| refunds_source))
         },
     );
     let tb = TestApp::start_live_within(app, DEADLINE)

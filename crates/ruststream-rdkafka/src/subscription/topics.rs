@@ -40,7 +40,56 @@ use crate::subscriber::KafkaSubscriber;
 /// fn app() -> RustStream {
 ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///             b.include(place);
+///             b.include(place)
+///         })
+/// }
+/// # let _ = app;
+/// ```
+///
+/// Retried copies go where the mount site names:
+///
+/// ```
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+///
+/// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     let _ = order;
+///     HandlerOutcome::retry()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(place)
+///                 .max_attempts(nonzero!(3u32))
+///                 .out_retry(Publish::default())
+///                 .to("orders.retry")
+///         })
+/// }
+/// # let _ = app;
+/// ```
+///
+/// A registration that leaves the destination out does not compile:
+///
+/// ```compile_fail
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Order { id: u64 }
+///
+/// #[subscriber(KafkaTopics::new(["orders-eu", "orders-us"]).group("orders-svc"))]
+/// async fn place(order: &Order) -> HandlerOutcome {
+///     let _ = order;
+///     HandlerOutcome::retry()
+/// }
+///
+/// fn app() -> RustStream {
+///     RustStream::new(AppInfo::new("orders", "0.1.0"))
+///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+///             b.include(place)
+///                 .max_attempts(nonzero!(3u32))
+///                 .out_retry(Publish::default())
 ///         })
 /// }
 /// # let _ = app;
@@ -112,7 +161,7 @@ impl KafkaTopics {
     ///     let audit = KafkaTopics::pattern("^audit\\..*").group("audit-svc");
     ///     RustStream::new(AppInfo::new("audit", "0.1.0"))
     ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-    ///             b.include(subscriber(audit, Archive).build());
+    ///             b.include(subscriber(audit, Archive).build())
     ///         })
     /// }
     /// # let _ = app;
@@ -170,7 +219,7 @@ impl KafkaTopics {
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(on_order);
+    ///         b.include(on_order)
     ///     })
     /// }
     /// # let _ = app;

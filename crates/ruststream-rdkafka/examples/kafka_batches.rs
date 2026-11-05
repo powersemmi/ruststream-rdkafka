@@ -48,7 +48,7 @@ mod whole {
         let broker = KafkaBroker::new(["localhost:9092"]);
         RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
             // At most 64 orders per call.
-            b.include(store.batch(nonzero!(64)));
+            b.include(store.batch(nonzero!(64)))
         })
     }
     // --8<-- [end:handler]
@@ -114,7 +114,7 @@ mod per_element {
         RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
             // A delayed retry is a copy published back to the topic after the delay.
             b.include(reconcile.batch(nonzero!(16)))
-                .out_retry(Publish::default());
+                .out_retry(Publish::default())
         })
     }
     // --8<-- [end:selective]

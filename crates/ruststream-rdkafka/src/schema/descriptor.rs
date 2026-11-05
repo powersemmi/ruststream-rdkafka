@@ -39,7 +39,7 @@ use crate::schema_registry::SubjectStrategy;
 ///         .default_group("orders-svc")
 ///         .schema_prefetch(prefetch);
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-///         b.include(on_order);
+///         b.include(on_order)
 ///     })
 /// }
 /// # let _ = app;
@@ -86,7 +86,7 @@ impl Schema {
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(on_order);
+    ///         b.include(on_order)
     ///     })
     /// }
     /// # let _ = app;
@@ -126,7 +126,7 @@ impl Schema {
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(on_order);
+    ///         b.include(on_order)
     ///     })
     /// }
     /// # let _ = app;
@@ -162,7 +162,7 @@ impl Schema {
     ///         .default_group("orders-svc")
     ///         .schema_prefetch(prefetch);
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(on_order);
+    ///         b.include(on_order)
     ///     })
     /// }
     /// # let _ = app;

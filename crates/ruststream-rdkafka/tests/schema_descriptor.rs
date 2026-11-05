@@ -42,6 +42,8 @@ fn broker(server: &MockServer) -> KafkaBroker {
         .schema_prefetch(SchemaPrefetch::new(SchemaRegistry::new(server.uri())))
 }
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#[allow(clippy::future_not_send)]
 async fn start_error(app: RustStream) -> String {
     match TestApp::start(app).await {
         Ok(_) => panic!("the app must not start"),
@@ -59,9 +61,8 @@ async fn on_order(order: &Order) -> HandlerOutcome {
 async fn a_topic_whose_subject_declares_its_namespace_starts_and_delivers() {
     let server = MockServer::start().await;
     holds(&server, "orders-value", ORDER).await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order));
     let tb = TestApp::start(app)
         .await
         .expect("the subject declares the record");
@@ -83,9 +84,8 @@ async fn a_topic_whose_subject_declares_its_namespace_starts_and_delivers() {
 async fn a_subject_declaring_another_namespace_fails_startup_with_the_fix() {
     let server = MockServer::start().await;
     holds(&server, "orders-value", FOREIGN_ORDER).await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order));
     let err = start_error(app).await;
     assert!(
         err.contains(
@@ -100,9 +100,8 @@ async fn a_subject_declaring_another_namespace_fails_startup_with_the_fix() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_subject_the_registry_does_not_hold_fails_startup() {
     let server = MockServer::start().await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order));
     let err = start_error(app).await;
     assert!(
         err.contains(
@@ -126,9 +125,8 @@ async fn an_override_names_the_subject_checked() {
     let server = MockServer::start().await;
     holds(&server, "orders-value", FOREIGN_ORDER).await;
     holds(&server, "orders-v2", ORDER).await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order_v2);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order_v2));
     let tb = TestApp::start(app)
         .await
         .expect("the override declares the record");
@@ -139,9 +137,8 @@ async fn an_override_names_the_subject_checked() {
 async fn a_mismatched_override_is_reported_as_the_descriptors_name() {
     let server = MockServer::start().await;
     holds(&server, "orders-v2", FOREIGN_ORDER).await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order_v2);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order_v2));
     let err = start_error(app).await;
     assert!(
         err.contains("topic `orders` uses subject `orders-v2` (named by the descriptor)"),
@@ -161,17 +158,15 @@ async fn on_keyed_order(order: &Order) -> HandlerOutcome {
 async fn a_named_key_subject_must_exist_and_a_default_one_may_not() {
     let server = MockServer::start().await;
     holds(&server, "orders-value", ORDER).await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_order);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_order));
     let tb = TestApp::start(app)
         .await
         .expect("a topic with plain keys registers no key subject");
     tb.shutdown().await.expect("shutdown");
 
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_keyed_order);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_keyed_order));
     let err = start_error(app).await;
     assert!(
         err.contains(
@@ -197,21 +192,18 @@ async fn a_topic_without_schema_asks_the_registry_nothing() {
         .expect(0)
         .mount(&server)
         .await;
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
-        b.include(on_plain);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(&server), |b| b.include(on_plain));
     let tb = TestApp::start(app).await.expect("start");
     tb.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_checked_topic_on_a_broker_without_a_registry_fails_startup() {
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(
-        KafkaBroker::new(["kafka:9092"]).default_group("svc"),
-        |b| {
-            b.include(on_order);
-        },
-    );
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(KafkaBroker::new(["kafka:9092"]).default_group("svc"), |b| {
+            b.include(on_order)
+        });
     let err = start_error(app).await;
     assert!(
         err.contains("`KafkaBroker::schema_prefetch`"),
@@ -242,7 +234,7 @@ async fn each_topic_of_a_list_is_checked_against_its_own_subjects() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
         b.include(on_list)
             .out_retry(KafkaPublish::default())
-            .to("orders.retry");
+            .to("orders.retry")
     });
     let tb = TestApp::start(app)
         .await
@@ -255,7 +247,7 @@ async fn each_topic_of_a_list_is_checked_against_its_own_subjects() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
         b.include(on_list)
             .out_retry(KafkaPublish::default())
-            .to("orders.retry");
+            .to("orders.retry")
     });
     let err = start_error(app).await;
     assert!(
@@ -276,7 +268,7 @@ async fn a_list_refuses_a_topic_it_does_not_read() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
         b.include(on_mistyped)
             .out_retry(KafkaPublish::default())
-            .to("orders.retry");
+            .to("orders.retry")
     });
     let err = start_error(app).await;
     assert!(
@@ -305,7 +297,7 @@ async fn a_pattern_checks_the_topics_that_exist_when_it_opens() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(&server), |b| {
         b.include(on_matched)
             .out_retry(KafkaPublish::default())
-            .to("orders.retry");
+            .to("orders.retry")
     });
     // The harness creates a topic on its first publish, so the pattern opens over none and is
     // checked as its topics appear; with nothing published yet the app starts.

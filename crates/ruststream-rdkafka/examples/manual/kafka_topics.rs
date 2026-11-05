@@ -80,7 +80,7 @@ fn app() -> impl App {
                 .reply()
                 .build()
                 .map_source(|_| orders),
-        );
+        )
     })
 }
 // --8<-- [end:descriptor]
