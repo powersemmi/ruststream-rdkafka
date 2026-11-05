@@ -18,9 +18,12 @@ use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
-use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
+use ruststream::runtime::{
+    ForReply, OutPipeline, Outgoing, PublishContext, PublishTransform, Reads, Slot,
+};
 use ruststream::{
-    Lend, OutgoingMessage, PairError, PublishMessageError, PublishPolicy, Publisher, Str,
+    Lend, OutgoingMessage, PairError, PublishMessageError, PublishOutcome, PublishPolicy,
+    Publisher, Str,
     TransactionalPublisher as _,
 };
 use tracing::{debug, error};
@@ -942,6 +945,103 @@ impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
             out.headers_mut()
                 .insert(Str::from_static(EOS_SOURCE_HEADER), source);
         }
+    }
+}
+
+/// A slot a handler writes into an exactly-once pipeline's open window through: each record
+/// paired with the delivery it came from.
+///
+/// A handler bounds its slot `Out<impl EosWindow>` and the mount site attaches
+/// [`KafkaEosPublish`]; the records join the window's transaction and become visible at its
+/// commit, atomically with the source positions.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream::OutgoingMessage;
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Cart { id: u64, items: Vec<String> }
+///
+/// /// Splits a cart into one record per item, all committed with the cart's offset.
+/// #[subscriber(KafkaTopic::new("carts").commit(Commit::Transactional("checkout-1".into())))]
+/// async fn split(
+///     cart: &Cart,
+///     Ctx(source): Ctx<Source>,
+///     Out(window): Out<impl EosWindow>,
+/// ) -> HandlerOutcome {
+///     for item in &cart.items {
+///         let record = OutgoingMessage::new("cart-lines", item.as_bytes());
+///         // A failed publish aborts the window, which redelivers the cart.
+///         if window.publish_paired(&source, record, None).await.is_err() {
+///             return HandlerOutcome::retry();
+///         }
+///     }
+///     tracing::info!(cart.id, "split");
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> impl App {
+///     RustStream::new(AppInfo::new("checkout", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("checkout-svc"),
+///         |b| {
+///             b.include(split)
+///                 .out(DefaultSlot, EosPublish::new("checkout-1"))
+///                 .build()
+///         },
+///     )
+/// }
+/// # }
+/// # fn main() {}
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not write into an exactly-once pipeline's window",
+    note = "for an `Out<impl EosWindow, _>` slot, attach a `KafkaEosPublish` policy"
+)]
+pub trait EosWindow: Send + Sync {
+    /// Publishes `msg` into the open window on behalf of the delivery at `source`, as
+    /// [`EosPipeline::publish`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`EosPipeline::publish`].
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send;
+}
+
+impl EosWindow for EosPipeline {
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send {
+        self.publish(source, msg, options)
+    }
+}
+
+// The arena entry a handler's `Out` parameter binds, as for `PartitionLanes`: the entry's `Deref`
+// reaches the wired pipeline, and this impl lets the slot satisfy the capability bound itself.
+// The records leave through the pipeline, outside the slot's test capture.
+impl<M, W, EncodeCodec, Pipe, Body> EosWindow for Slot<M, W, EncodeCodec, Pipe, Body>
+where
+    W: EosWindow,
+    EncodeCodec: Send + Sync,
+    Pipe: OutPipeline<W>,
+{
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send {
+        (**self).publish_paired(source, msg, options)
     }
 }
 

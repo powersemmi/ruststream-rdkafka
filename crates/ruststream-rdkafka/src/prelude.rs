@@ -74,7 +74,7 @@ pub use ruststream::{Positioned, Seeker, TransactionalPublisher};
 
 pub use crate::context::keys::{Partition, Position, SeekHandle, Source, Topic};
 pub use crate::{
-    Assignment, Commit, EosReplies, KafkaBroker, KafkaEosPublish as EosPublish, KafkaOptions,
+    Assignment, Commit, EosReplies, EosWindow, KafkaBroker, KafkaEosPublish as EosPublish, KafkaOptions,
     KafkaPartitionedPublish as PartitionedPublish, KafkaPartitions, KafkaPosition,
     KafkaPublish as Publish, KafkaPublishSteps, KafkaSeeker, KafkaTopic, KafkaTopicPattern,
     KafkaTopics, KafkaTransactionalPublish as TransactionalPublish, LaneKey, PartitionLanes,
