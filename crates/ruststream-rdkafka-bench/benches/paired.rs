@@ -688,17 +688,13 @@ async fn start(url: &str, run: Run, tracked: bool) -> RunningApp {
     let app = RustStream::new(AppInfo::new("kafka-bench", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(run));
     if tracked {
-        app.with_broker(KafkaBroker::new([url]), |b| {
-            b.include(tracked_consume);
-        })
-        .start()
-        .await
+        app.with_broker(KafkaBroker::new([url]), |b| b.include(tracked_consume))
+            .start()
+            .await
     } else {
-        app.with_broker(KafkaBroker::new([url]), |b| {
-            b.include(auto_consume);
-        })
-        .start()
-        .await
+        app.with_broker(KafkaBroker::new([url]), |b| b.include(auto_consume))
+            .start()
+            .await
     }
     .expect("the service starts")
 }
