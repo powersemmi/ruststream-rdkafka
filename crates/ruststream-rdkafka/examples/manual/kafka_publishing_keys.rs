@@ -79,7 +79,7 @@ fn app() -> impl App {
             let ship = subscriber("orders", Ship).map_source(|_| orders());
             b.include(ship.build())
                 .out(Shipments, Publish::default())
-                .build();
+                .build()
         },
     )
 }

@@ -55,7 +55,7 @@ fn app(servers: &str, group: &str) -> impl App {
             subscriber("ledger.invoices", Archive)
                 .build()
                 .map_source(|_| invoices),
-        );
+        )
     })
 }
 // --8<-- [end:start]

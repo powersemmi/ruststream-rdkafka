@@ -73,7 +73,7 @@ fn app() -> impl App {
             });
             b.include(carts.build())
                 .out(DefaultSlot, EosPublish::new("checkout-1"))
-                .build();
+                .build()
         },
     )
 }

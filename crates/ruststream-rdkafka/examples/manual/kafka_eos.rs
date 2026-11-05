@@ -64,7 +64,7 @@ fn app() -> impl App {
                 .reply();
             b.include(orders.build())
                 .out_reply(pipeline)
-                .transform(EosReplies);
+                .transform(EosReplies)
         },
     )
 }

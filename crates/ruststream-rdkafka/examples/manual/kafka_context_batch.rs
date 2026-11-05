@@ -90,7 +90,7 @@ fn app() -> impl App<State = AppState> {
         .on_startup(async move |()| Ok::<_, Infallible>(AppState::default()))
         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
             let drain = subscriber("jobs", Drain).map_source(|_| jobs());
-            b.include(drain.batch(nonzero!(128usize)).build());
+            b.include(drain.batch(nonzero!(128usize)).build())
         })
 }
 

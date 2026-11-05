@@ -43,7 +43,7 @@ fn app() -> impl App {
         .producer_config("compression.type", "lz4")
         .producer_config("message.max.bytes", "65536");
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(subscriber("orders", Ship).reply().build());
+        b.include(subscriber("orders", Ship).reply().build())
     })
 }
 // --8<-- [end:app]
@@ -137,7 +137,7 @@ mod tests {
             .default_group("orders-svc")
             .producer_config("acks", "sometimes");
         let app = RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-            b.include(subscriber("orders", Ship).reply().build());
+            b.include(subscriber("orders", Ship).reply().build())
         });
 
         let refused = TestApp::start(app).await.err().map(|err| err.to_string());
