@@ -121,10 +121,12 @@ mod tests {
         };
         tb.broker::<KafkaBroker>().message(&order).publish().await?;
 
+        // The reply the producer refused is lost and the order is acknowledged: a handler that
+        // must not lose it registers `.error(..)` on its outcome.
         tb.broker::<KafkaBroker>()
             .subscriber("orders")
             .assert_called_once()
-            .settled(HandlerOutcome::retry());
+            .settled(HandlerOutcome::ack());
         tb.broker::<KafkaBroker>()
             .published::<Shipment>("shipments")
             .assert_not_called();
