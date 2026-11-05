@@ -198,10 +198,12 @@ message Label {
             .publish()
             .await?;
 
+        // The label the framing refused is lost and the parcel is acknowledged: a handler that
+        // must not lose it registers `.error(..)` on its outcome.
         tb.broker::<KafkaBroker>()
             .subscriber("parcels")
             .assert_called_once()
-            .settled(HandlerOutcome::retry());
+            .settled(HandlerOutcome::ack());
         tb.broker::<KafkaBroker>()
             .published::<()>("labels")
             .assert_not_called();
