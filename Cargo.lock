@@ -104,9 +104,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.103"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apache-avro"
@@ -1895,9 +1895,9 @@ dependencies = [
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.106"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
@@ -2054,9 +2054,9 @@ dependencies = [
 
 [[package]]
 name = "quote"
-version = "1.0.46"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
@@ -2434,26 +2434,82 @@ dependencies = [
 
 [[package]]
 name = "ruststream"
-version = "0.7.6"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c861d7d44558faf909e52db1b96bd77141e946c962f13a2f0a009e4a7dd7c0b2"
+checksum = "1662f29fc955ed7fed2f396659a58381e6d8be91cf691caef98a30d0a522f323"
 dependencies = [
  "bytes",
  "bytes-utils",
- "ciborium",
- "futures",
  "inventory",
- "rmp-serde",
- "rtrb",
+ "ruststream-asyncapi",
+ "ruststream-cli",
+ "ruststream-conformance",
+ "ruststream-core",
  "ruststream-macros",
+ "ruststream-memory",
+ "ruststream-runtime",
+ "ruststream-testing",
  "schemars",
+]
+
+[[package]]
+name = "ruststream-asyncapi"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99ff236c2a3b416e742e478b2cc0cafe9681581e7208c9c46c0b7eaec9b8ea8e"
+dependencies = [
+ "ruststream-core",
+ "ruststream-runtime",
  "serde",
+ "serde_json",
+ "serde_norway",
+ "tracing",
+]
+
+[[package]]
+name = "ruststream-cli"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c6dec10e6a15208ab6533b246a78c98d25f7b02a0fc095d6e271628244a550c"
+dependencies = [
+ "ruststream-asyncapi",
+ "ruststream-runtime",
  "serde_json",
  "serde_norway",
  "thiserror",
  "tokio",
- "tokio-util",
- "tracing",
+]
+
+[[package]]
+name = "ruststream-conformance"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98ea87456977a21ad3a0ef75a1992ae4dff1dbf54a5a23a7497500d76e286ff2"
+dependencies = [
+ "bytes",
+ "futures",
+ "inventory",
+ "ruststream-asyncapi",
+ "ruststream-core",
+ "ruststream-runtime",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "ruststream-core"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d96617de2f8621959ad2d80b9cf8efe0d2bfe3e905ae185518fb2f88906637f"
+dependencies = [
+ "bytes",
+ "bytes-utils",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2466,13 +2522,30 @@ dependencies = [
 
 [[package]]
 name = "ruststream-macros"
-version = "0.7.6"
+version = "0.7.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "174071f81441098e248f456a7defe4c18077420c936143a900c6e79a95f27ee4"
+checksum = "ff57ef6fb132627421187107ea5269889eb0844db35190a4490423d6e0f06800"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "ruststream-memory"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "107e27f56298fccbd3d3091f119a60767cd2124e6a850813e56908273cc62a0d"
+dependencies = [
+ "bytes",
+ "bytes-utils",
+ "futures",
+ "ruststream-core",
+ "ruststream-runtime",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2566,6 +2639,44 @@ dependencies = [
  "trybuild",
  "ureq",
  "uuid",
+]
+
+[[package]]
+name = "ruststream-runtime"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c88ae535ec23a98beeb9acaca700c399538e3cc350a4dd72dba8ff7aca775629"
+dependencies = [
+ "bytes",
+ "bytes-utils",
+ "ciborium",
+ "futures",
+ "inventory",
+ "rmp-serde",
+ "rtrb",
+ "ruststream-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ruststream-testing"
+version = "0.7.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e321a3207e37139715b2cef46d0d4cb46779ad557612140caf1123597d05d1"
+dependencies = [
+ "inventory",
+ "ruststream-core",
+ "ruststream-runtime",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -2970,7 +3081,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3318,9 +3429,9 @@ checksum = "16062d030850f35054e37746427b9febb74a2f24c9c6dd6fa2d0c13c5f53221e"
 
 [[package]]
 name = "ureq"
-version = "3.5.0"
+version = "3.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cde93ff05758a36a851a398a772b0b79a82fbe3c186a46f2696baaeaf84c966b"
+checksum = "e7be76686bdf7198002062423ca0d8cf9b75a27c8e1de804513b97e97b555d9d"
 dependencies = [
  "base64 0.23.1",
  "log",
@@ -3334,9 +3445,9 @@ dependencies = [
 
 [[package]]
 name = "ureq-proto"
-version = "0.6.5"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "841583fc36089d7d59419568ae157f43a5a03a2e5a81ba87c77d1596ef46e922"
+checksum = "622dce33c252115466d83f63e9744a18f12b4406aae51a01c15ad8fcf1185eb3"
 dependencies = [
  "base64 0.23.1",
  "http",
@@ -3376,9 +3487,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.4"
+version = "1.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
+checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
 dependencies = [
  "js-sys",
  "serde_core",
