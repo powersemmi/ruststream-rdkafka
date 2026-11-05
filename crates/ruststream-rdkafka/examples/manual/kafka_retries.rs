@@ -127,12 +127,12 @@ fn app() -> impl App<State = AppState> {
                     .build(),
             )
             .max_attempts(nonzero!(5u32))
-            .dead_letter("payments.dlq");
-            b.include(
+            .dead_letter("payments.dlq")
+            .include(
                 subscriber("payments.dlq", OnDeadLetter)
                     .map_source(|_| dead_letters())
                     .build(),
-            );
+            )
         })
 }
 // --8<-- [end:declaration]

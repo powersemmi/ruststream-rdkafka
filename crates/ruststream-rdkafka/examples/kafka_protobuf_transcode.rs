@@ -74,9 +74,7 @@ fn app(registry: &SchemaRegistry) -> impl App {
                 .await?;
             Ok::<_, KafkaError>(())
         })
-        .with_broker(broker, |b| {
-            b.include(confirm);
-        })
+        .with_broker(broker, |b| b.include(confirm))
 }
 // --8<-- [end:app]
 

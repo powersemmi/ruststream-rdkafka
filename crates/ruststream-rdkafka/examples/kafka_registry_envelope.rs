@@ -42,9 +42,8 @@ async fn reframe(record: &Framed<'_>) -> Result<Reframed, HandlerOutcome> {
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("registry-migration");
-    RustStream::new(AppInfo::new("registry-migration", "0.1.0")).with_broker(broker, |b| {
-        b.include(reframe);
-    })
+    RustStream::new(AppInfo::new("registry-migration", "0.1.0"))
+        .with_broker(broker, |b| b.include(reframe))
 }
 // --8<-- [end:app]
 

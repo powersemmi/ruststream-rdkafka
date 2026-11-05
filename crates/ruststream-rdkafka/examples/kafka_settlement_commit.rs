@@ -118,9 +118,7 @@ fn app() -> impl App<State = AppState> {
     RustStream::new(AppInfo::new("billing", "0.1.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(AppState::default()))
         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-            b.include(book);
-            b.include(count_view);
-            b.include(take_charge);
+            b.include(book).include(count_view).include(take_charge)
         })
 }
 

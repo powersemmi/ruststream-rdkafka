@@ -109,7 +109,7 @@ mod by_record_key {
                     .workers_by_key(nonzero!(8))
                     .build()
                     .map_source(|_| orders),
-            );
+            )
         })
     }
     // --8<-- [end:consumer]
@@ -148,7 +148,7 @@ mod by_partition {
                     .workers_by_key(nonzero!(8))
                     .build()
                     .map_source(|_| audit),
-            );
+            )
         })
     }
     // --8<-- [end:partition_lanes]

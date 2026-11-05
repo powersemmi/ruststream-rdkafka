@@ -145,9 +145,9 @@ fn app() -> impl App<State = Clients> {
         .on_startup(async move |()| Ok::<_, Infallible>(Clients::default()))
         .with_broker(broker, |b| {
             b.include(pay_out)
-                .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
-            b.include(count_view);
-            b.include(reconcile.batch(nonzero!(500usize)));
+                .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
+                .include(count_view)
+                .include(reconcile.batch(nonzero!(500usize)))
         })
 }
 // --8<-- [end:app]

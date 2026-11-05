@@ -48,9 +48,8 @@ impl Handle<Order> for Place {
 
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(subscriber("orders", Place).build());
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .with_broker(broker, |b| b.include(subscriber("orders", Place).build()))
 }
 // --8<-- [end:name]
 
@@ -84,12 +83,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_service_with_no_group_does_not_start() {
-        let groupless = RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
-            KafkaBroker::new(["localhost:9092"]),
-            |b| {
-                b.include(subscriber("orders", Place).build());
-            },
-        );
+        let groupless = RustStream::new(AppInfo::new("orders", "0.1.0"))
+            .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+                b.include(subscriber("orders", Place).build())
+            });
 
         let refused = TestApp::start(groupless)
             .await

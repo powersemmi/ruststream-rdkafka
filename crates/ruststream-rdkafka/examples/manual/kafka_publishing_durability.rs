@@ -60,7 +60,7 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("receipts", "0.1.0")).with_broker(broker, |b| {
         let issue = subscriber("payments", IssueReceipt).map_source(|_| payments());
         b.include(issue.reply().build())
-            .out_reply(Publish::default());
+            .out_reply(Publish::default())
     })
 }
 // --8<-- [end:durability]

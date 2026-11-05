@@ -52,9 +52,7 @@ fn app(registry: SchemaRegistry) -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("audit-svc");
     RustStream::new(AppInfo::new("audit", "0.1.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(Audit { registry }))
-        .with_broker(broker, |b| {
-            b.include(audit);
-        })
+        .with_broker(broker, |b| b.include(audit))
 }
 
 #[ruststream::app]

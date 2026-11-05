@@ -116,7 +116,7 @@ impl Handle<Parcel, Label> for PrintLabel {
 fn service(broker: KafkaBroker, registry: &SchemaRegistry) -> RustStream {
     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker(broker, |b| {
         b.include(subscriber("parcels", PrintLabel).reply().build())
-            .out_reply(KafkaPublish::framed(registry));
+            .out_reply(KafkaPublish::framed(registry))
     })
 }
 

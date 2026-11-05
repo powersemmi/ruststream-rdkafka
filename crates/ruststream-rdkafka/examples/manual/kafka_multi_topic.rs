@@ -90,7 +90,7 @@ mod topics {
                     .map_source(|_| events),
             )
             .out_retry(Publish::default())
-            .transform(ToSourceTopic);
+            .transform(ToSourceTopic)
         })
     }
     // --8<-- [end:multi]
@@ -172,7 +172,7 @@ mod pattern {
                     .map_source(|_| audit),
             )
             .out_retry(Publish::default())
-            .transform(ToSourceTopic);
+            .transform(ToSourceTopic)
         })
     }
     // --8<-- [end:pattern]

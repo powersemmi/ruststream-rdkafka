@@ -63,7 +63,7 @@ fn app() -> impl App {
         |b| {
             b.include(split)
                 .out(DefaultSlot, EosPublish::new("checkout-1"))
-                .build();
+                .build()
         },
     )
 }

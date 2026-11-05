@@ -227,16 +227,11 @@ impl Handle<Order, EnrichedOrder> for Enrich {
 // --8<-- [start:service]
 fn service(broker: KafkaBroker) -> impl App {
     RustStream::new(AppInfo::new("fulfilment", "0.1.0")).with_broker(broker, |b| {
-        // One transactional id per service instance.
         let paid = subscriber("paid-orders", Ship).map_source(|_| {
             KafkaTopic::new("paid-orders")
                 .group("shipping")
                 .commit(Commit::Tracked)
         });
-        b.include(paid.build())
-            .out(Shipments, Publish::default().transactional_id("shipping-1"))
-            .build();
-        // One transactional id per source partition: "invoicing-1-p0", "invoicing-1-p1", ...
         let billable = subscriber("billable-orders", Invoice)
             .map_source(|_| {
                 KafkaTopic::new("billable-orders")
@@ -244,15 +239,6 @@ fn service(broker: KafkaBroker) -> impl App {
                     .commit(Commit::Tracked)
             })
             .workers_by_key(nonzero!(4));
-        b.include(billable.build())
-            .out(
-                DefaultSlot,
-                Publish::default()
-                    .transactional_id("invoicing-1")
-                    .per_partition(),
-            )
-            .build();
-        // The pipeline's id is the one the subscription's commit mode names.
         let placed = subscriber("placed-orders", Enrich)
             .map_source(|_| {
                 KafkaTopic::new("placed-orders")
@@ -261,9 +247,23 @@ fn service(broker: KafkaBroker) -> impl App {
             })
             .reply()
             .workers_by_key(nonzero!(4));
-        b.include(placed.build())
+        // One transactional id per service instance.
+        b.include(paid.build())
+            .out(Shipments, Publish::default().transactional_id("shipping-1"))
+            .build()
+            // One transactional id per source partition: "invoicing-1-p0", "invoicing-1-p1", ...
+            .include(billable.build())
+            .out(
+                DefaultSlot,
+                Publish::default()
+                    .transactional_id("invoicing-1")
+                    .per_partition(),
+            )
+            .build()
+            // The pipeline's id is the one the subscription's commit mode names.
+            .include(placed.build())
             .out_reply(EosPublish::new("enrichment-1"))
-            .transform(EosReplies);
+            .transform(EosReplies)
     })
 }
 

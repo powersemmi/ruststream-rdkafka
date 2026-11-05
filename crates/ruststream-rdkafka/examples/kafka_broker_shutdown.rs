@@ -27,9 +27,7 @@ async fn ship(order: &Order) -> Shipment {
 }
 
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(ship);
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| b.include(ship))
 }
 
 // --8<-- [start:broker]

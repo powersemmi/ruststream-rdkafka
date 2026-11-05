@@ -67,7 +67,7 @@ async fn confirm(order: &Order) -> Confirmation {
 fn service(broker: KafkaBroker) -> RustStream {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
         b.include(confirm)
-            .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
+            .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
     })
 }
 

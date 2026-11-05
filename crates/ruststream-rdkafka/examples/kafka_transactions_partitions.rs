@@ -69,7 +69,7 @@ fn app(servers: &str) -> impl App {
             let lanes = Publish::default()
                 .transactional_id("billing-svc-1")
                 .per_partition();
-            b.include(bill).out(DefaultSlot, lanes).build();
+            b.include(bill).out(DefaultSlot, lanes).build()
         },
     )
 }

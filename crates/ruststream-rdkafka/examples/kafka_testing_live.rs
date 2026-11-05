@@ -36,12 +36,10 @@ async fn accept(payment: &Payment) -> HandlerOutcome {
 
 /// The service on the cluster at `servers`, reading in the consumer group `group`.
 fn app(servers: &str, group: &str) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
-        KafkaBroker::new([servers]).default_group(group),
-        |b| {
-            b.include(accept);
-        },
-    )
+    RustStream::new(AppInfo::new("payments", "0.1.0"))
+        .with_broker(KafkaBroker::new([servers]).default_group(group), |b| {
+            b.include(accept)
+        })
 }
 
 #[ruststream::app]

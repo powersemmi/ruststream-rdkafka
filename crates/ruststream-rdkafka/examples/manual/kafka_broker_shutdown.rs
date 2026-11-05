@@ -39,7 +39,7 @@ impl Handle<Order, Shipment> for Ship {
 
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(subscriber("broker-shutdown-orders", Ship).reply().build());
+        b.include(subscriber("broker-shutdown-orders", Ship).reply().build())
     })
 }
 

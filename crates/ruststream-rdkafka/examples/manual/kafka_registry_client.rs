@@ -76,7 +76,7 @@ fn app(registry: SchemaRegistry) -> impl App {
     RustStream::new(AppInfo::new("audit", "0.1.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(Audit { registry }))
         .with_broker(broker, |b| {
-            b.include(subscriber("orders", AuditRecord).build());
+            b.include(subscriber("orders", AuditRecord).build())
         })
 }
 

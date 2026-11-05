@@ -62,7 +62,7 @@ fn app() -> impl App {
                 .map_source(|_| partition),
         )
         .out_retry(Publish::default())
-        .to("orders.retry");
+        .to("orders.retry")
     })
 }
 // --8<-- [end:reader]

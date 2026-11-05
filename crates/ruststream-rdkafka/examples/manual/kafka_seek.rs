@@ -82,7 +82,7 @@ mod start_at {
                     .build()
                     .map_source(|_| audit)
                     .start_at(KafkaPosition::earliest()),
-            );
+            )
         })
     }
     // --8<-- [end:start_at]
@@ -161,7 +161,7 @@ mod handler {
             let jobs = KafkaTopic::new("jobs")
                 .group("jobs-svc")
                 .commit(Commit::Tracked);
-            b.include(subscriber("jobs", Work).build().map_source(|_| jobs));
+            b.include(subscriber("jobs", Work).build().map_source(|_| jobs))
         })
     }
     // --8<-- [end:handler]
@@ -242,7 +242,7 @@ mod batch {
                     .batch(nonzero!(3))
                     .build()
                     .map_source(|_| bulk),
-            );
+            )
         })
     }
     // --8<-- [end:batch]
