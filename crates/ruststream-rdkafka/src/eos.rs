@@ -23,8 +23,7 @@ use ruststream::runtime::{
 };
 use ruststream::{
     Lend, OutgoingMessage, PairError, PublishMessageError, PublishOutcome, PublishPolicy,
-    Publisher, Str,
-    TransactionalPublisher as _,
+    Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
