@@ -233,7 +233,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///         .default_group("orders-svc")
 ///         .config("client.id", "orders-svc");
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-///         b.include(place);
+///         b.include(place)
 ///     })
 /// }
 /// # let _ = app;
@@ -270,7 +270,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
 ///         |b| {
-///             b.include(accept);
+///             b.include(accept)
 ///         },
 ///     )
 /// }
@@ -425,7 +425,7 @@ impl KafkaBroker {
     ///         .config("session.timeout.ms", "10000")
     ///         .assignment_timeout(Duration::from_secs(20));
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(place);
+    ///         b.include(place)
     ///     })
     /// }
     /// # let _ = app;
@@ -837,7 +837,7 @@ impl ConnectedKafkaBroker {
     /// use std::pin::pin;
     ///
     /// use futures::StreamExt;
-    /// use ruststream::{Broker, IncomingMessage, Subscriber};
+    /// use ruststream::{Broker, IncomingMessage, Settle, Subscriber};
     /// use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
     ///
     /// async fn tail() -> Result<(), Box<dyn Error + Send + Sync>> {

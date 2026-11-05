@@ -59,7 +59,7 @@ use crate::publisher::KafkaOptions;
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
 ///             b.include(plan)
 ///                 .out_reply(Publish::default())
-///                 .transform(RoundRobin::partitions(8));
+///                 .transform(RoundRobin::partitions(8))
 ///         })
 /// }
 /// # }

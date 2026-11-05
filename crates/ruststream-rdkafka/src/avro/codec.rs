@@ -170,7 +170,7 @@ fn avro_record_name(schema: &Schema) -> Option<&'static str> {
 ///     let codec = AvroCodec::local(Order::get_schema())?;
 ///     let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
 ///     Ok(RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-///         b.include(place);
+///         b.include(place)
 ///     }))
 /// }
 /// # let _ = app;
@@ -264,7 +264,7 @@ impl AvroCodec {
     ///     // position.
     ///     let replies = codec.clone();
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-    ///         b.include(confirm).out_reply(Publish::default()).codec(replies);
+    ///         b.include(confirm).out_reply(Publish::default()).codec(replies)
     ///     })
     /// }
     /// # }
@@ -347,7 +347,7 @@ impl AvroCodec {
     ///     let replies = codec.clone();
     ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
     ///         .with_broker_codec(broker, codec, |b| {
-    ///             b.include(confirm).out_reply(Publish::default()).codec(replies);
+    ///             b.include(confirm).out_reply(Publish::default()).codec(replies)
     ///         })
     /// }
     /// # }

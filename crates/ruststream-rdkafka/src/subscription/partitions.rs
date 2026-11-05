@@ -42,7 +42,7 @@ use crate::subscriber::KafkaSubscriber;
 /// fn app() -> RustStream {
 ///     RustStream::new(AppInfo::new("inspector", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///             b.include(inspect);
+///             b.include(inspect)
 ///         })
 /// }
 /// # let _ = app;

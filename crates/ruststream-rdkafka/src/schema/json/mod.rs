@@ -43,7 +43,7 @@
 //!         .default_group("orders-svc")
 //!         .schema_prefetch(prefetch);
 //!     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-//!         b.include(on_order);
+//!         b.include(on_order)
 //!     })
 //! }
 //! # let _ = app;
@@ -156,7 +156,7 @@ use std::path::Path;
 ///         .schema_prefetch(prefetch);
 ///     let replies = codec.clone();
 ///     RustStream::new(AppInfo::new("billing", "0.1.0")).with_broker_codec(broker, codec, |b| {
-///         b.include(invoice).out_reply(Publish::default()).codec(replies);
+///         b.include(invoice).out_reply(Publish::default()).codec(replies)
 ///     })
 /// }
 /// # let _ = app;

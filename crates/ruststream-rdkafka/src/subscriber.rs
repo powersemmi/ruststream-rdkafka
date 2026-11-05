@@ -133,7 +133,7 @@ impl DeliveredTopic {
 ///     RustStream::new(AppInfo::new("indexer", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["localhost:9092"]),
 ///         |b| {
-///             b.include(index.batch(nonzero!(500usize)));
+///             b.include(index.batch(nonzero!(500usize)))
 ///         },
 ///     )
 /// }

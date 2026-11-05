@@ -274,7 +274,7 @@ struct PipelineInner {
 ///         |b| {
 ///             let pipeline = EosPublish::new("enrich-1")
 ///                 .commit_interval(Duration::from_millis(50));
-///             b.include(enrich).out_reply(pipeline).transform(EosReplies);
+///             b.include(enrich).out_reply(pipeline).transform(EosReplies)
 ///         },
 ///     )
 /// }

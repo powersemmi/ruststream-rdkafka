@@ -92,7 +92,7 @@ use crate::schema_registry::{
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
 ///         |b| {
-///             b.include(place);
+///             b.include(place)
 ///         },
 ///     )
 /// }
@@ -373,7 +373,7 @@ impl ProtobufFraming {
 ///         .with_broker(
 ///             KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
 ///             |b| {
-///                 b.include(place).out(Journal, Publish::default()).build();
+///                 b.include(place).out(Journal, Publish::default()).build()
 ///             },
 ///         )
 /// }
@@ -471,7 +471,7 @@ impl PublishLayer for ProtobufFrame {
 /// let registry = SchemaRegistry::new("http://localhost:8081");
 /// let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
 ///     .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///         b.include(confirm).out_reply(KafkaPublish::framed(&registry));
+///         b.include(confirm).out_reply(KafkaPublish::framed(&registry))
 ///     });
 /// # let _ = app;
 /// ```
@@ -553,7 +553,7 @@ impl KafkaFramedPublish {
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
     ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
     ///         |b| {
-    ///             b.include(confirm).out_reply(replies);
+    ///             b.include(confirm).out_reply(replies)
     ///         },
     ///     )
     /// }

@@ -94,7 +94,7 @@ const DEFAULT_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(30);
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["kafka:9092"]).default_group("orders-svc"),
 ///         |b| {
-///             b.include(record).out(Journal, Publish::default()).build();
+///             b.include(record).out(Journal, Publish::default()).build()
 ///         },
 ///     )
 /// }
@@ -194,7 +194,7 @@ impl KafkaOptions {
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
 ///         |b| {
-///             b.include(record).out(Journal, Publish::default()).build();
+///             b.include(record).out(Journal, Publish::default()).build()
 ///         },
 ///     )
 /// }
@@ -259,7 +259,7 @@ where
 ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
 ///         |b| {
 ///             b.include(confirm)
-///                 .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
+///                 .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
 ///         },
 ///     )
 /// }
@@ -332,7 +332,7 @@ impl KafkaPublish {
     ///         |b| {
     ///             b.include(refund)
     ///                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
-    ///                 .build();
+    ///                 .build()
     ///         },
     ///     )
     /// }
@@ -392,7 +392,7 @@ impl KafkaPublish {
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
     ///         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
     ///         |b| {
-    ///             b.include(confirm).out_reply(Publish::framed(&registry));
+    ///             b.include(confirm).out_reply(Publish::framed(&registry))
     ///         },
     ///     )
     /// }
@@ -616,7 +616,7 @@ fn produce_in_process(
 ///     RustStream::new(AppInfo::new("refunds", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["localhost:9092"]).default_group("refunds-svc"),
 ///         |b| {
-///             b.include(refund).out(Lines, lines).build();
+///             b.include(refund).out(Lines, lines).build()
 ///         },
 ///     )
 /// }
@@ -695,7 +695,7 @@ impl KafkaTransactionalPublish {
     ///                     DefaultSlot,
     ///                     Publish::default().transactional_id("billing-svc-1").per_partition(),
     ///                 )
-    ///                 .build();
+    ///                 .build()
     ///         },
     ///     )
     /// }
@@ -927,7 +927,7 @@ struct TxInner {
 ///         |b| {
 ///             b.include(refund)
 ///                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
-///                 .build();
+///                 .build()
 ///         },
 ///     )
 /// }
@@ -1266,7 +1266,7 @@ impl TransactionalPublisher for KafkaTransactionalPublisher {
 ///                     DefaultSlot,
 ///                     Publish::default().transactional_id("billing-svc-1").per_partition(),
 ///                 )
-///                 .build();
+///                 .build()
 ///         },
 ///     )
 /// }

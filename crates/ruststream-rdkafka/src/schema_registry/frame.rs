@@ -30,15 +30,16 @@ use crate::schema::Record;
 /// use ruststream_rdkafka::avro::{AvroCodec, AvroSchema};
 /// use ruststream_rdkafka::prelude::*;
 /// use ruststream_rdkafka::schema::Schema;
+/// use ruststream_rdkafka::{SchemaPrefetch, SchemaRegistry};
 /// use serde::Deserialize;
 ///
-/// #[derive(Deserialize, AvroSchema, Schema)]
+/// #[derive(Deserialize, AvroSchema, Schema, MessageInfo)]
 /// #[avro(namespace = "com.acme.orders")]
 /// pub struct OrderCreated {
 ///     pub id: i64,
 /// }
 ///
-/// #[derive(Deserialize, AvroSchema, Schema)]
+/// #[derive(Deserialize, AvroSchema, Schema, MessageInfo)]
 /// #[avro(namespace = "com.acme.orders")]
 /// pub struct OrderCancelled {
 ///     pub id: i64,
