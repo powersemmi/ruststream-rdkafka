@@ -13,9 +13,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::KafkaError;
+#[cfg(feature = "schema-check")]
+use ruststream::codec::FrameNames;
+
+#[cfg(feature = "schema-check")]
+use crate::schema::Record;
 use crate::schema_registry::{
-    MissingSubject, Registration, SchemaPrefetch, SchemaRegistry, SchemaType, WIRE_MAGIC,
-    parse_envelope, serde_name,
+    MissingSubject, RecordFrame, Registration, SchemaNames, SchemaPrefetch, SchemaRegistry,
+    SchemaType, WIRE_MAGIC, parse_envelope, serde_name,
 };
 
 /// One schema prepared for both directions, built once and borrowed for the process's life.
@@ -30,10 +35,13 @@ struct Prepared {
     schema: &'static Schema,
     writer: GenericDatumWriter<'static>,
     reader: GenericDatumReader<'static>,
+    /// The records the writer schema names, what a `by_codec` set picks its variant by.
+    names: SchemaNames,
 }
 
 impl Prepared {
     fn build(writer_schema: Schema, reader_schema: Option<Schema>) -> Result<Self, KafkaError> {
+        let names = SchemaNames::of_avro(&writer_schema.canonical_form());
         let schema: &'static Schema = Box::leak(Box::new(writer_schema));
         let reader_schema: Option<&'static Schema> =
             reader_schema.map(|reader| &*Box::leak(Box::new(reader)));
@@ -46,6 +54,7 @@ impl Prepared {
                 .maybe_reader_schema(reader_schema)
                 .build()
                 .map_err(KafkaError::wire_format)?,
+            names,
         })
     }
 }
@@ -459,7 +468,46 @@ impl AvroCodec {
     }
 }
 
+impl AvroCodec {
+    /// The prepared schema a payload was written with, and the datum behind its envelope.
+    fn writer_of<'a>(&self, bytes: &'a [u8]) -> Result<(&'static Prepared, &'a [u8]), CodecError> {
+        match &self.source {
+            SchemaSource::Local(prepared) => Ok((*prepared, bytes)),
+            SchemaSource::Registry { .. } => {
+                let (id, datum) = parse_envelope(bytes).ok_or_else(|| {
+                    decode_error(format!(
+                        "the delivery does not carry the Confluent wire format (a zero magic \
+                         byte and a 4-byte schema id), so no writer schema can be named for it; \
+                         its first bytes are {:02x?}",
+                        &bytes[..bytes.len().min(8)],
+                    ))
+                })?;
+                Ok((self.prepared_for(id)?, datum))
+            }
+        }
+    }
+}
+
 impl Codec for AvroCodec {
+    /// The record the payload's writer schema names: the local schema's, or the one its schema id
+    /// resolves to through this codec's registry cache.
+    type Frame<'a>
+        = RecordFrame<'a>
+    where
+        Self: 'a;
+
+    /// Reads the record a delivery carries off its writer schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::Decode`] where [`decode`](Codec::decode) would for the same
+    /// reason: a registry codec's payload without the Confluent envelope, or a schema id the
+    /// registry cache does not hold.
+    fn frame<'a>(&'a self, payload: &'a [u8]) -> Result<Self::Frame<'a>, CodecError> {
+        let (prepared, datum) = self.writer_of(payload)?;
+        Ok(prepared.names.frame(datum))
+    }
+
     fn encode<T: Serialize>(&self, value: &T) -> Result<BytesMut, CodecError> {
         let mut buf = BytesMut::new();
         let prepared = match &self.source {
@@ -532,25 +580,20 @@ impl Codec for AvroCodec {
     }
 
     fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, CodecError> {
-        let (prepared, mut datum) = match &self.source {
-            SchemaSource::Local(prepared) => (*prepared, bytes),
-            SchemaSource::Registry { .. } => {
-                let (id, datum) = parse_envelope(bytes).ok_or_else(|| {
-                    decode_error(format!(
-                        "the delivery does not carry the Confluent wire format (a zero magic \
-                         byte and a 4-byte schema id), so no writer schema can be named for it; \
-                         its first bytes are {:02x?}",
-                        &bytes[..bytes.len().min(8)],
-                    ))
-                })?;
-                (self.prepared_for(id)?, datum)
-            }
-        };
+        let (prepared, mut datum) = self.writer_of(bytes)?;
         let value = prepared
             .reader
             .read_value(&mut datum)
             .map_err(decode_source)?;
         apache_avro::from_value(&value).map_err(decode_source)
+    }
+}
+
+/// A model the `Schema` derive bound to a record is named by a frame that carries that record.
+#[cfg(feature = "schema-check")]
+impl<Model: Record> FrameNames<Model> for AvroCodec {
+    fn names(frame: &RecordFrame<'_>) -> bool {
+        frame.names(Model::RECORD)
     }
 }
 

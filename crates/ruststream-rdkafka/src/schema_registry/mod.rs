@@ -44,6 +44,7 @@
 pub mod admin;
 mod cache;
 mod client;
+mod frame;
 mod name;
 
 use std::collections::{HashMap, HashSet};
@@ -54,6 +55,8 @@ use std::time::Duration;
 
 pub use cache::{MemorySchemaCache, SchemaCache, SchemaCachePolicy};
 pub use client::{HttpRegistryClient, RegistryClient};
+pub use frame::RecordFrame;
+pub(crate) use frame::SchemaNames;
 
 use client::{Auth, HttpConfig};
 pub(crate) use name::serde_name;
@@ -1208,6 +1211,9 @@ pub struct SchemaFramed<C> {
     subjects: Arc<HashMap<&'static str, String>>,
     on_missing: MissingSubject,
     prefetch: SchemaPrefetch,
+    /// The records each schema met so far names, keyed by registry id and shared by clones, as
+    /// the Avro codec keeps its prepared schemas: built once per schema, kept for the process.
+    names: Arc<Mutex<HashMap<u32, &'static SchemaNames>>>,
     inner: C,
 }
 
@@ -1223,6 +1229,7 @@ impl<C> SchemaFramed<C> {
             subjects: Arc::new(HashMap::new()),
             on_missing: prefetch.missing_subject(),
             prefetch: prefetch.clone(),
+            names: Arc::new(Mutex::new(HashMap::new())),
             inner,
         }
     }
@@ -1276,7 +1283,69 @@ impl<C> SchemaFramed<C> {
     }
 }
 
+impl<C> SchemaFramed<C> {
+    /// The records the schema `id` names, worked out once per codec.
+    fn names_for(&self, id: u32) -> Result<&'static SchemaNames, CodecError> {
+        if let Some(found) = self
+            .names
+            .lock()
+            .expect("schema names mutex poisoned")
+            .get(&id)
+        {
+            return Ok(found);
+        }
+        // Only ever the cache, as for the decode: the prefetch resolved the id on the delivery
+        // path, and a synchronous codec cannot await a miss.
+        let schema = self.registry.cached_schema(id).ok_or_else(|| {
+            CodecError::Decode(Box::new(KafkaError::malformed(format!(
+                "no schema is cached for id {id}, so the record the delivery carries cannot be \
+                 named: its schema was not resolved before it reached the codec. Attach the \
+                 SchemaPrefetch this codec was built from to the broker \
+                 (KafkaBroker::schema_prefetch), and check the registry is reachable"
+            ))))
+        })?;
+        let names = match schema.schema_type() {
+            SchemaType::Avro => SchemaNames::of_avro(schema.definition()),
+            SchemaType::Json => SchemaNames::of_json(schema.definition()),
+            SchemaType::Protobuf => SchemaNames::Nothing,
+        };
+        let built: &'static SchemaNames = Box::leak(Box::new(names));
+        Ok(self
+            .names
+            .lock()
+            .expect("schema names mutex poisoned")
+            .entry(id)
+            .or_insert(built))
+    }
+}
+
+/// The refusal of a payload without the Confluent envelope, on a codec that reads one.
+fn unframed(bytes: &[u8]) -> CodecError {
+    CodecError::Decode(Box::new(KafkaError::malformed(format!(
+        "the delivery does not carry the Confluent wire format (a zero magic byte and a 4-byte \
+         schema id) that a registry-backed topic publishes under; its first bytes are {:02x?}",
+        &bytes[..bytes.len().min(8)],
+    ))))
+}
+
 impl<C: Codec> Codec for SchemaFramed<C> {
+    /// The record the payload's schema id names, resolved through this codec's registry cache.
+    type Frame<'a>
+        = RecordFrame<'a>
+    where
+        Self: 'a;
+
+    /// Reads the record a delivery carries off its schema id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::Decode`] for a payload without the Confluent envelope, as
+    /// [`decode`](Codec::decode) does, and for a schema id the registry cache does not hold.
+    fn frame<'a>(&'a self, payload: &'a [u8]) -> Result<Self::Frame<'a>, CodecError> {
+        let (id, datum) = parse_envelope(payload).ok_or_else(|| unframed(payload))?;
+        Ok(self.names_for(id)?.frame(datum))
+    }
+
     fn encode<T: serde::Serialize>(&self, value: &T) -> Result<BytesMut, CodecError> {
         let name = serde_name(value).ok_or_else(|| {
             CodecError::Encode(Box::new(KafkaError::malformed(
@@ -1320,14 +1389,7 @@ impl<C: Codec> Codec for SchemaFramed<C> {
         // A payload with no envelope is refused rather than passed through: on a registry-backed
         // topic an unframed record is a producer that did not frame, and reading it anyway would
         // make that look like it worked.
-        let (_, datum) = parse_envelope(bytes).ok_or_else(|| {
-            CodecError::Decode(Box::new(KafkaError::malformed(format!(
-                "the delivery does not carry the Confluent wire format (a zero magic byte and a \
-                 4-byte schema id) that a registry-backed topic publishes under; its first bytes \
-                 are {:02x?}",
-                &bytes[..bytes.len().min(8)],
-            ))))
-        })?;
+        let (_, datum) = parse_envelope(bytes).ok_or_else(|| unframed(bytes))?;
         self.inner.decode(datum)
     }
 }
@@ -1570,7 +1632,7 @@ impl SchemaFrame {
 impl PublishLayer for SchemaFrame {
     async fn on_publish<'a, N: PublishPipeline, P: Publisher>(
         &'a self,
-        out: &'a mut Outgoing<'a>,
+        out: &'a mut Outgoing<'_>,
         next: PublishNext<'a, N, P>,
     ) -> Result<(), Box<dyn StdError + Send + Sync>> {
         self.frame(out).await?;

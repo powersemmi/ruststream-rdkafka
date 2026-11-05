@@ -1,5 +1,6 @@
 //! What the `Schema` derive tells the runtime about a type: the record it is, or for a set of
-//! input models the record of each variant.
+//! input models the record of each variant. A registry codec's frame names a record, and a
+//! `#[in_messages(by_codec)]` set receives the variant whose model carries it.
 
 /// A type the `Schema` derive bound to a schema record: its record's full name, the anchor of
 /// its migrations.
@@ -24,25 +25,4 @@ pub trait Record {
 pub trait RecordSet {
     /// The records of the variants, in the order of the variants.
     const RECORDS: &'static [&'static str];
-}
-
-/// The kind of a set of input models (`OrderEventKind` for `OrderEvent`), by the record each
-/// variant carries.
-///
-/// The discriminator picks the variant whose record has the full name the delivery's schema
-/// declares.
-///
-/// `#[derive(Schema)]` on the set implements it for the set's kind.
-pub trait RecordKind: Copy + 'static {
-    /// Each variant's record, with the kind that names the variant.
-    const KINDS: &'static [(&'static str, Self)];
-
-    /// The kind whose variant carries the record `record`, by its full name.
-    #[must_use]
-    fn of_record(record: &str) -> Option<Self> {
-        Self::KINDS
-            .iter()
-            .find(|(name, _)| *name == record)
-            .map(|(_, kind)| *kind)
-    }
 }
