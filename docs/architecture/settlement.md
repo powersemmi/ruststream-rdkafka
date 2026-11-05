@@ -75,7 +75,7 @@ consumed offsets and the published records become visible together, as
 
 Kafka holds no record back and counts no deliveries, so the runtime does both. A `retry_after`
 outcome, and a `retry()` on a registration that declares
-[`max_attempts`](api:ruststream::runtime::Mounting::max_attempts) or a [dead-letter topic](../components/settlement/dead-letters.md),
+[`max_attempts`](api:ruststream::runtime::RouterWith::max_attempts) or a [dead-letter topic](../components/settlement/dead-letters.md),
 take this path in every commit mode. The attempt count travels in the copy's
 `x-ruststream-retry-count` header, and the first delivery counts as one.
 

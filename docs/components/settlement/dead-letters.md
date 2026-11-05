@@ -9,9 +9,9 @@ import TabItem from '@theme/TabItem';
 
 # Dead letters
 
-[`dead_letter(topic)`](api:ruststream::runtime::Mounting::dead_letter) names the topic a delivery that reached its cap is republished to, payload and headers as they arrived.
+[`dead_letter(topic)`](api:ruststream::runtime::RouterWith::dead_letter) names the topic a delivery that reached its cap is republished to, payload and headers as they arrived.
 
-It follows [`max_attempts(n)`](api:ruststream::runtime::Mounting::max_attempts) at the mount site.
+It follows [`max_attempts(n)`](api:ruststream::runtime::RouterWith::max_attempts) at the mount site.
 When a [retry](./retries.md) would make the delivery the `n`-th one, the runtime settles it and publishes it to the dead-letter topic instead.
 The record keeps its payload, its headers and its record key.
 [`RETRY_COUNT_HEADER`](api:ruststream::runtime::RETRY_COUNT_HEADER) on it says how many times it was delivered.
