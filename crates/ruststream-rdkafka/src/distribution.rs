@@ -6,6 +6,7 @@
 //! one hot consumer and idle peers; [`RoundRobin`] pins each outgoing record to the next
 //! partition in the cycle instead.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ruststream::runtime::{ContextKind, Outgoing, PublishTransform, Reads};
@@ -30,6 +31,9 @@ use crate::publisher::KafkaOptions;
 /// The count is explicit on purpose (cheap and predictable); it must match the destination
 /// topic's partition count, or the tail partitions simply receive nothing (a smaller count)
 /// or publishes fail (a larger one).
+///
+/// Clones share one cycle: a handler that hands its publisher to a continuation keeps placing
+/// records where the cycle left off.
 ///
 /// # Examples
 ///
@@ -60,10 +64,10 @@ use crate::publisher::KafkaOptions;
 /// }
 /// # }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RoundRobin {
     count: u64,
-    next: AtomicU64,
+    next: Arc<AtomicU64>,
 }
 
 impl RoundRobin {
@@ -81,7 +85,7 @@ impl RoundRobin {
         Self {
             #[allow(clippy::cast_sign_loss)] // asserted positive above
             count: count as u64,
-            next: AtomicU64::new(0),
+            next: Arc::new(AtomicU64::new(0)),
         }
     }
 }
