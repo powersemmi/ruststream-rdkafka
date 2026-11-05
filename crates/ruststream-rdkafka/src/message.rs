@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "schema-registry")]
 use bytes::Bytes;
-use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Str};
+use ruststream::{AckError, HeaderMap, IncomingMessage, Partitioned, Positioned, Settle, Str};
 
 use crate::convert;
 use crate::record::{HeldRecord, Shared};
@@ -313,6 +313,15 @@ impl IncomingMessage for KafkaMessage {
             .get_or_init(|| convert::headers_from_message(&self.record))
     }
 
+    /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the
+    /// source partition (the default), or the record key under
+    /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
+    fn partition_key(&self) -> Option<&[u8]> {
+        self.lane.of(self)
+    }
+}
+
+impl Settle for KafkaMessage {
     /// Marks the offset processed (see the type-level settlement mapping).
     ///
     /// # Errors
@@ -373,13 +382,6 @@ impl IncomingMessage for KafkaMessage {
             (true, Settlement::Transactional { .. }) => Ok(()),
             (false, _) => self.settle(),
         })
-    }
-
-    /// The keyed-lane key, so keyed worker lanes see it without a `Partitioned` bound: the
-    /// source partition (the default), or the record key under
-    /// [`LaneKey::RecordKey`](crate::LaneKey::RecordKey).
-    fn partition_key(&self) -> Option<&[u8]> {
-        self.lane.of(self)
     }
 }
 
