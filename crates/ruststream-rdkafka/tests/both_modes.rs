@@ -51,12 +51,10 @@ async fn accept_later(order: &Order, ctx: &mut Context) -> HandlerOutcome {
 
 /// The service's app, on the cluster at `servers` in the consumer group `group`.
 fn app(servers: &str, group: &str) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
-        KafkaBroker::new([servers]).default_group(group),
-        |b| {
-            b.include(accept_later);
-        },
-    )
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .with_broker(KafkaBroker::new([servers]).default_group(group), |b| {
+            b.include(accept_later)
+        })
 }
 
 /// The body both modes run.

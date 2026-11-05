@@ -23,7 +23,7 @@ use apache_avro::AvroSchema;
 use ruststream::codec::{Codec, JsonCodec};
 use ruststream::prelude::*;
 use ruststream::runtime::{App, AppInfo, RustStream};
-use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Subscriber};
+use ruststream::{Broker, ConnectedBroker, IncomingMessage, OutgoingMessage, Settle, Subscriber};
 use ruststream_rdkafka::avro::AvroCodec;
 use ruststream_rdkafka::{
     ConnectedKafkaBroker, KafkaBroker, KafkaPublish, KafkaTopic, MissingSubject, SchemaFramed,
@@ -227,7 +227,7 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
     let app = RustStream::new(AppInfo::new("codec-avro", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_order.map_source(|_| from_earliest(&topic, &group)));
+            b.include(take_order.map_source(|_| from_earliest(&topic, &group)))
         });
 
     let done = Arc::clone(&probe.done);
@@ -337,7 +337,7 @@ async fn live_json_registry_codec_round_trips_through_the_envelope() {
     let app = RustStream::new(AppInfo::new("codec-json", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(JsonApp { probe: app_probe }))
         .with_broker_codec(broker, codec, |b| {
-            b.include(take_json.map_source(|_| from_earliest(&topic, &group)));
+            b.include(take_json.map_source(|_| from_earliest(&topic, &group)))
         });
 
     let done = Arc::clone(&probe.done);

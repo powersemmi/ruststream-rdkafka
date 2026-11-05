@@ -53,9 +53,7 @@ async fn rewind_stuck_job(
 async fn a_handler_replays_its_own_delivery_position_through_the_context() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
-        .with_broker(broker(), |b| {
-            b.include(rewind_stuck_job);
-        });
+        .with_broker(broker(), |b| b.include(rewind_stuck_job));
     let tb = TestApp::start(app).await.expect("start");
 
     for id in 0..3 {
@@ -114,9 +112,7 @@ async fn drain_batches(
 async fn a_batch_body_repositions_through_its_subscription_context() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
         .on_startup(|()| async { Ok::<_, Infallible>(Rewinds::default()) })
-        .with_broker(broker(), |b| {
-            b.include(drain_batches.batch(nonzero!(8)));
-        });
+        .with_broker(broker(), |b| b.include(drain_batches.batch(nonzero!(8))));
     let tb = TestApp::start(app).await.expect("start");
 
     for (id, resume_at) in [(0, Some(0)), (1, None)] {
@@ -182,8 +178,8 @@ async fn a_batch_is_cut_at_the_size_the_mount_site_named() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(seed_jobs)
             .out(Jobs, KafkaPublish::default())
-            .build();
-        b.include(count_batches.batch(nonzero!(2)));
+            .build()
+            .include(count_batches.batch(nonzero!(2)))
     });
     let tb = TestApp::start(app).await.expect("start");
 

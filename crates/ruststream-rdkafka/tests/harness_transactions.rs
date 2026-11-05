@@ -8,7 +8,7 @@ use std::time::Duration;
 use ruststream::runtime::{AppInfo, Ctx, DefaultSlot, HandlerOutcome, Out, RustStream};
 use ruststream::subscriber;
 use ruststream::testing::TestApp;
-use ruststream::{OutSlot, Outgoing, OutgoingMessage, Publisher, TransactionalPublisher};
+use ruststream::{OutSlot, Outgoing, OutgoingMessage, TransactionalPublisher};
 use ruststream_rdkafka::context::keys::Partition;
 use ruststream_rdkafka::{
     Commit, EosReplies, KafkaBroker, KafkaEosPublish, KafkaPublish, KafkaTopic, PartitionLanes,
@@ -95,7 +95,7 @@ async fn a_transactional_slot_publishes_only_what_it_commits() {
                 Shipments,
                 KafkaPublish::default().transactional_id("shipments-svc-1"),
             )
-            .build();
+            .build()
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -175,7 +175,7 @@ async fn a_lane_publishes_through_its_partitions_transaction() {
                     .transactional_id("lane-svc")
                     .per_partition(),
             )
-            .build();
+            .build()
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -221,7 +221,7 @@ async fn an_exactly_once_reply_lands_when_its_window_commits() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(enrich)
             .out_reply(KafkaEosPublish::new("enrich-1").commit_interval(window))
-            .transform(EosReplies);
+            .transform(EosReplies)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -257,7 +257,7 @@ async fn a_transactional_producer_librdkafka_refuses_is_refused_at_startup() {
                     Shipments,
                     KafkaPublish::default().transactional_id("refused-svc-1"),
                 )
-                .build();
+                .build()
         },
     );
     let refused = TestApp::start(app)

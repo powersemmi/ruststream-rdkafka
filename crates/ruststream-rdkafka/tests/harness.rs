@@ -48,10 +48,8 @@ async fn ack_payment(order: &Order) -> HandlerOutcome {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_publish_drives_the_reaction_to_a_standstill() {
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
-        b.include(ack_order);
-        b.include(ack_payment);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(), |b| b.include(ack_order).include(ack_payment));
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaBroker>()
@@ -97,11 +95,8 @@ async fn audit(order: &Order) -> HandlerOutcome {
 /// Two replicas of one group read a record once between them; another group reads its own copy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_group_reads_a_record_once() {
-    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
-        b.include(bill);
-        b.include(bill);
-        b.include(audit);
-    });
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0"))
+        .with_broker(broker(), |b| b.include(bill).include(bill).include(audit));
     let tb = TestApp::start(app).await.expect("start");
 
     tb.broker::<KafkaBroker>()
@@ -130,7 +125,7 @@ async fn a_pattern_subscription_reads_every_topic_it_matches() {
         // A topic set addresses no retry copy of its own, so the mount site says where one goes.
         b.include(regional)
             .out_retry(KafkaPublish::default())
-            .transform(ToSourceTopic);
+            .transform(ToSourceTopic)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -188,8 +183,8 @@ async fn a_context_names_the_topic_of_its_record() {
         // A topic set addresses no retry copy of its own, so the mount site says where one goes.
         b.include(name_a_listed_topic)
             .out_retry(KafkaPublish::default())
-            .transform(ToSourceTopic);
-        b.include(name_the_one_topic);
+            .transform(ToSourceTopic)
+            .include(name_the_one_topic)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -221,6 +216,7 @@ async fn a_context_names_the_topic_of_its_record() {
 const DEFER: Duration = Duration::from_secs(5);
 
 /// Stamps every copy with the subscription the delivery came from.
+#[derive(Clone, Copy)]
 struct DeferredStamp;
 
 impl<C, Options> PublishTransform<ForReply<C>, Options> for DeferredStamp {
@@ -254,7 +250,7 @@ async fn a_deferred_copy_travels_the_retry_position() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(defer_then_ack)
             .out_retry(KafkaPublish::default())
-            .transform(DeferredStamp);
+            .transform(DeferredStamp)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -298,7 +294,7 @@ async fn a_capped_registration_dead_letters_a_spent_delivery() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(defer_forever)
             .max_attempts(nonzero!(3u32))
-            .dead_letter("charges.dlq");
+            .dead_letter("charges.dlq")
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -335,7 +331,7 @@ async fn a_named_retry_destination_carries_the_copies() {
             .max_attempts(nonzero!(2u32))
             .dead_letter("refunds.dlq")
             .out_retry(KafkaPublish::default())
-            .to("refunds.retry");
+            .to("refunds.retry")
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -377,7 +373,7 @@ async fn a_retry_copy_returns_to_the_topic_it_arrived_on() {
         b.include(regional_order)
             .max_attempts(nonzero!(3u32))
             .out_retry(KafkaPublish::default())
-            .transform(ToSourceTopic);
+            .transform(ToSourceTopic)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -422,6 +418,7 @@ async fn plan_keyed(order: &PlanOrder) -> PlanItem {
 }
 
 /// Stamps the reply with a record key, standing in for a handler that picked its placement.
+#[derive(Clone, Copy)]
 struct KeyStamp;
 
 impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
@@ -443,7 +440,7 @@ async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
         b.include(plan_keyed)
             .out_reply(KafkaPublish::default())
             .transform(KeyStamp)
-            .transform(RoundRobin::partitions(2));
+            .transform(RoundRobin::partitions(2))
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -492,7 +489,7 @@ async fn a_declared_reply_lands_at_the_topic_its_type_names_with_its_key() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(issue_receipt)
             .out(Reply, KafkaPublish::default())
-            .transform(KeyStamp);
+            .transform(KeyStamp)
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -514,7 +511,7 @@ async fn a_declared_reply_lands_at_the_topic_its_type_names_with_its_key() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_undeclared_reply_lands_at_the_topic_the_mount_site_names() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
-        b.include(acknowledge).out(Reply, KafkaPublish::default());
+        b.include(acknowledge).out(Reply, KafkaPublish::default())
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -565,7 +562,7 @@ async fn a_slot_publish_is_recorded_against_its_marker_and_lands_on_the_topic() 
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(plan_through_slot)
             .out(Work, KafkaPublish::default())
-            .build();
+            .build()
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -613,7 +610,7 @@ async fn a_partition_step_is_recorded_against_the_slot_it_left() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(place)
             .out(Placement, KafkaPublish::default())
-            .build();
+            .build()
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -636,6 +633,44 @@ async fn a_partition_step_is_recorded_against_the_slot_it_left() {
     tb.shutdown().await.expect("shutdown");
 }
 
+#[subscriber("cycled-orders")]
+async fn place_twice(
+    order: &PlanOrder,
+    Out(out): Out<impl Publisher<Options = KafkaOptions>, Placement>,
+) -> HandlerOutcome {
+    let item = PlacedItem { order_id: order.id };
+    // A clone stands in for the publisher a handler hands to a continuation.
+    let handed_on = out.clone();
+    let _ = out.message(&item).publish().await;
+    let _ = handed_on.message(&item).publish().await;
+    HandlerOutcome::ack()
+}
+
+/// A clone of the slot continues the cycle its original started: the second record goes to the
+/// cycle's second partition, not back to its first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_round_robin_cycle_continues_across_a_clone_of_the_slot() {
+    let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
+        b.include(place_twice)
+            .out(Placement, KafkaPublish::default())
+            .transform(RoundRobin::partitions(2))
+            .build()
+    });
+    let tb = TestApp::start(app).await.expect("start");
+
+    tb.broker::<KafkaBroker>()
+        .message(&PlanOrder { id: 7 })
+        .to("cycled-orders")
+        .publish()
+        .await
+        .expect("publish");
+
+    tb.out::<Placement>()
+        .assert_called(2)
+        .with_options(&KafkaOptions::default().partition(1));
+    tb.shutdown().await.expect("shutdown");
+}
+
 #[subscriber("misplaced-orders")]
 async fn misplace(
     order: &PlanOrder,
@@ -655,7 +690,7 @@ async fn a_record_pinned_to_a_partition_the_topic_lacks_is_refused() {
     let app = RustStream::new(AppInfo::new("svc", "0.1.0")).with_broker(broker(), |b| {
         b.include(misplace)
             .out(Placement, KafkaPublish::default())
-            .build();
+            .build()
     });
     let tb = TestApp::start(app).await.expect("start");
 
@@ -699,18 +734,14 @@ async fn groupless_refused(order: &Refused) -> HandlerOutcome {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_subscription_with_no_group_is_refused_at_startup() {
     for app in [
-        RustStream::new(AppInfo::new("groupless", "0.1.0")).with_broker(
-            KafkaBroker::new(["kafka:9092"]),
-            |b| {
-                b.include(bare_refused);
-            },
-        ),
-        RustStream::new(AppInfo::new("groupless", "0.1.0")).with_broker(
-            KafkaBroker::new(["kafka:9092"]),
-            |b| {
-                b.include(groupless_refused);
-            },
-        ),
+        RustStream::new(AppInfo::new("groupless", "0.1.0"))
+            .with_broker(KafkaBroker::new(["kafka:9092"]), |b| {
+                b.include(bare_refused)
+            }),
+        RustStream::new(AppInfo::new("groupless", "0.1.0"))
+            .with_broker(KafkaBroker::new(["kafka:9092"]), |b| {
+                b.include(groupless_refused)
+            }),
     ] {
         let failed = TestApp::start(app)
             .await
@@ -739,9 +770,7 @@ async fn a_client_librdkafka_refuses_to_create_is_refused_at_startup() {
         broker()
             .config("security.protocol", "SASL_PLAINTEXT")
             .config("sasl.mechanism", "GSSAPI"),
-        |b| {
-            b.include(ack_order);
-        },
+        |b| b.include(ack_order),
     );
     let sasl = TestApp::start(sasl).await.expect_err(REFUSED).to_string();
     assert!(
@@ -753,9 +782,7 @@ async fn a_client_librdkafka_refuses_to_create_is_refused_at_startup() {
         broker()
             .producer_config("enable.idempotence", "true")
             .producer_config("acks", "1"),
-        |b| {
-            b.include(ack_order);
-        },
+        |b| b.include(ack_order),
     );
     let producer = TestApp::start(producer)
         .await
@@ -766,9 +793,8 @@ async fn a_client_librdkafka_refuses_to_create_is_refused_at_startup() {
         "{producer}"
     );
 
-    let consumer = RustStream::new(AppInfo::new("fetch", "0.1.0")).with_broker(broker(), |b| {
-        b.include(small_fetch_refused);
-    });
+    let consumer = RustStream::new(AppInfo::new("fetch", "0.1.0"))
+        .with_broker(broker(), |b| b.include(small_fetch_refused));
     let consumer = TestApp::start(consumer)
         .await
         .expect_err(REFUSED)
