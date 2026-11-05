@@ -112,7 +112,10 @@ impl<'a> RecordFrame<'a> {
             Some(RecordName::Full(name)) => name == full_name,
             Some(RecordName::Title(title)) if title.contains('.') => title == full_name,
             Some(RecordName::Title(title)) => {
-                full_name.rsplit_once('.').map_or(full_name, |(_, simple)| simple) == title
+                full_name
+                    .rsplit_once('.')
+                    .map_or(full_name, |(_, simple)| simple)
+                    == title
             }
             None => false,
         }
@@ -155,7 +158,9 @@ impl SchemaNames {
             Value::Array(branches) => {
                 Self::Union(branches.iter().map(avro_record).collect::<Vec<_>>().into())
             }
-            other => avro_record(other).map_or(Self::Nothing, |name| Self::One(OwnedName::Full(name))),
+            other => {
+                avro_record(other).map_or(Self::Nothing, |name| Self::One(OwnedName::Full(name)))
+            }
         }
     }
 
@@ -166,7 +171,9 @@ impl SchemaNames {
             .as_ref()
             .and_then(|schema| schema.get("title"))
             .and_then(Value::as_str)
-            .map_or(Self::Nothing, |title| Self::One(OwnedName::Title(title.into())))
+            .map_or(Self::Nothing, |title| {
+                Self::One(OwnedName::Title(title.into()))
+            })
     }
 
     /// The frame of a datum written with this schema.
@@ -203,7 +210,9 @@ fn avro_record(schema: &Value) -> Option<Box<str>> {
         }
         // A named reference (a union of subject references names each member by its full
         // name); the primitives name no record.
-        Value::String(reference) if !is_avro_primitive(reference) => Some(reference.as_str().into()),
+        Value::String(reference) if !is_avro_primitive(reference) => {
+            Some(reference.as_str().into())
+        }
         _ => None,
     }
 }
@@ -252,7 +261,9 @@ mod tests {
 
     #[test]
     fn an_avro_union_names_the_branch_the_datum_was_written_as() {
-        let names = SchemaNames::of_avro(&format!(r#"["null", "{ORDER_CREATED}", "{ORDER_CANCELLED}"]"#));
+        let names = SchemaNames::of_avro(&format!(
+            r#"["null", "{ORDER_CREATED}", "{ORDER_CANCELLED}"]"#
+        ));
         // Branch indexes are zig-zag longs: 1 is written 0x02, 2 is 0x04.
         assert!(names.frame(&[0x04, 0x2a]).names(ORDER_CANCELLED));
         assert!(names.frame(&[0x02, 0x2a]).names(ORDER_CREATED));
@@ -269,7 +280,11 @@ mod tests {
         assert!(frame_of("OrderCreated").frame(&[]).names(ORDER_CREATED));
         assert!(!frame_of("OrderCreated").frame(&[]).names(ORDER_CANCELLED));
         assert!(frame_of(ORDER_CREATED).frame(&[]).names(ORDER_CREATED));
-        assert!(!frame_of("com.other.OrderCreated").frame(&[]).names(ORDER_CREATED));
+        assert!(
+            !frame_of("com.other.OrderCreated")
+                .frame(&[])
+                .names(ORDER_CREATED)
+        );
     }
 
     #[test]

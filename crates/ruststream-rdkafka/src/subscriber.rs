@@ -320,9 +320,7 @@ impl KafkaSubscriber {
     #[cfg(feature = "schema-registry")]
     async fn finish_in_place(&self, item: &mut KafkaMessage) {
         if let Some(prefetch) = &self.schema_prefetch {
-            prefetch
-                .warm_delivery(IncomingMessage::payload(item))
-                .await;
+            prefetch.warm_delivery(IncomingMessage::payload(item)).await;
         }
         if let Some(registry) = &self.schema_registry
             && let Some(json) = registry

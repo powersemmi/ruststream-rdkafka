@@ -20,7 +20,8 @@ use rdkafka::{Offset, TopicPartitionList};
 use ruststream::asyncapi::Bindings;
 use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
 use ruststream::{
-    Lend, OutgoingMessage, PublishMessageError, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
+    Lend, OutgoingMessage, PairError, PublishMessageError, PublishPolicy, Publisher, Str,
+    TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -29,7 +30,8 @@ use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
 use crate::publisher::{
-    KafkaOptions, KafkaOutcome, refused, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
+    KafkaOptions, KafkaOutcome, KafkaPublish, KafkaTransactionalPublish,
+    KafkaTransactionalPublisher, refused,
 };
 use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
@@ -972,13 +974,16 @@ impl Publisher for EosPipeline {
             .get_str(EOS_SOURCE_HEADER)
             .and_then(decode_source)
         else {
-            return refused(KafkaError::InvalidOptions(
-                "an EOS reply carries no source coordinates: the subscription must be in \
+            return refused(
+                KafkaError::InvalidOptions(
+                    "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
                  relay them (add the `EosReplies` transform to the mount site's chain, \
                  `.out_reply(KafkaEosPublish::new(id)).transform(EosReplies)`)"
-                    .to_owned(),
-            ), msg);
+                        .to_owned(),
+                ),
+                msg,
+            );
         };
         // The reply is rebuilt without the coordinates, so the map the publish filled moves into
         // the record rather than being copied into it.

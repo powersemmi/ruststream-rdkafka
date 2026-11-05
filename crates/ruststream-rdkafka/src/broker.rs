@@ -559,9 +559,7 @@ impl Broker for KafkaBroker {
 /// registry subject a schema prefetch cannot resolve.
 #[cfg(feature = "testing")]
 impl InProcess for KafkaBroker {
-    fn connect_in_process(
-        self,
-    ) -> impl Future<Output = Result<Self::Connected, Self::Error>> {
+    fn connect_in_process(self) -> impl Future<Output = Result<Self::Connected, Self::Error>> {
         // The schema prefetch is the one step that awaits, and it exists only with the
         // `schema-registry` feature; without it the transition resolves at once.
         #[cfg(feature = "schema-registry")]

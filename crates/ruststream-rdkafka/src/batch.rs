@@ -47,7 +47,8 @@ impl<State, Message, Step, Fut> Refill<State, Message, Step, Fut> {
     }
 }
 
-impl<State, Message, Step, Fut, Error> BatchStream<Vec<Message>> for Refill<State, Message, Step, Fut>
+impl<State, Message, Step, Fut, Error> BatchStream<Vec<Message>>
+    for Refill<State, Message, Step, Fut>
 where
     Step: FnMut(State, Vec<Message>) -> Fut,
     Fut: Future<Output = Filled<State, Message, Error>>,
@@ -200,7 +201,10 @@ mod tests {
         let mut stream = pin!(Refill::new(7, Vec::new(), step));
         let mut slot = Vec::new();
 
-        assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(Some(Err("fetch failed"))));
+        assert_eq!(
+            fill(stream.as_mut(), &mut slot),
+            Poll::Ready(Some(Err("fetch failed")))
+        );
         assert!(slot.is_empty());
         assert_eq!(fill(stream.as_mut(), &mut slot), Poll::Ready(Some(Ok(()))));
         assert_eq!(slot, [7]);
