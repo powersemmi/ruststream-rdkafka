@@ -180,6 +180,7 @@ pub mod __private {
     pub use super::message::Message;
     pub use super::node::{Additional, Node, Object, Property};
     pub use super::shape::{Enum, Field, Payload, Read, Shape, Struct, Tagging, Variant, Write};
+    pub use crate::schema::record::Record;
 
     /// Writes the `schemars` schema of `T` to `$RUSTSTREAM_SCHEMA_EXPORT/<record>.json`: the
     /// export the derive's hidden test runs for `cargo kafka-schema`.
