@@ -38,7 +38,7 @@ empty, the record the wait returns is copied out.
 
 The handler's reply is encoded into a buffer the dispatch loop reuses. The [publisher](../components/publishing/index.md) lends those
 bytes to librdkafka, which copies them into its own queue, and the publish returns once the cluster
-has acknowledged the record. A reply that fails to publish settles the delivery with a retry.
+has acknowledged the record. A reply the producer refuses is lost and the delivery is acknowledged: a handler that must not lose it registers `.error(..)` on its outcome.
 
 The delivery settles after the reply. What that does to the committed offset depends on the
 subscription's [`Commit`](../components/settlement/index.md) mode, which [Settlement](settlement.md)

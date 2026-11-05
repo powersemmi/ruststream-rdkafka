@@ -16,7 +16,7 @@ It encodes and decodes itself, and the broker puts the envelope on and takes it 
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["protobuf"] }
+ruststream-rdkafka = { version = "0.8", features = ["protobuf"] }
 prost = "0.14"
 ```
 
@@ -110,8 +110,8 @@ The index path defaults to the schema's first message.
 [`message`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::message) names another message for a topic, and [`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) another subject.
 
 The subject is resolved on the first publish, not at startup, because the topic is only known then.
-When the registry does not hold the subject, or holds another format there, the publish fails and the delivery settles as a retry.
-With the [default commit mode](../components/settlement/auto.md) a retry is not redelivered; [Commits and delivery guarantees](commits.md) covers the modes.
+When the registry does not hold the subject, or holds another format there, the reply is not published and the delivery is acknowledged, so it is not redelivered.
+A handler that must not lose the reply registers `.error(..)` on its outcome; [Commits and delivery guarantees](commits.md) covers the commit modes.
 
 [`ProtobufFrame`](../components/protobuf/protobuf-frame.md) frames for a whole app, added with `RustStream::publish_layer`.
 It frames what leaves through `Out` slots and publishers the mount sites do not name, when the destination subject holds a Protobuf schema, and passes the rest through as it is.

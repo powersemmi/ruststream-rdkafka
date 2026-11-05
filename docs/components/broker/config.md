@@ -25,7 +25,7 @@ It refuses what librdkafka refuses, and a record over the producer's `message.ma
 ## Example
 
 The broker names its clients `orders-svc` and compresses what it publishes.
-A shipment over 64 KiB is refused, and the order that produced it is settled as a retry.
+A shipment over 64 KiB is refused by the producer. The shipment is lost and the order is acknowledged; a handler that must not lose it registers `.error(..)` on its outcome.
 
 <Tabs groupId="api">
 <TabItem value="macros" label="Macros">
