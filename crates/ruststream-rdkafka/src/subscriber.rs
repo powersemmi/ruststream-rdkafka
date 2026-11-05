@@ -726,6 +726,14 @@ impl BatchSubscriber for KafkaSubscriber {
                 }
                 #[cfg(feature = "schema-registry")]
                 for item in &mut batch {
+                    // The prefetch first, as the single stream runs it: the codec decodes from the
+                    // cache alone, so a writer schema the subscription has not met yet is resolved
+                    // here or the delivery fails to decode.
+                    if let Some(prefetch) = &sub.schema_prefetch {
+                        prefetch
+                            .warm_delivery(IncomingMessage::payload(&*item))
+                            .await;
+                    }
                     sub.transcode(item).await;
                 }
                 Some((Ok(batch), (sub, tracker, cart)))
