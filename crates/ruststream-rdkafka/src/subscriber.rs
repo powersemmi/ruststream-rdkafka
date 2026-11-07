@@ -317,6 +317,10 @@ impl KafkaSubscriber {
     /// delivery (see [`finish_delivery`]): the schema prefetch reads the envelope, then a framed
     /// payload is transcoded to plain JSON, so handlers and the default codec see JSON
     /// regardless of the wire format. A no-op without an attached registry or prefetch.
+    ///
+    /// The prefetch runs on every delivery, as the single stream runs it: a registry codec
+    /// decodes from the cache alone, so a writer schema the subscription has not met yet is
+    /// resolved here or the delivery fails to decode.
     #[cfg(feature = "schema-registry")]
     async fn finish_in_place(&self, item: &mut KafkaMessage) {
         if let Some(prefetch) = &self.schema_prefetch {

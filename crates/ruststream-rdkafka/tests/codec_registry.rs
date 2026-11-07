@@ -97,6 +97,15 @@ async fn take_order(order: &OrderV2, State(probe): State<Probe<OrderV2>>) -> Han
     HandlerOutcome::ack()
 }
 
+// The same reader, handed whole batches.
+#[subscriber(KafkaTopic)]
+async fn take_orders(orders: &[OrderV2], State(probe): State<Probe<OrderV2>>) -> HandlerOutcome {
+    for order in orders {
+        probe.record(order.clone());
+    }
+    HandlerOutcome::ack()
+}
+
 #[subscriber(KafkaTopic)]
 async fn take_json(order: &JsonOrder, State(probe): State<Probe<JsonOrder>>) -> HandlerOutcome {
     probe.record(order.clone());
@@ -245,6 +254,80 @@ async fn live_avro_registry_codec_reads_an_older_writer() {
             id: marker,
             item: "anvil".to_owned(),
             // Never written by the producer: Avro's resolution took it from the reader schema.
+            note: "none".to_owned(),
+        }],
+    );
+}
+
+/// A batch reads a writer schema the consumer did not resolve at connect, as a single delivery
+/// does: the batch resolves the id before the codec decodes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_avro_registry_codec_reads_an_older_writer_in_a_batch() {
+    let Some((registry, kafka)) = live_urls() else {
+        return;
+    };
+    let topic = unique("codec-avro-batch");
+    let group = unique("codec-avro-batch-group");
+    let marker = i64::from(std::process::id()) * 1000 + 13;
+
+    let subject = unique("codec-avro-batch-orders");
+    let sr = SchemaRegistry::new(&registry);
+    sr.register_avro::<OrderV1>(&subject)
+        .await
+        .expect("register v1");
+    sr.register_avro::<OrderV2>(&subject)
+        .await
+        .expect("register v2");
+
+    let writer_prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    let writer_codec = AvroCodec::registry(&writer_prefetch).register::<OrderV1>(&subject);
+    let writer_broker = KafkaBroker::new([kafka.clone()])
+        .schema_prefetch(writer_prefetch)
+        .connect()
+        .await
+        .expect("connect writer");
+    let framed = writer_codec
+        .encode(&OrderV1 {
+            id: marker,
+            item: "anvil".to_owned(),
+        })
+        .expect("encode");
+    writer_broker.shutdown().await.expect("writer shutdown");
+    seed(&kafka, &topic, &framed).await;
+
+    let probe = Probe::<OrderV2>::new();
+    let app_probe = probe.clone();
+    let prefetch = SchemaPrefetch::new(SchemaRegistry::new(&registry));
+    // The consumer registers no subject, so connect resolves no id: the writer's id is met first
+    // on the delivery itself.
+    let codec = AvroCodec::registry(&prefetch)
+        .resolve_onto(OrderV2::get_schema())
+        .expect("reader schema");
+    let broker = KafkaBroker::new([kafka]).schema_prefetch(prefetch);
+    let app = RustStream::new(AppInfo::new("codec-avro-batch", "0.0.0"))
+        .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
+        .with_broker_codec(broker, codec, |b| {
+            b.include(
+                take_orders
+                    .map_source(|_| from_earliest(&topic, &group))
+                    .batch(ruststream::nonzero!(8usize)),
+            )
+        });
+
+    let done = Arc::clone(&probe.done);
+    App::run_until(app, async move {
+        tokio::time::timeout(std::time::Duration::from_secs(30), done.notified())
+            .await
+            .expect("the batch arrives within the timeout");
+    })
+    .await
+    .expect("run");
+
+    assert_eq!(
+        probe.seen.lock().expect("probe mutex poisoned").as_slice(),
+        [OrderV2 {
+            id: marker,
+            item: "anvil".to_owned(),
             note: "none".to_owned(),
         }],
     );
