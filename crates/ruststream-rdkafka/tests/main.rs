@@ -27,4 +27,5 @@ mod publish_headers;
 mod schema_descriptor;
 mod schema_descriptor_live;
 mod schema_registry;
+mod schema_registry_frame;
 mod secrets;

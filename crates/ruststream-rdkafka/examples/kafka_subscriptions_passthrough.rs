@@ -33,9 +33,7 @@ async fn settle(payment: &Payment) -> HandlerOutcome {
 
 fn app() -> impl App<State = ()> {
     let broker = KafkaBroker::new(["localhost:9092"]);
-    RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| {
-        b.include(settle);
-    })
+    RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(broker, |b| b.include(settle))
 }
 
 // The scenarios are the tests above; the command in the header runs them.
@@ -80,12 +78,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_property_the_commit_mode_owns_is_refused_at_startup() {
-        let clashing = RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
-            KafkaBroker::new(["localhost:9092"]),
-            |b| {
-                b.include(settle_untracked);
-            },
-        );
+        let clashing = RustStream::new(AppInfo::new("payments", "0.1.0"))
+            .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+                b.include(settle_untracked)
+            });
 
         let refused = TestApp::start(clashing)
             .await

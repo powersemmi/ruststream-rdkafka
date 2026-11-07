@@ -28,7 +28,7 @@ The generated [AsyncAPI document](../asyncapi/server.md) reports the bootstrap a
 The dependency line:
 
 ```toml
-ruststream-rdkafka = { version = "0.7", features = ["ssl"] }
+ruststream-rdkafka = { version = "0.8", features = ["ssl"] }
 ```
 
 The service authenticates with SCRAM over TLS and verifies the cluster against its own certificate authority.

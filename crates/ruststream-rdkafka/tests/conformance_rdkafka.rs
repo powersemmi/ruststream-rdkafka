@@ -16,12 +16,13 @@ use rdkafka::error::RDKafkaErrorCode;
 use ruststream::conformance::harness::InProcessBroker;
 use ruststream::conformance::helpers::unique_subject;
 use ruststream::conformance::in_process::Refusal;
+use ruststream::conformance::lifecycle::Unsent;
 use ruststream::conformance::message_shape::OptionCases;
 use ruststream::conformance::{
     capabilities, harness, in_process, lifecycle, message_shape, retry, settlement,
 };
 use ruststream::testing::Backlog;
-use ruststream::{Bytes, HeaderMap, Name};
+use ruststream::{Bytes, HeaderMap, Name, Settle};
 use ruststream_rdkafka::{
     Commit, KafkaBroker, KafkaMessage, KafkaOptions, KafkaPosition, KafkaPublish, KafkaTopic,
     LaneKey, PARTITION_KEY_HEADER, StartOffset,
@@ -117,6 +118,33 @@ async fn the_in_process_broker_passes_lifecycle() {
         in_process,
         |name| KafkaTopic::new(name).group("conformance"),
         |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+/// librdkafka copies the payload into its queue, so a refused record is always handed back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_broker_hands_a_refused_message_back() {
+    lifecycle::refused_publish_returns_message(
+        in_process,
+        |connected| connected.publisher(KafkaPublish::default()),
+        Unsent::Returned,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_in_process_transactional_publisher_hands_a_refused_message_back() {
+    lifecycle::refused_publish_returns_message(
+        in_process,
+        |connected| {
+            let policy = KafkaPublish::default().transactional_id("conformance-refused");
+            task::block_in_place(|| {
+                Handle::current().block_on(connected.transactional_publisher(policy))
+            })
+            .expect("transactional publisher must pair")
+        },
+        Unsent::Returned,
     )
     .await;
 }
@@ -290,7 +318,7 @@ fn group(test: &str) -> String {
 /// throwaway group round-trip absorbs that one-time cost with a generous timeout.
 async fn warm_up_group_coordinator(url: &str) {
     use futures::StreamExt as _;
-    use ruststream::{Broker as _, ConnectedBroker as _, IncomingMessage as _};
+    use ruststream::{Broker as _, ConnectedBroker as _};
     use ruststream::{OutgoingMessage, Publisher as _};
     use ruststream::{Subscriber as _, SubscriptionSource as _};
 
@@ -341,6 +369,19 @@ async fn passes_lifecycle() {
         move || KafkaBroker::new([servers.clone()]),
         |name| topic_created(&url, &group, name),
         |connected| connected.publisher(KafkaPublish::default()),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hands_a_refused_message_back() {
+    let Some(url) = live_cluster().await else {
+        return;
+    };
+    lifecycle::refused_publish_returns_message(
+        move || KafkaBroker::new([url.clone()]),
+        |connected| connected.publisher(KafkaPublish::default()),
+        Unsent::Returned,
     )
     .await;
 }

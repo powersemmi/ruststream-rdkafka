@@ -43,21 +43,21 @@ async fn a_handle_body_mounts_on_each_kafka_descriptor() {
                 subscriber(KafkaTopic::new("orders"), TakeOrder)
                     .undocumented()
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber(KafkaTopics::pattern("^refunds\\..*"), TakeOrder)
                     .undocumented()
                     .build(),
             )
             .out_retry(KafkaPublish::default())
-            .to("refunds.retry");
-            b.include(
+            .to("refunds.retry")
+            .include(
                 subscriber(KafkaPartitions::new("audit", [0]), TakeOrder)
                     .undocumented()
                     .build(),
             )
             .out_retry(KafkaPublish::default())
-            .to("audit.retry");
+            .to("audit.retry")
         },
     );
     let tb = TestApp::start(app).await.expect("start");

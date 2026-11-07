@@ -16,7 +16,7 @@ use ruststream::{Broker, ConnectedBroker};
 use ruststream_rdkafka::KafkaPublish;
 
 // --8<-- [start:producer]
-use ruststream::{HeaderMap, OutgoingMessage, Publisher};
+use ruststream::{HeaderMap, OutgoingMessage, PublishMessageError, Publisher};
 use ruststream_rdkafka::{
     KafkaBroker, KafkaError, KafkaOptions, KafkaPublisher, PARTITION_KEY_HEADER,
 };
@@ -37,6 +37,7 @@ async fn publish_keyed(
             None,
         )
         .await
+        .map_err(PublishMessageError::into_error)
 }
 // --8<-- [end:producer]
 
@@ -57,6 +58,7 @@ async fn publish_pinned(
             Some(&KafkaOptions::default().partition(partition)),
         )
         .await
+        .map_err(PublishMessageError::into_error)
 }
 // --8<-- [end:partition]
 

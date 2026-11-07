@@ -74,9 +74,7 @@ fn broker(password: &str) -> KafkaBroker {
 // --8<-- [start:app]
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
     RustStream::new(AppInfo::new("orders", "1.0.0")).with_broker_labeled("kafka", broker, |b| {
-        b.include(confirm);
-        b.include(audit);
-        b.include(ledger);
+        b.include(confirm).include(audit).include(ledger)
     })
 }
 

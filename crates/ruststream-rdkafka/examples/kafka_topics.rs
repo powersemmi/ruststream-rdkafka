@@ -47,9 +47,7 @@ async fn confirm(order: &Order) -> Confirmation {
 
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]);
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(confirm);
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| b.include(confirm))
 }
 
 // The scenario is the test above; the command in the header runs it.

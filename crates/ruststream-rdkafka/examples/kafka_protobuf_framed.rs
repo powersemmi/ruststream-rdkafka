@@ -50,7 +50,7 @@ fn app(registry: &SchemaRegistry) -> impl App {
         |b| {
             // The subject is the destination topic's, `order-receipts-value`, resolved on the
             // first reply and cached.
-            b.include(receipt).out_reply(Publish::framed(registry));
+            b.include(receipt).out_reply(Publish::framed(registry))
         },
     )
 }

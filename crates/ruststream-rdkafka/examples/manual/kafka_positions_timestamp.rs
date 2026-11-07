@@ -54,7 +54,7 @@ fn app(servers: &str, group: &str, since: i64) -> impl App<State = ()> {
             subscriber("metering.readings", Total)
                 .start_at(KafkaPosition::timestamp(since))
                 .build(),
-        );
+        )
     })
 }
 // --8<-- [end:replay]
@@ -84,7 +84,7 @@ mod tests {
         // Reading 1 lands before the moment and reading 2 after it, published by a service that
         // reads nothing.
         let producer = RustStream::new(AppInfo::new("meters", "0.1.0"))
-            .with_broker(KafkaBroker::new([url.as_str()]), |_| {});
+            .with_broker(KafkaBroker::new([url.as_str()]), |b| b);
         let earlier = TestApp::start_live_within(producer, live::START).await?;
         let broker = earlier.broker::<KafkaBroker>();
         broker.message(&Reading { id: 1 }).publish().await?;

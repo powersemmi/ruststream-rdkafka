@@ -76,7 +76,7 @@ Kafka хранит одно зафиксированное смещение на
 
 Kafka не придерживает записи и не считает доставки, поэтому и то и другое делает рантайм. Исход
 `retry_after`, а также `retry()` у регистрации, которая объявляет
-[`max_attempts`](api:ruststream::runtime::Mounting::max_attempts) или [тему dead-letter](../components/settlement/dead-letters.md), идут этим
+[`max_attempts`](api:ruststream::runtime::RouterWith::max_attempts) или [тему dead-letter](../components/settlement/dead-letters.md), идут этим
 путём в любом режиме фиксации. Номер попытки едет в заголовке копии `x-ruststream-retry-count`, и
 первая доставка считается первой попыткой.
 

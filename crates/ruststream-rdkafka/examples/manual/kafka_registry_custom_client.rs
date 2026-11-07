@@ -100,9 +100,8 @@ fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"])
         .default_group("orders-svc")
         .schema_registry(registry);
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(subscriber("orders", Take).build());
-    })
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .with_broker(broker, |b| b.include(subscriber("orders", Take).build()))
 }
 
 // What `#[ruststream::app]` writes: the command line on a multi-threaded Tokio runtime.

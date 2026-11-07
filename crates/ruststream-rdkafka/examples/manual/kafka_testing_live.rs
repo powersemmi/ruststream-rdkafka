@@ -8,6 +8,8 @@
 //!     cargo test --example manual_kafka_testing_live --features testing
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
@@ -58,12 +60,10 @@ impl Handle<Payment> for Accept {
 
 /// The service on the cluster at `servers`, reading in the consumer group `group`.
 fn app(servers: &str, group: &str) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
-        KafkaBroker::new([servers]).default_group(group),
-        |b| {
-            b.include(subscriber("testing-live-payments", Accept).build());
-        },
-    )
+    RustStream::new(AppInfo::new("payments", "0.1.0"))
+        .with_broker(KafkaBroker::new([servers]).default_group(group), |b| {
+            b.include(subscriber("testing-live-payments", Accept).build())
+        })
 }
 
 // What `#[ruststream::app]` writes: the command line on a multi-threaded Tokio runtime.

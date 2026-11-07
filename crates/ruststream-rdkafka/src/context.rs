@@ -170,7 +170,7 @@ impl BuildContext<KafkaMessage> for KafkaContext {
 /// fn app() -> RustStream {
 ///     RustStream::new(AppInfo::new("orders", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///             b.include(reprocess.batch(nonzero!(100usize)));
+///             b.include(reprocess.batch(nonzero!(100usize)))
 ///         })
 /// }
 /// # }

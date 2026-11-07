@@ -64,7 +64,7 @@ This site holds the guides, one page per component and the architecture of the c
 - [per_partition](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/per-partition/): a transactional publisher per source partition, for a worker pool
 - [Exactly once](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/): `EosPublish`, consumed offsets committed inside the producer's transaction
 - [EosReplies](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-replies/): every reply joined to the pipeline's open transaction
-- [EosPipeline](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-pipeline/): a record sent into the open transaction by hand
+- [EosPipeline](https://powersemmi.github.io/ruststream-rdkafka/latest/components/transactions/exactly-once/eos-pipeline/): a record sent into the open transaction by hand with `EosWindow::publish_paired`
 - [Schema Registry](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/): `SchemaRegistry`, the Confluent Schema Registry client
 - [Registration](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/registration/): `register`, `register_json`, `register_avro` and `warm`
 - [SchemaPrefetch](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/schema-prefetch/): every subject resolved at connect, so codecs run without I/O
@@ -72,7 +72,7 @@ This site holds the guides, one page per component and the architecture of the c
 - [Cache](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/cache/): `SchemaCachePolicy`, the bounds of the registry cache
 - [RegistryClient](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/registry-client/): the registry's transport, `HttpRegistryClient` or one of your own
 - [SubjectStrategy](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/subject-strategy/): how a subject is named, and `SchemaFrame::subject` for one topic
-- [SchemaFramed](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/schema-framed/): a codec such as `JsonCodec` wrapped in the Confluent envelope
+- [SchemaFramed](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/schema-framed/): a codec such as `JsonCodec` wrapped in the Confluent envelope, and a set of registry records picked by the record the schema id names
 - [JSON transcode](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/json-transcode/): `schema_registry` and `SchemaFrame`, framed payloads as plain JSON at the broker's edges
 - [Envelope](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/envelope/): `parse_envelope` and `encode_envelope`, the Confluent wire format
 - [Third-party clients](https://powersemmi.github.io/ruststream-rdkafka/latest/components/schema-registry/third-party/): another registry stack's framed bytes on the byte lanes

@@ -44,12 +44,12 @@ middleware come from the framework; this crate is the transport.
 
 ```toml
 [dependencies]
-ruststream = { version = "0.7", features = ["macros", "json"] }
-ruststream-rdkafka = "0.7"
+ruststream = { version = "0.8", features = ["macros", "json"] }
+ruststream-rdkafka = "0.8"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["testing"] }
+ruststream-rdkafka = { version = "0.8", features = ["testing"] }
 ```
 
 The crate builds librdkafka from source, so a C toolchain is required. Optional features:
@@ -86,9 +86,7 @@ async fn confirm(order: &Order) -> Confirmation {
 fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-        |b| {
-            b.include(confirm);
-        },
+        |b| b.include(confirm),
     )
 }
 ```

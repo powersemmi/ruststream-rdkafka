@@ -16,7 +16,7 @@ In RustStream the schema belongs to the codec, so handlers take and return plain
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["avro"] }
+ruststream-rdkafka = { version = "0.8", features = ["avro"] }
 apache-avro = { version = "0.22", features = ["derive"] }
 ```
 
@@ -149,6 +149,17 @@ Decoding steps over the envelope and reads the JSON document inside it.
 Encoding frames a value with the id of the subject that [`register`](api:ruststream_rdkafka::schema_registry::SchemaFramed::register) names for its type, as with Avro.
 In the service above, a router gives the `disputes` subscription this codec, since the most specific codec wins.
 `JsonSchema` derives the type's JSON Schema, which `register_json` registers.
+
+## Several records on one topic
+
+A topic that carries several record types is read as a set of them.
+The set derives `InMessages` with `#[in_messages(by_codec)]`, and `Schema` binds each model to its record.
+
+The registry codec, `AvroCodec` or `SchemaFramed`, reads the record that the payload's schema id names from its own cache, and the set receives the variant whose model carries that record.
+An Avro schema names its record, and for a top-level union the branch the datum was written as.
+A JSON Schema names it by its `title`; a title without a dot matches the record's simple name, so `namespace.Type` is found by `Type`.
+A record the set has no variant for is a decode failure.
+Under a codec without a frame, such as `JsonCodec` alone, the set does not compile.
 
 ## A pinned local schema
 

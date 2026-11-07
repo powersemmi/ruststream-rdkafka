@@ -30,9 +30,7 @@ async fn take_order(order: &Order) -> HandlerOutcome {
 fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-        |b| {
-            b.include(take_order);
-        },
+        |b| b.include(take_order),
     )
 }
 // --8<-- [end:service]

@@ -38,7 +38,7 @@ fn app() -> impl App {
         .producer_config("acks", "all")
         .producer_config("enable.idempotence", "true");
     RustStream::new(AppInfo::new("receipts", "0.1.0")).with_broker(broker, |b| {
-        b.include(issue_receipt).out_reply(Publish::default());
+        b.include(issue_receipt).out_reply(Publish::default())
     })
 }
 // --8<-- [end:durability]

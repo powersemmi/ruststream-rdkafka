@@ -17,7 +17,7 @@ import TabItem from '@theme/TabItem';
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["protobuf"] }
+ruststream-rdkafka = { version = "0.8", features = ["protobuf"] }
 prost = "0.14"
 ```
 
@@ -111,8 +111,8 @@ message Label {
 [`message`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::message) 为某个主题指定另一个消息，[`subject`](api:ruststream_rdkafka::protobuf::KafkaFramedPublish::subject) 指定另一个 subject。
 
 subject 在第一次发布时解析，而不是在启动时，因为直到那时才知道主题。
-注册中心中没有这个 subject，或者那里保存的是另一种格式时，发布失败，投递以重试结算。
-在[默认提交模式](../components/settlement/auto.md)下，重试不会重新投递；[提交与投递保证](commits.md)讲解了各种模式。
+注册中心中没有这个 subject，或者那里保存的是另一种格式时，应答不会发布，这次投递按确认结算，因此不会重新投递。
+不能丢失应答的处理器在其结果上注册 `.error(..)`；各种提交模式见[提交与投递保证](commits.md)。
 
 [`ProtobufFrame`](../components/protobuf/protobuf-frame.md) 为整个应用加帧，通过 `RustStream::publish_layer` 添加。
 当目的 subject 保存的是 Protobuf schema 时，它为经由 `Out` 槽位以及挂载点未指定的发布者发出的内容加帧，其余内容原样通过。

@@ -117,14 +117,14 @@ fn app() -> impl App<State = AppState> {
                 .max_attempts(nonzero!(3u32))
                 .dead_letter("dlq.orders")
                 .out_retry(Publish::default())
-                .transform(ToSourceTopic);
-            // Every copy goes to one topic. `.to(topic)` belongs to the publisher the copies
-            // leave through, so it follows `out_retry`.
-            b.include(post_entry)
+                .transform(ToSourceTopic)
+                // Every copy goes to one topic. `.to(topic)` belongs to the publisher the copies
+                // leave through, so it follows `out_retry`.
+                .include(post_entry)
                 .max_attempts(nonzero!(3u32))
                 .dead_letter("dlq.ledger")
                 .out_retry(Publish::default())
-                .to("ledger.retry");
+                .to("ledger.retry")
         })
 }
 // --8<-- [end:app]

@@ -169,17 +169,17 @@ fn app() -> impl App<State = AppState> {
                 subscriber("invoices", Book)
                     .map_source(|_| billing())
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber("page-views", CountView)
                     .map_source(|_| analytics())
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber("charges", TakeCharge)
                     .map_source(|_| payments())
                     .build(),
-            );
+            )
         })
 }
 

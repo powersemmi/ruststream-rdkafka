@@ -55,7 +55,7 @@ mod topics {
             // event goes: back to the topic it came from.
             b.include(record)
                 .out_retry(Publish::default())
-                .transform(ToSourceTopic);
+                .transform(ToSourceTopic)
         })
     }
     // --8<-- [end:multi]
@@ -121,7 +121,7 @@ mod pattern {
             // A retried event goes back to the topic it came from.
             b.include(archive)
                 .out_retry(Publish::default())
-                .transform(ToSourceTopic);
+                .transform(ToSourceTopic)
         })
     }
     // --8<-- [end:pattern]

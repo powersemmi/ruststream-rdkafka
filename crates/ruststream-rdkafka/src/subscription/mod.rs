@@ -133,7 +133,7 @@ pub enum LaneKey {
 ///             // dead-letter topic instead, payload and headers as they arrived.
 ///             b.include(charge)
 ///                 .max_attempts(nonzero!(5u32))
-///                 .dead_letter("payments.dlq");
+///                 .dead_letter("payments.dlq")
 ///         },
 ///     )
 /// }

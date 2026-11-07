@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use ruststream::{IncomingMessage, Subscriber};
+use ruststream::{IncomingMessage, Settle, Subscriber};
 use ruststream_rdkafka::{ConnectedKafkaBroker, KafkaTopic, StartOffset};
 use serde::Deserialize;
 
@@ -281,7 +281,7 @@ message Confirmation {
                     confirm.map_source(|_| from_earliest(&trigger, unique("proto-plain-group"))),
                 )
                 .out(DefaultSlot, KafkaPublish::default())
-                .build();
+                .build()
             });
 
         let notified = Arc::clone(&signal.0);
@@ -382,7 +382,7 @@ message Confirmation {
                     |b| {
                         b.include(confirm_in_process)
                             .out(DefaultSlot, KafkaPublish::default())
-                            .build();
+                            .build()
                     },
                 );
             let tb = TestApp::start(app).await.expect("start");
@@ -557,7 +557,7 @@ message Confirmation {
                 .out(
                     Reply,
                     KafkaPublish::framed(&registry).message(REPLY_TOPIC, "rsreply.Confirmation"),
-                );
+                )
             },
         );
 
@@ -682,7 +682,7 @@ message Confirmation {
                         Reply,
                         KafkaPublish::framed(&registry)
                             .message(REPLY_TOPIC, "rsreply.Confirmation"),
-                    );
+                    )
                 },
             );
             let tb = TestApp::start(app).await.expect("start");
@@ -705,7 +705,7 @@ message Confirmation {
                             Reply,
                             KafkaPublish::framed(&registry)
                                 .message(REPLY_TOPIC, "rsreply.Confirmation"),
-                        );
+                        )
                     },
                 );
             let tb = TestApp::start(app).await.expect("start");

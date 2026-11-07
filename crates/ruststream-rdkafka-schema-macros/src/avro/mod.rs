@@ -252,24 +252,16 @@ fn transparent_form(model: &Model, inner: &syn::Type) -> TokenStream {
     }
 }
 
-/// A set of input models: the record each variant carries, read from the variant's model, and
-/// the kind that names each variant.
+/// A set of input models: the record each variant carries, read from the variant's model.
 fn set_impls(model: &Model, variants: &[(syn::Ident, syn::Type)]) -> TokenStream {
     let p = private();
     let ident = &model.ident;
-    let kind = format_ident!("{ident}Kind");
     let records = variants.iter().map(|(_, ty)| {
         quote::quote_spanned!(syn::spanned::Spanned::span(ty)=> <#ty as #p::Record>::RECORD)
     });
-    let kinds = variants
-        .iter()
-        .map(|(variant, ty)| quote!((<#ty as #p::Record>::RECORD, #kind::#variant)));
     quote! {
         impl #p::RecordSet for #ident {
             const RECORDS: &'static [&'static str] = &[#(#records),*];
-        }
-        impl #p::RecordKind for #kind {
-            const KINDS: &'static [(&'static str, Self)] = &[#(#kinds),*];
         }
     }
 }

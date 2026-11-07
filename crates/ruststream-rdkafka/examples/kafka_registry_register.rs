@@ -47,9 +47,7 @@ fn app(registry: SchemaRegistry) -> impl App {
             registry.warm("payments-value").await?;
             Ok::<_, KafkaError>(())
         })
-        .with_broker(broker, |b| {
-            b.include(bill);
-        })
+        .with_broker(broker, |b| b.include(bill))
 }
 
 #[ruststream::app]

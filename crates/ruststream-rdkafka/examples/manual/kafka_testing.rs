@@ -140,10 +140,10 @@ fn app() -> impl App<State = ()> {
         |b| {
             let accept = subscriber("payments", Accept)
                 .map_source(|_| KafkaTopic::new("payments").group("payments-svc"));
-            b.include(accept.build());
-            b.include(subscriber("refunds", Refunds).build())
+            b.include(accept.build())
+                .include(subscriber("refunds", Refunds).build())
                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
-                .build();
+                .build()
         },
     )
 }

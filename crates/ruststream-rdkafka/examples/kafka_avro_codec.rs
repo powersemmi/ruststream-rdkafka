@@ -51,7 +51,7 @@ fn app(registry: SchemaRegistry) -> impl App {
     RustStream::new(AppInfo::new("deliveries", "0.1.0")).with_broker_codec(broker, codec, |b| {
         b.include(deliver)
             .out_reply(Publish::default())
-            .codec(replies);
+            .codec(replies)
     })
 }
 

@@ -54,9 +54,7 @@ fn app(registry: &SchemaRegistry) -> impl App {
         .publish_layer(ProtobufFrame::new(registry.clone()))
         .with_broker(
             KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-            |b| {
-                b.include(audit).out(Journal, Publish::default()).build();
-            },
+            |b| b.include(audit).out(Journal, Publish::default()).build(),
         )
 }
 // --8<-- [end:app]

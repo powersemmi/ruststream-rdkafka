@@ -78,7 +78,7 @@ fn app(servers: &str) -> impl App {
             let invoices = subscriber("invoice-batches", Bill)
                 .map_source(|_| KafkaTopic::new("invoice-batches").commit(Commit::Tracked))
                 .workers_by_key(nonzero!(4));
-            b.include(invoices.build()).out(DefaultSlot, lanes).build();
+            b.include(invoices.build()).out(DefaultSlot, lanes).build()
         },
     )
 }

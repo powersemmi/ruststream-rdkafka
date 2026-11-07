@@ -55,12 +55,10 @@ async fn audit(
 
 #[ruststream::app]
 fn app() -> impl App {
-    RustStream::new(AppInfo::new("audit", "0.1.0")).with_broker(
-        KafkaBroker::new(["localhost:9092"]),
-        |b| {
-            b.include(audit).out_reply(Publish::default());
-        },
-    )
+    RustStream::new(AppInfo::new("audit", "0.1.0"))
+        .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+            b.include(audit).out_reply(Publish::default())
+        })
 }
 
 #[cfg(test)]

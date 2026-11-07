@@ -80,10 +80,10 @@ fn app() -> impl App<State = ()> {
     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("payments-svc"),
         |b| {
-            b.include(accept);
-            b.include(refund)
+            b.include(accept)
+                .include(refund)
                 .out(Lines, Publish::default().transactional_id("refunds-svc-1"))
-                .build();
+                .build()
         },
     )
 }
