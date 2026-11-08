@@ -2818,7 +2818,7 @@ name = "ruststream-rdkafka-schema-macros"
 version = "0.8.0-rc.1"
 dependencies = [
  "apache-avro",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "percent-encoding",
  "proc-macro2",
