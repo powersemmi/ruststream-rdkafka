@@ -6,6 +6,7 @@
 use std::time::Duration;
 
 use rdkafka::mocking::MockCluster;
+use rdkafka::producer::DefaultProducerContext;
 use rdkafka::types::{RDKafkaApiKey, RDKafkaRespErr};
 use ruststream::{Broker, ConnectedBroker, Seekable as _, Seeker as _};
 use ruststream_rdkafka::{
@@ -16,15 +17,20 @@ use ruststream_rdkafka::{
 /// does not repeat the request on its own, so a single refusal reaches the subscription.
 const REFUSALS: usize = 3;
 
-fn leader_moving(cluster: &MockCluster<'_, impl rdkafka::ClientContext>) {
+/// The cluster librdkafka runs in process, with one broker.
+type Cluster = MockCluster<'static, DefaultProducerContext>;
+
+fn leader_moving(cluster: &Cluster) {
     cluster.request_errors(
         RDKafkaApiKey::ListOffsets,
         &[RDKafkaRespErr::RD_KAFKA_RESP_ERR_NOT_LEADER_FOR_PARTITION; REFUSALS],
     );
 }
 
-async fn connected(cluster: &MockCluster<'_, impl rdkafka::ClientContext>) -> ConnectedKafkaBroker {
-    KafkaBroker::new([cluster.bootstrap_servers()])
+/// A broker connected to the cluster at `bootstrap`. It takes the address rather than the
+/// cluster, whose handle cannot cross threads.
+async fn connected(bootstrap: String) -> ConnectedKafkaBroker {
+    KafkaBroker::new([bootstrap])
         .assignment_timeout(Duration::from_secs(30))
         .connect()
         .await
@@ -35,9 +41,9 @@ async fn connected(cluster: &MockCluster<'_, impl rdkafka::ClientContext>) -> Co
 /// that moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_group_subscription_opens_while_a_leader_moves() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = Cluster::new(1).expect("mock cluster");
     cluster.create_topic("moving", 1, 1).expect("topic");
-    let broker = connected(&cluster).await;
+    let broker = connected(cluster.bootstrap_servers()).await;
     leader_moving(&cluster);
 
     let subscriber = broker
@@ -53,9 +59,9 @@ async fn a_group_subscription_opens_while_a_leader_moves() {
 /// leader that moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_partitions_open_while_a_leader_moves() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = Cluster::new(1).expect("mock cluster");
     cluster.create_topic("moving-named", 1, 1).expect("topic");
-    let broker = connected(&cluster).await;
+    let broker = connected(cluster.bootstrap_servers()).await;
     leader_moving(&cluster);
 
     let subscriber = broker
@@ -71,9 +77,9 @@ async fn named_partitions_open_while_a_leader_moves() {
 /// partition ends meet a leader that moved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_seek_lands_while_a_leader_moves() {
-    let cluster = MockCluster::new(1).expect("mock cluster");
+    let cluster = Cluster::new(1).expect("mock cluster");
     cluster.create_topic("moving-seek", 1, 1).expect("topic");
-    let broker = connected(&cluster).await;
+    let broker = connected(cluster.bootstrap_servers()).await;
     let subscriber = broker
         .subscribe_with(KafkaPartitions::new("moving-seek", [0]).start(StartOffset::Latest))
         .await
