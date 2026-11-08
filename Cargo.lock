@@ -2826,8 +2826,7 @@ dependencies = [
  "ruststream-rdkafka",
  "schemars",
  "serde",
- "serde_derive_internals 0.29.1",
- "serde_derive_internals 0.30.0",
+ "serde_derive_internals",
  "serde_json",
  "syn 3.0.3",
  "toml 0.9.12+spec-1.1.0",
@@ -2986,7 +2985,7 @@ checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
 dependencies = [
  "proc-macro2",
  "quote",
- "serde_derive_internals 0.30.0",
+ "serde_derive_internals",
  "syn 3.0.3",
 ]
 
@@ -3093,17 +3092,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
-]
-
-[[package]]
-name = "serde_derive_internals"
-version = "0.29.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18d26a20a969b9e3fdf2fc2d9f21eda6c40e2de84c9408bb5d3b05d499aae711"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

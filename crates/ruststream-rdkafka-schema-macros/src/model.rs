@@ -93,7 +93,12 @@ impl Model {
     /// not a set of models), or an attribute that does not parse.
     pub(crate) fn read(input: &DeriveInput) -> syn::Result<Self> {
         let ctxt = Ctxt::new();
-        let container = ast::Container::from_ast(&ctxt, input, Derive::Serialize);
+        let container = ast::Container::from_ast(
+            &ctxt,
+            input,
+            Derive::Serialize,
+            &Ident::new("__ruststream_private", Span::call_site()),
+        );
         ctxt.check()?;
         let Some(container) = container else {
             return Err(syn::Error::new_spanned(
@@ -102,7 +107,7 @@ impl Model {
             ));
         };
         let avro = AvroAttrs::read(&input.attrs)?;
-        let serde_name = container.attrs.name().serialize_name().to_owned();
+        let serde_name = container.attrs.name().serialize_name().value.clone();
         let (namespace, name) = match (avro.namespace, serde_name.rsplit_once('.')) {
             (_, Some((space, name))) => (Some(space.to_owned()), name.to_owned()),
             (namespace, None) => (namespace, serde_name),
@@ -166,7 +171,7 @@ fn read_fields(fields: &[ast::Field<'_>]) -> syn::Result<Vec<FieldModel>> {
             (None, false, _) => FieldDefault::OfType,
         };
         out.push(FieldModel {
-            name: field.attrs.name().serialize_name().to_owned(),
+            name: field.attrs.name().serialize_name().value.clone(),
             ty: field.ty.clone(),
             span: field.ty.span(),
             form,
@@ -195,7 +200,7 @@ fn read_enum(
             _ => None,
         };
         for variant in &kept {
-            let symbol = variant.attrs.name().serialize_name().to_owned();
+            let symbol = variant.attrs.name().serialize_name().value.clone();
             if symbol_default.is_none()
                 && variant
                     .original
