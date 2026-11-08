@@ -33,9 +33,7 @@ async fn ship(shipment: &Shipment) -> HandlerOutcome {
 
 fn app(servers: &str, group: &str) -> impl App<State = ()> {
     let broker = KafkaBroker::new([servers]).default_group(group);
-    RustStream::new(AppInfo::new("warehouse", "0.1.0")).with_broker(broker, |b| {
-        b.include(ship);
-    })
+    RustStream::new(AppInfo::new("warehouse", "0.1.0")).with_broker(broker, |b| b.include(ship))
 }
 
 // The scenarios are the tests above; the command in the header runs them.

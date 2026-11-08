@@ -19,6 +19,9 @@ The wrapper frames and does not validate: the registry enforces compatibility be
 
 `SchemaFramed::new` takes the [`SchemaPrefetch`](./schema-prefetch.md) that the broker carries, which resolves the registered subjects at connect.
 The codec named with [`with_broker_codec`](api:ruststream::runtime::RustStream::with_broker_codec) decodes the deliveries of its scope, and a reply names it at its own position with `.out_reply(policy).codec(codec)`.
+A set of registry records derives `InMessages` with `#[in_messages(by_codec)]`: the codec reads the record the payload's schema id names from its own cache, and the set receives that variant.
+A JSON Schema names its record by its `title`, matched against the record's simple name when the title has no dot, so `namespace.Type` is found by `Type`.
+A record the set has no variant for is a decode failure.
 An Avro datum cannot be read without its writer schema, so Avro has a codec of its own, [`AvroCodec`](../avro/index.md).
 
 ## Example

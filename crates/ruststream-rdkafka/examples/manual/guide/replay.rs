@@ -7,6 +7,9 @@
 //! cargo run --example manual_guide_replay -- run
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::{Future, ready};
@@ -187,8 +190,8 @@ fn service(broker: KafkaBroker, review_from: SystemTime) -> impl App<State = Pro
                     })
                     .start_at(KafkaPosition::earliest())
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber("card-entries", ProjectSpend)
                     .map_source(|_| {
                         KafkaTopic::new("card-entries")
@@ -197,8 +200,8 @@ fn service(broker: KafkaBroker, review_from: SystemTime) -> impl App<State = Pro
                     })
                     .batch(nonzero!(500usize))
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber("payouts", ReviewPayout)
                     .map_source(|_| {
                         KafkaTopic::new("payouts")
@@ -207,7 +210,7 @@ fn service(broker: KafkaBroker, review_from: SystemTime) -> impl App<State = Pro
                     })
                     .start_at(KafkaPosition::timestamp(epoch_millis(review_from)))
                     .build(),
-            );
+            )
         })
 }
 

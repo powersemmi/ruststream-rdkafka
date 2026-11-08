@@ -75,7 +75,7 @@ use syn::{DeriveInput, parse_macro_input};
 ///     let codec = AvroCodec::local(Order::get_schema()).expect("a derived schema resolves");
 ///     let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-///         b.include(on_order);
+///         b.include(on_order)
 ///     })
 /// }
 /// # fn main() {}

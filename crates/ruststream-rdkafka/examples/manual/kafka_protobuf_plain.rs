@@ -61,9 +61,7 @@ impl Handle<Order, Confirmation> for Confirm {
 fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-        |b| {
-            b.include(subscriber("orders", Confirm).reply().build());
-        },
+        |b| b.include(subscriber("orders", Confirm).reply().build()),
     )
 }
 // --8<-- [end:app]

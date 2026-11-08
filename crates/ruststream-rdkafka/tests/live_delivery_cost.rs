@@ -29,7 +29,7 @@ use rdkafka::error::RDKafkaErrorCode;
 use rdkafka::message::Message as _;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::util::Timeout;
-use ruststream::{Broker, BuildContext as _, IncomingMessage, Subscriber};
+use ruststream::{Broker, BuildContext as _, IncomingMessage, Settle, Subscriber};
 use ruststream_rdkafka::context::KafkaContext;
 use ruststream_rdkafka::{Commit, KafkaBroker, KafkaMessage, KafkaTopic, StartOffset};
 

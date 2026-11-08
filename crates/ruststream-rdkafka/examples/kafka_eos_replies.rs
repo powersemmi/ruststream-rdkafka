@@ -52,7 +52,7 @@ fn app() -> impl App {
             // pairs them.
             b.include(book)
                 .out_reply(EosPublish::new("ledger-1"))
-                .transform(EosReplies);
+                .transform(EosReplies)
         },
     )
 }

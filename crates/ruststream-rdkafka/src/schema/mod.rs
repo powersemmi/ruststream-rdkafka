@@ -4,8 +4,9 @@
 //! - [`Schema`](derive@Schema): the derive that binds a type to its migrations by its record's
 //!   full name and checks it against the newest migration of every subject in `schemas/` that
 //!   declares the record (feature `schema-check`).
-//! - [`Record`], [`RecordSet`], [`RecordKind`]: what the derive tells the runtime, the record a
-//!   type is and the record of each variant of a set of input models.
+//! - [`Record`], [`RecordSet`]: what the derive tells the runtime, the record a type is and the
+//!   record of each variant of a set of input models; a registry codec's frame names the
+//!   variant of a `#[in_messages(by_codec)]` set by it.
 //! - [`avro`]: the traits the derive's Avro assertions name.
 //! - [Schema checking][checking]: `Schema`, the namespace and subjects a descriptor's
 //!   `.schema(..)` step names; the broker checks them against its registry at startup
@@ -50,7 +51,7 @@
 //!     let codec = AvroCodec::local(Order::get_schema()).expect("a derived schema resolves");
 //!     let broker = KafkaBroker::new(["localhost:9092"]).default_group("orders-svc");
 //!     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker_codec(broker, codec, |b| {
-//!         b.include(on_order);
+//!         b.include(on_order)
 //!     })
 //! }
 //! # }
@@ -111,7 +112,7 @@ pub mod avro;
 #[cfg(feature = "schema-check")]
 mod record;
 #[cfg(feature = "schema-check")]
-pub use record::{Record, RecordKind, RecordSet};
+pub use record::{Record, RecordSet};
 
 #[cfg(feature = "schema-check")]
 #[doc(hidden)]

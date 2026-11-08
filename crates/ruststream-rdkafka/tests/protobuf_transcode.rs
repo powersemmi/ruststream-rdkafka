@@ -152,11 +152,12 @@ async fn live_protobuf_middleware_end_to_end() {
         )
         .on_startup(async move |()| Ok::<_, Infallible>(ProtoApp { probe: app_probe }))
         .with_broker(broker, |b| {
-            b.include(proto_mw.map_source(|_| from_earliest(FRAMED_TOPIC, format!("group-{run}"))));
-            b.include(
-                proto_relay.map_source(|_| from_earliest(&trigger, format!("trigger-group-{run}"))),
-            )
-            .out(Reply, KafkaPublish::default());
+            b.include(proto_mw.map_source(|_| from_earliest(FRAMED_TOPIC, format!("group-{run}"))))
+                .include(
+                    proto_relay
+                        .map_source(|_| from_earliest(&trigger, format!("trigger-group-{run}"))),
+                )
+                .out(Reply, KafkaPublish::default())
         });
 
     let done = Arc::clone(&probe.done);

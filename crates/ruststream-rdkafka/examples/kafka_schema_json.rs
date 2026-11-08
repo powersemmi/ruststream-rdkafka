@@ -40,9 +40,7 @@ async fn on_cart(cart: &Cart) -> HandlerOutcome {
 #[ruststream::app]
 fn app() -> impl App {
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("carts-svc");
-    RustStream::new(AppInfo::new("carts", "0.1.0")).with_broker(broker, |b| {
-        b.include(on_cart);
-    })
+    RustStream::new(AppInfo::new("carts", "0.1.0")).with_broker(broker, |b| b.include(on_cart))
 }
 
 #[cfg(test)]

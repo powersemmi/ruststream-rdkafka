@@ -48,9 +48,8 @@ fn codec() -> Result<AvroCodec, Box<dyn Error>> {
 fn app() -> impl App {
     let codec = codec().expect("the model resolves against the written schema");
     let broker = KafkaBroker::new(["localhost:9092"]).default_group("readings-svc");
-    RustStream::new(AppInfo::new("readings", "0.1.0")).with_broker_codec(broker, codec, |b| {
-        b.include(record);
-    })
+    RustStream::new(AppInfo::new("readings", "0.1.0"))
+        .with_broker_codec(broker, codec, |b| b.include(record))
 }
 // --8<-- [end:app]
 

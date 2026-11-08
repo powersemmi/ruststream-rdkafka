@@ -43,9 +43,7 @@ async fn confirm(order: &Order, ctx: &mut Context<'_, (), Latch>) -> Confirmatio
 }
 
 fn app(messages: usize) -> Pending {
-    common::pending(messages, |b| {
-        b.include(confirm);
-    })
+    common::pending(messages, |b| b.include(confirm))
 }
 
 // Three runs allocated exactly 16,364 blocks over the primer and 2,000 replies, 8 per message: the

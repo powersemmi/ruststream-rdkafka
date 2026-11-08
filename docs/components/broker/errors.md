@@ -28,7 +28,7 @@ The librdkafka error behind it is its `source`, so the client library's types st
 
 A service meets the error in two places.
 A failed startup carries it as the source of the runtime's error, and the service exits before it reads anything.
-A publish from a handler returns it inside the core's `PublishError`, and the handler decides how the delivery settles.
+A publish from a handler returns it inside the core's `PublishMessageError`, together with the unsent message (`.into_error()` returns the `KafkaError`), and the handler decides how the delivery settles.
 The enum is `#[non_exhaustive]`, so a `match` on it ends with a wildcard arm.
 
 ## Example

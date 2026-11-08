@@ -51,15 +51,15 @@ async fn accept_later(order: &Order, ctx: &mut Context) -> HandlerOutcome {
 
 /// The service's app, on the cluster at `servers` in the consumer group `group`.
 fn app(servers: &str, group: &str) -> impl App<State = ()> {
-    RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
-        KafkaBroker::new([servers]).default_group(group),
-        |b| {
-            b.include(accept_later);
-        },
-    )
+    RustStream::new(AppInfo::new("orders", "0.1.0"))
+        .with_broker(KafkaBroker::new([servers]).default_group(group), |b| {
+            b.include(accept_later)
+        })
 }
 
 /// The body both modes run.
+// A test drives the app on its own task; the app's cold path carries no Send.
+#[allow(clippy::future_not_send)]
 async fn a_deferred_order_is_taken_when_its_copy_comes_back(tb: TestApp<()>) {
     tb.broker::<KafkaBroker>()
         .message(&Order { id: 1 })

@@ -147,11 +147,12 @@ async fn live_avro_middleware_end_to_end() {
         )
         .on_startup(async move |()| Ok::<_, Infallible>(AvroApp { probe: app_probe }))
         .with_broker(broker, |b| {
-            b.include(avro_mw.map_source(|_| from_earliest(FRAMED_TOPIC, format!("group-{run}"))));
-            b.include(
-                avro_relay.map_source(|_| from_earliest(&trigger, format!("trigger-group-{run}"))),
-            )
-            .out(Reply, KafkaPublish::default());
+            b.include(avro_mw.map_source(|_| from_earliest(FRAMED_TOPIC, format!("group-{run}"))))
+                .include(
+                    avro_relay
+                        .map_source(|_| from_earliest(&trigger, format!("trigger-group-{run}"))),
+                )
+                .out(Reply, KafkaPublish::default())
         });
 
     let done = Arc::clone(&probe.done);

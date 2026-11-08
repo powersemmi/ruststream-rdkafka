@@ -78,6 +78,7 @@ rdkafka = { workspace = true }
 bytes = { workspace = true }
 yoke = { workspace = true }
 futures = { workspace = true }
+pin-project-lite = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

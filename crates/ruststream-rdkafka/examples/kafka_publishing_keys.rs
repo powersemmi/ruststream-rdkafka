@@ -56,12 +56,10 @@ async fn ship(order: &Order, Out(shipments): Out<impl Publisher, Shipments>) -> 
 
 #[ruststream::app]
 fn app() -> impl App {
-    RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker(
-        KafkaBroker::new(["localhost:9092"]),
-        |b| {
-            b.include(ship).out(Shipments, Publish::default()).build();
-        },
-    )
+    RustStream::new(AppInfo::new("shipping", "0.1.0"))
+        .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+            b.include(ship).out(Shipments, Publish::default()).build()
+        })
 }
 
 #[cfg(test)]

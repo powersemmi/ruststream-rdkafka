@@ -152,17 +152,19 @@ fn app() -> impl App<State = ()> {
 
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
     RustStream::new(AppInfo::new("ledger", "0.1.0")).with_broker(broker, |b| {
-        b.include(post).out(Entries, Publish::default()).build();
-        b.include(screen);
-        // A set of topics has no single topic to send a retry copy to, so the mount site names it.
-        b.include(archive)
+        b.include(post)
+            .out(Entries, Publish::default())
+            .build()
+            .include(screen)
+            // A set of topics has no single topic to send a retry copy to, so the mount site names it.
+            .include(archive)
             .out_retry(Publish::default())
-            .transform(ToSourceTopic);
-        // Partitions 0 and 1 share the regular cases evenly; partition 2 stays for urgent ones.
-        b.include(open_case)
+            .transform(ToSourceTopic)
+            // Partitions 0 and 1 share the regular cases evenly; partition 2 stays for urgent ones.
+            .include(open_case)
             .out(Cases, Publish::default())
             .transform(RoundRobin::partitions(2))
-            .build();
+            .build()
     })
 }
 // --8<-- [end:app]

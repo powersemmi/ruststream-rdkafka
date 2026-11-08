@@ -34,9 +34,7 @@ impl Handle<Order> for Place {
 fn app() -> impl App {
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("orders-svc"),
-        |b| {
-            b.include(subscriber("orders", Place).build());
-        },
+        |b| b.include(subscriber("orders", Place).build()),
     )
 }
 // --8<-- [end:app]

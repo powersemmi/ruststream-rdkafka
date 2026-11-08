@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use ruststream::runtime::{App, AppInfo, Reply, RustStream, SubscriberSettings as _};
 use ruststream::{
-    Broker, ConnectedBroker, IncomingMessage, Outgoing, OutgoingMessage, Publisher, Subscriber,
-    subscriber,
+    Broker, ConnectedBroker, IncomingMessage, Outgoing, OutgoingMessage, Publisher, Settle,
+    Subscriber, subscriber,
 };
 use ruststream_rdkafka::schema_registry::{JsonSchema, parse_envelope};
 use ruststream_rdkafka::{
@@ -529,7 +529,7 @@ async fn live_json_frame_and_transcode_end_to_end() {
                     .group(group)
                     .start(StartOffset::Earliest)
             }))
-            .out(Reply, KafkaPublish::default());
+            .out(Reply, KafkaPublish::default())
         });
 
     let registry_for_wait = registry.clone();

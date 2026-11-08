@@ -35,9 +35,7 @@ async fn consume(orders: &[Order], ctx: &mut Context<'_, (), Latch>) -> HandlerO
 }
 
 fn app(messages: usize) -> Pending {
-    common::pending(messages, |b| {
-        b.include(consume.batch(nonzero!(64)));
-    })
+    common::pending(messages, |b| b.include(consume.batch(nonzero!(64))))
 }
 
 // Three runs allocated exactly 6,299 blocks over the primer and 2,000 deliveries, 3 per message

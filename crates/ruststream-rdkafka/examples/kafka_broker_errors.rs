@@ -36,7 +36,7 @@ fn app() -> impl App {
         .default_group("orders-svc")
         .producer_config("message.max.bytes", "65536");
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        b.include(ship).out(Shipments, Publish::default()).build();
+        b.include(ship).out(Shipments, Publish::default()).build()
     })
 }
 
@@ -111,12 +111,10 @@ mod tests {
     #[tokio::test]
     async fn a_failed_startup_carries_the_kafka_error() {
         // No consumer group anywhere: Kafka cannot read the topic.
-        let app = RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(
-            KafkaBroker::new(["localhost:9092"]),
-            |b| {
-                b.include(ship).out(Shipments, Publish::default()).build();
-            },
-        );
+        let app = RustStream::new(AppInfo::new("orders", "0.1.0"))
+            .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
+                b.include(ship).out(Shipments, Publish::default()).build()
+            });
 
         let failed = TestApp::start(app).await.err();
         let mut cause: Option<&(dyn Error + 'static)> = failed.as_ref().map(|err| err as _);

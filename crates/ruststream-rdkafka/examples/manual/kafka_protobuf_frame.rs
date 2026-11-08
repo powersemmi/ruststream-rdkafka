@@ -72,7 +72,7 @@ fn app(registry: &SchemaRegistry) -> impl App {
             |b| {
                 b.include(subscriber("orders", AuditOrder).build())
                     .out(Journal, Publish::default())
-                    .build();
+                    .build()
             },
         )
 }

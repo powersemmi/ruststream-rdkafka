@@ -6,6 +6,9 @@
 //! cargo run --example guide_replay -- run
 //! ```
 
+// A test drives the app on its own task; the app's cold path carries no Send.
+#![allow(clippy::future_not_send)]
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -153,9 +156,11 @@ fn service(broker: KafkaBroker, review_from: SystemTime) -> impl App<State = Pro
     RustStream::new(AppInfo::new("ledger", "0.1.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(Projections::default()))
         .with_broker(broker, |b| {
-            b.include(project_balance);
-            b.include(project_spend.batch(nonzero!(500usize)));
-            b.include(review_payout.start_at(KafkaPosition::timestamp(epoch_millis(review_from))));
+            b.include(project_balance)
+                .include(project_spend.batch(nonzero!(500usize)))
+                .include(
+                    review_payout.start_at(KafkaPosition::timestamp(epoch_millis(review_from))),
+                )
         })
 }
 

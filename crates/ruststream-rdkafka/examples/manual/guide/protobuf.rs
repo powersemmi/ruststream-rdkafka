@@ -116,7 +116,7 @@ impl Handle<Parcel, Label> for PrintLabel {
 fn service(broker: KafkaBroker, registry: &SchemaRegistry) -> RustStream {
     RustStream::new(AppInfo::new("shipping", "0.1.0")).with_broker(broker, |b| {
         b.include(subscriber("parcels", PrintLabel).reply().build())
-            .out_reply(KafkaPublish::framed(registry));
+            .out_reply(KafkaPublish::framed(registry))
     })
 }
 
@@ -285,10 +285,12 @@ message Label {
             .publish()
             .await?;
 
+        // The label the framing refused is lost and the parcel is acknowledged: a handler that
+        // must not lose it registers `.error(..)` on its outcome.
         tb.broker::<KafkaBroker>()
             .subscriber("parcels")
             .assert_called_once()
-            .settled(HandlerOutcome::retry());
+            .settled(HandlerOutcome::ack());
         tb.broker::<KafkaBroker>()
             .published::<()>("labels")
             .assert_not_called();

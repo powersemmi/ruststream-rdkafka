@@ -57,7 +57,7 @@ fn app(servers: &str, group: &str) -> impl App<State = ()> {
             subscriber("warehouse.shipments", Ship)
                 .build()
                 .map_source(|_| shipments),
-        );
+        )
     })
 }
 // --8<-- [end:assignment]

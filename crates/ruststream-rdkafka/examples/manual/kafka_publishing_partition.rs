@@ -74,7 +74,7 @@ fn service(broker: KafkaBroker) -> impl App {
         let dispatch = subscriber("dispatch.orders", Dispatch).map_source(|_| orders());
         b.include(dispatch.build())
             .out(Lanes, Publish::default())
-            .build();
+            .build()
     })
 }
 

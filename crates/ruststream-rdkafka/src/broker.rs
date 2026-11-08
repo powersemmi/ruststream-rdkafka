@@ -233,7 +233,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///         .default_group("orders-svc")
 ///         .config("client.id", "orders-svc");
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-///         b.include(place);
+///         b.include(place)
 ///     })
 /// }
 /// # let _ = app;
@@ -270,7 +270,7 @@ const DEFAULT_ASSIGNMENT_TIMEOUT: Duration = Duration::from_mins(1);
 ///     RustStream::new(AppInfo::new("payments", "0.1.0")).with_broker(
 ///         KafkaBroker::new(["kafka:9092"]).default_group("payments-svc"),
 ///         |b| {
-///             b.include(accept);
+///             b.include(accept)
 ///         },
 ///     )
 /// }
@@ -425,7 +425,7 @@ impl KafkaBroker {
     ///         .config("session.timeout.ms", "10000")
     ///         .assignment_timeout(Duration::from_secs(20));
     ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-    ///         b.include(place);
+    ///         b.include(place)
     ///     })
     /// }
     /// # let _ = app;
@@ -559,9 +559,7 @@ impl Broker for KafkaBroker {
 /// registry subject a schema prefetch cannot resolve.
 #[cfg(feature = "testing")]
 impl InProcess for KafkaBroker {
-    fn connect_in_process(
-        self,
-    ) -> impl Future<Output = Result<Self::Connected, Self::Error>> + Send {
+    fn connect_in_process(self) -> impl Future<Output = Result<Self::Connected, Self::Error>> {
         // The schema prefetch is the one step that awaits, and it exists only with the
         // `schema-registry` feature; without it the transition resolves at once.
         #[cfg(feature = "schema-registry")]
@@ -837,7 +835,7 @@ impl ConnectedKafkaBroker {
     /// use std::pin::pin;
     ///
     /// use futures::StreamExt;
-    /// use ruststream::{Broker, IncomingMessage, Subscriber};
+    /// use ruststream::{Broker, IncomingMessage, Settle, Subscriber};
     /// use ruststream_rdkafka::{KafkaBroker, KafkaTopic};
     ///
     /// async fn tail() -> Result<(), Box<dyn Error + Send + Sync>> {

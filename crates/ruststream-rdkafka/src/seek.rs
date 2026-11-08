@@ -54,7 +54,7 @@ const SEEK_TIMEOUT: Duration = Duration::from_secs(10);
 /// fn app() -> RustStream {
 ///     RustStream::new(AppInfo::new("projection", "0.1.0"))
 ///         .with_broker(KafkaBroker::new(["localhost:9092"]), |b| {
-///             b.include(project);
+///             b.include(project)
 ///         })
 /// }
 /// # let _ = app;
