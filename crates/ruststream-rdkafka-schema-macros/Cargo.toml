@@ -26,7 +26,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.9"
 # The parser serde's own derive reads serde attributes with, on the syntax tree of this crate.
-serde_derive_internals = "0.29"
+serde_derive_internals = "0.30"
 # The same parser at the version `schemars` uses, for the JSON check: it reads serde attributes
 # exactly as the schema export does. It works on a syntax tree of its own.
 serde_derive_internals_json = { package = "serde_derive_internals", version = "0.30" }
