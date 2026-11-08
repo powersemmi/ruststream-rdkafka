@@ -39,7 +39,7 @@ protox-parse = "0.10"
 prost-types = "0.14"
 # Validates a JSON Schema migration against its draft's metaschema. The default features add the
 # HTTP and file resolvers, which a metaschema check never needs.
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 # Credentials in the user part of the registry URL arrive percent-encoded.
 percent-encoding = "2"
 # Parses the registry URL to take the credentials out of its user part.
