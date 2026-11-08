@@ -15,7 +15,7 @@ use futures::{FutureExt as _, Stream, StreamExt};
 use ruststream::testing::{InProcess as _, TestableBroker as _};
 use ruststream::{
     AckError, ConnectedBroker as _, HeaderMap, IncomingMessage, OutgoingMessage, Partitioned,
-    PublishPolicy as _, Publisher, RawMessage, Seekable as _, Seeker as _, Subscribe as _,
+    PublishPolicy as _, Publisher, RawMessage, Seekable as _, Seeker as _, Settle, Subscribe as _,
     Subscriber, SubscriptionSource as _, TransactionalPublisher,
 };
 use ruststream_rdkafka::{
@@ -95,12 +95,14 @@ async fn what_the_cluster_refuses_is_refused() {
     let empty = publisher
         .publish(OutgoingMessage::new("", b"x"), None)
         .await
-        .expect_err("an empty topic name");
+        .expect_err("an empty topic name")
+        .into_error();
     assert!(matches!(empty, KafkaError::Publish(_)), "{empty}");
     let illegal = publisher
         .publish(OutgoingMessage::new("orders eu", b"x"), None)
         .await
-        .expect_err("a topic name Kafka does not accept");
+        .expect_err("a topic name Kafka does not accept")
+        .into_error();
     assert!(matches!(illegal, KafkaError::Publish(_)), "{illegal}");
 
     // A topic comes into being with the broker's one default partition.
@@ -920,7 +922,8 @@ async fn handles_aliasing_a_shut_down_connection_error() {
     let err = publisher
         .publish(OutgoingMessage::new("orders", b"after"), None)
         .await
-        .expect_err("publishing after shutdown");
+        .expect_err("publishing after shutdown")
+        .into_error();
     assert!(
         matches!(&err, KafkaError::Closed { topic } if topic == "orders"),
         "{err}"

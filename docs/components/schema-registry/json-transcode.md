@@ -20,7 +20,7 @@ The subject is `{topic}-value` unless [`SubjectStrategy`](./subject-strategy.md)
 
 The layer resolves a subject on its first publish to the topic and remembers the answer.
 A topic whose subject the registry does not hold publishes plain JSON, so registry-backed and plain topics share one app.
-A registry that cannot be reached, or a payload that does not fit the schema, fails the publish, and the publishing handler asks for a redelivery.
+A registry that cannot be reached, or a payload that does not fit the schema, fails the publish. The refused message comes back inside the error, and the handler decides what follows.
 The registry comes to the app as one [`SchemaRegistry`](./index.md) value; the broker and the layer share it, and with it one cache.
 A producer owns its subjects, so the example registers the reply's subject at startup with [`register_json`](./registration.md).
 

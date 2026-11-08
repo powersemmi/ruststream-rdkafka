@@ -38,7 +38,7 @@ fn app() -> impl App {
             // A full local queue fails the reply after five seconds instead of holding the
             // handler until librdkafka has room again.
             b.include(confirm)
-                .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
+                .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
         },
     )
 }

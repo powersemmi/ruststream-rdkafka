@@ -51,9 +51,7 @@ mod start_at {
 
     fn app(servers: &str, group: &str) -> impl App<State = ()> {
         let broker = KafkaBroker::new([servers]).default_group(group);
-        RustStream::new(AppInfo::new("audit", "0.1.0")).with_broker(broker, |b| {
-            b.include(replay);
-        })
+        RustStream::new(AppInfo::new("audit", "0.1.0")).with_broker(broker, |b| b.include(replay))
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -124,9 +122,7 @@ mod handler {
 
     fn app() -> impl App<State = ()> {
         let broker = KafkaBroker::new(["localhost:9092"]);
-        RustStream::new(AppInfo::new("jobs", "0.1.0")).with_broker(broker, |b| {
-            b.include(work);
-        })
+        RustStream::new(AppInfo::new("jobs", "0.1.0")).with_broker(broker, |b| b.include(work))
     }
 
     #[tokio::test]
@@ -193,9 +189,8 @@ mod batch {
 
     fn app() -> impl App<State = ()> {
         let broker = KafkaBroker::new(["localhost:9092"]);
-        RustStream::new(AppInfo::new("jobs", "0.1.0")).with_broker(broker, |b| {
-            b.include(drain.batch(nonzero!(3)));
-        })
+        RustStream::new(AppInfo::new("jobs", "0.1.0"))
+            .with_broker(broker, |b| b.include(drain.batch(nonzero!(3))))
     }
 
     #[tokio::test]

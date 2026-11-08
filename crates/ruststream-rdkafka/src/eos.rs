@@ -18,9 +18,12 @@ use rdkafka::consumer::{Consumer as _, ConsumerGroupMetadata, StreamConsumer};
 use rdkafka::{Offset, TopicPartitionList};
 #[cfg(feature = "asyncapi")]
 use ruststream::asyncapi::Bindings;
-use ruststream::runtime::{ForReply, Outgoing, PublishContext, PublishTransform, Reads};
+use ruststream::runtime::{
+    ForReply, OutPipeline, Outgoing, PublishContext, PublishTransform, Reads, Slot,
+};
 use ruststream::{
-    Lend, OutgoingMessage, PairError, PublishPolicy, Publisher, Str, TransactionalPublisher as _,
+    Lend, OutgoingMessage, PairError, PublishMessageError, PublishOutcome, PublishPolicy,
+    Publisher, Str, TransactionalPublisher as _,
 };
 use tracing::{debug, error};
 
@@ -29,7 +32,8 @@ use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
 use crate::publisher::{
-    KafkaOptions, KafkaPublish, KafkaTransactionalPublish, KafkaTransactionalPublisher,
+    KafkaOptions, KafkaOutcome, KafkaPublish, KafkaTransactionalPublish,
+    KafkaTransactionalPublisher, refused,
 };
 use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
@@ -274,7 +278,7 @@ struct PipelineInner {
 ///         |b| {
 ///             let pipeline = EosPublish::new("enrich-1")
 ///                 .commit_interval(Duration::from_millis(50));
-///             b.include(enrich).out_reply(pipeline).transform(EosReplies);
+///             b.include(enrich).out_reply(pipeline).transform(EosReplies)
 ///         },
 ///     )
 /// }
@@ -420,13 +424,16 @@ impl EosPipeline {
     ///
     /// Panics when the internal window mutex is poisoned, which requires a prior panic
     /// inside the pipeline (an invariant violation, not an operational failure).
-    pub async fn publish(
+    pub async fn publish<'msg>(
         &self,
         source: &SourceOffset,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&KafkaOptions>,
-    ) -> Result<(), KafkaError> {
-        let epoch = self.admit(source).await?;
+    ) -> KafkaOutcome<'msg> {
+        let epoch = match self.admit(source).await {
+            Ok(epoch) => epoch,
+            Err(error) => return refused(error, msg),
+        };
         let sent = self.inner.publisher.publish(msg, options).await;
         if sent.is_err() {
             let mut window = self.inner.window.lock().expect("window mutex poisoned");
@@ -940,6 +947,103 @@ impl<C, Options> PublishTransform<ForReply<C>, Options> for EosReplies {
     }
 }
 
+/// A slot a handler writes into an exactly-once pipeline's open window through: each record
+/// paired with the delivery it came from.
+///
+/// A handler bounds its slot `Out<impl EosWindow>` and the mount site attaches
+/// [`KafkaEosPublish`]; the records join the window's transaction and become visible at its
+/// commit, atomically with the source positions.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "json")]
+/// # mod demo {
+/// use ruststream::OutgoingMessage;
+/// use ruststream_rdkafka::prelude::*;
+/// # #[derive(serde::Deserialize)]
+/// # struct Cart { id: u64, items: Vec<String> }
+///
+/// /// Splits a cart into one record per item, all committed with the cart's offset.
+/// #[subscriber(KafkaTopic::new("carts").commit(Commit::Transactional("checkout-1".into())))]
+/// async fn split(
+///     cart: &Cart,
+///     Ctx(source): Ctx<Source>,
+///     Out(window): Out<impl EosWindow>,
+/// ) -> HandlerOutcome {
+///     for item in &cart.items {
+///         let record = OutgoingMessage::new("cart-lines", item.as_bytes());
+///         // A failed publish aborts the window, which redelivers the cart.
+///         if window.publish_paired(&source, record, None).await.is_err() {
+///             return HandlerOutcome::retry();
+///         }
+///     }
+///     tracing::info!(cart.id, "split");
+///     HandlerOutcome::ack()
+/// }
+///
+/// fn app() -> impl App {
+///     RustStream::new(AppInfo::new("checkout", "0.1.0")).with_broker(
+///         KafkaBroker::new(["localhost:9092"]).default_group("checkout-svc"),
+///         |b| {
+///             b.include(split)
+///                 .out(DefaultSlot, EosPublish::new("checkout-1"))
+///                 .build()
+///         },
+///     )
+/// }
+/// # }
+/// # fn main() {}
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not write into an exactly-once pipeline's window",
+    note = "for an `Out<impl EosWindow, _>` slot, attach a `KafkaEosPublish` policy"
+)]
+pub trait EosWindow: Send + Sync {
+    /// Publishes `msg` into the open window on behalf of the delivery at `source`, as
+    /// [`EosPipeline::publish`] does.
+    ///
+    /// # Errors
+    ///
+    /// As [`EosPipeline::publish`].
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send;
+}
+
+impl EosWindow for EosPipeline {
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send {
+        self.publish(source, msg, options)
+    }
+}
+
+// The arena entry a handler's `Out` parameter binds, as for `PartitionLanes`: the entry's `Deref`
+// reaches the wired pipeline, and this impl lets the slot satisfy the capability bound itself.
+// The records leave through the pipeline, outside the slot's test capture.
+impl<M, W, EncodeCodec, Pipe, Body> EosWindow for Slot<M, W, EncodeCodec, Pipe, Body>
+where
+    W: EosWindow,
+    EncodeCodec: Send + Sync,
+    Pipe: OutPipeline<W>,
+{
+    fn publish_paired<'msg>(
+        &self,
+        source: &SourceOffset,
+        msg: OutgoingMessage<'msg>,
+        options: Option<&KafkaOptions>,
+    ) -> impl Future<Output = PublishOutcome<'msg, KafkaError, Lend>> + Send {
+        (**self).publish_paired(source, msg, options)
+    }
+}
+
 impl Publisher for EosPipeline {
     // The record goes out through the transactional publisher underneath, which reads the bytes.
     type Payload = Lend;
@@ -959,30 +1063,48 @@ impl Publisher for EosPipeline {
     /// # Cancel safety
     ///
     /// Not cancel safe: dropping the future may leave the record in the window's transaction.
-    async fn publish(
+    async fn publish<'msg>(
         &self,
-        msg: OutgoingMessage<'_>,
+        msg: OutgoingMessage<'msg>,
         options: Option<&Self::Options>,
-    ) -> Result<(), Self::Error> {
+    ) -> KafkaOutcome<'msg> {
         let Some(source) = msg
             .headers()
             .get_str(EOS_SOURCE_HEADER)
             .and_then(decode_source)
         else {
-            return Err(KafkaError::InvalidOptions(
-                "an EOS reply carries no source coordinates: the subscription must be in \
+            return refused(
+                KafkaError::InvalidOptions(
+                    "an EOS reply carries no source coordinates: the subscription must be in \
                  `Commit::Transactional` mode for this pipeline, and the reply publisher must \
                  relay them (add the `EosReplies` transform to the mount site's chain, \
                  `.out_reply(KafkaEosPublish::new(id)).transform(EosReplies)`)"
-                    .to_owned(),
-            ));
+                        .to_owned(),
+                ),
+                msg,
+            );
         };
         // The reply is rebuilt without the coordinates, so the map the publish filled moves into
         // the record rather than being copied into it.
         let (topic, payload, mut headers) = msg.into_parts();
-        headers.remove(EOS_SOURCE_HEADER);
+        let coordinates = headers.remove(EOS_SOURCE_HEADER);
         let stripped = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
-        self.publish(&source, stripped, options).await
+        self.publish(&source, stripped, options)
+            .await
+            .map_err(|failed| {
+                // The message goes back the way it came, coordinates included, so a caller that
+                // publishes it again reaches the same window.
+                let (error, unsent) = failed.into_parts();
+                let Some(unsent) = unsent else {
+                    return PublishMessageError::new(error);
+                };
+                let (topic, payload, mut headers) = unsent.into_parts();
+                if let Some(coordinates) = coordinates {
+                    headers.insert(Str::from_static(EOS_SOURCE_HEADER), coordinates);
+                }
+                let restored = OutgoingMessage::with_payload(topic, payload).with_headers(headers);
+                PublishMessageError::with_message(error, restored)
+            })
     }
 }
 

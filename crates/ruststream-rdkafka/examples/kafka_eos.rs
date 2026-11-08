@@ -49,9 +49,7 @@ fn app() -> impl App {
     let pipeline = EosPublish::new("pricing-1").commit_interval(Duration::from_millis(100));
     RustStream::new(AppInfo::new("pricing", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("pricing-svc"),
-        |b| {
-            b.include(price).out_reply(pipeline).transform(EosReplies);
-        },
+        |b| b.include(price).out_reply(pipeline).transform(EosReplies),
     )
 }
 // --8<-- [end:app]

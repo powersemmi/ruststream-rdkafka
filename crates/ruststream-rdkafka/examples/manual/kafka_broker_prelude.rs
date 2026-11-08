@@ -39,7 +39,7 @@ fn app() -> impl App {
                     .start(StartOffset::Earliest)
             });
             b.include(confirm.reply().build())
-                .out_reply(Publish::default());
+                .out_reply(Publish::default())
         },
     )
 }

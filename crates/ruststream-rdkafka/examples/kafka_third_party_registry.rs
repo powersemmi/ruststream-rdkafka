@@ -104,9 +104,7 @@ fn app(registry_url: String) -> impl App {
                 },
             })
         })
-        .with_broker(broker, |b| {
-            b.include(confirm);
-        })
+        .with_broker(broker, |b| b.include(confirm))
 }
 
 #[ruststream::app]

@@ -14,7 +14,7 @@ members = [
 exclude = ["templates"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.8.0-rc.1"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
@@ -23,10 +23,14 @@ homepage = "https://powersemmi.github.io/ruststream-rdkafka/latest/"
 authors = ["RustStream contributors"]
 
 [workspace.dependencies]
-ruststream-rdkafka = { path = "crates/ruststream-rdkafka", version = "0.7.1" }
-ruststream-rdkafka-schema-macros = { path = "crates/ruststream-rdkafka-schema-macros", version = "0.7.1" }
+ruststream-rdkafka = { path = "crates/ruststream-rdkafka", version = "0.8.0-rc.1" }
+ruststream-rdkafka-schema-macros = { path = "crates/ruststream-rdkafka-schema-macros", version = "0.8.0-rc.1" }
 
-ruststream = { version = "0.7.6", default-features = false }
+# The lower bound names the pre-release deliberately: cargo excludes pre-release versions from a
+# range whose bounds carry none, so `>=0.8.0` would refuse the 0.8.0-rc candidates. This form
+# admits the candidate now and the final 0.8.0 when it lands. The client runs on tokio, so the
+# library names the core's tokio runner in every build.
+ruststream = { version = ">=0.8.0-rc.1, <0.9.0", default-features = false, features = ["tokio"] }
 
 # The `tracing` feature routes librdkafka's own log lines through `tracing` instead of `log`.
 rdkafka = { version = "0.39", features = ["tokio", "tracing"] }
@@ -34,6 +38,8 @@ bytes = "1"
 # The cart a delivery carries its record on (see `record`).
 yoke = { version = "0.8", features = ["derive"] }
 futures = "0.3"
+# The batch stream's pinned step (see `batch`): a projection, no runtime cost.
+pin-project-lite = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tracing = "0.1"

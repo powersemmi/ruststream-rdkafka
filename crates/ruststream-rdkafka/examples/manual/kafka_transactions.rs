@@ -95,7 +95,7 @@ fn app() -> impl App {
         |b| {
             b.include(subscriber("orders", Ship).build())
                 .out(Shipments, shipments)
-                .build();
+                .build()
         },
     )
 }

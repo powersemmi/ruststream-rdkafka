@@ -53,19 +53,19 @@ fn app(registry: &str) -> impl App {
         .default_group("orders-svc")
         .schema_prefetch(prefetch);
     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-        // `orders` is checked against `orders-value`, the subject its name gives.
         let orders = KafkaTopic::new("orders").schema("com.acme.orders");
-        b.include(subscriber(orders, Place).build());
-        // Each listed topic opts in by name; `returns` names its value subject.
         let settlements = KafkaTopics::new(["refunds", "returns"])
             .schema("refunds", "com.acme.orders")
             .schema(
                 "returns",
                 Schema::namespace("com.acme.orders").value("returns-v2"),
             );
-        b.include(subscriber(settlements, Place).build())
+        // `orders` is checked against `orders-value`, the subject its name gives.
+        b.include(subscriber(orders, Place).build())
+            // Each listed topic opts in by name; `returns` names its value subject.
+            .include(subscriber(settlements, Place).build())
             .out_retry(Publish::default())
-            .to("settlements.retry");
+            .to("settlements.retry")
     })
 }
 // --8<-- [end:schema]

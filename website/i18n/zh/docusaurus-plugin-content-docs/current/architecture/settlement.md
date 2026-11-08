@@ -60,7 +60,7 @@ Kafka 为每个分区和组保存一个已提交的偏移量。订阅的 [`Commi
 
 <Diagram name="retries" words={retries} />
 
-Kafka 既不扣留记录，也不统计投递次数，所以这两件事都由运行时来做。`retry_after` 结果，以及声明了 [`max_attempts`](api:ruststream::runtime::Mounting::max_attempts) 或[死信主题](../components/settlement/dead-letters.md)的注册上的 `retry()`，在每种提交模式下都走这条路径。尝试次数随副本的 `x-ruststream-retry-count` 消息头传递，第一次投递算作一次。
+Kafka 既不扣留记录，也不统计投递次数，所以这两件事都由运行时来做。`retry_after` 结果，以及声明了 [`max_attempts`](api:ruststream::runtime::RouterWith::max_attempts) 或[死信主题](../components/settlement/dead-letters.md)的注册上的 `retry()`，在每种提交模式下都走这条路径。尝试次数随副本的 `x-ruststream-retry-count` 消息头传递，第一次投递算作一次。
 
 副本发往描述符报告的地址。[`KafkaTopic`](../components/subscriptions/kafka-topic.md) 订阅报告它自己的主题。[`KafkaTopics`](../components/subscriptions/kafka-topics.md) 或 [`KafkaPartitions`](../components/subscriptions/kafka-partitions.md) 订阅读取的是一个单次发布到达不了的集合，所以它的注册要[指定目的地](../components/settlement/to-source-topic.md)，否则应用拒绝启动。
 

@@ -51,7 +51,7 @@ use crate::context::keys::Topic;
 ///                 .max_attempts(nonzero!(5u32))
 ///                 .dead_letter("orders.dlq")
 ///                 .out_retry(Publish::default())
-///                 .transform(ToSourceTopic);
+///                 .transform(ToSourceTopic)
 ///         })
 /// }
 /// # }

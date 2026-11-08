@@ -166,8 +166,8 @@ fn app() -> impl App<State = Clients> {
                         .build(),
                 )
                 .max_attempts(nonzero!(5u32))
-                .dead_letter("refunds.dlq");
-                b.include(
+                .dead_letter("refunds.dlq")
+                .include(
                     subscriber("refunds.dlq", Review)
                         .map_source(|_| {
                             KafkaTopic::new("refunds.dlq")
@@ -175,9 +175,9 @@ fn app() -> impl App<State = Clients> {
                                 .start(StartOffset::Earliest)
                         })
                         .build(),
-                );
+                )
                 // A set of topics names where a copy goes: back to the topic it came from.
-                b.include(
+                .include(
                     subscriber("refunds.eu,refunds.us", ProcessRegionalRefund)
                         .map_source(|_| {
                             KafkaTopics::new(["refunds.eu", "refunds.us"])
@@ -189,7 +189,7 @@ fn app() -> impl App<State = Clients> {
                 .max_attempts(nonzero!(5u32))
                 .dead_letter("refunds.dlq")
                 .out_retry(Publish::default())
-                .transform(ToSourceTopic);
+                .transform(ToSourceTopic)
             },
         )
 }

@@ -15,6 +15,7 @@ A handler over `&[T]` is a batch handler, and [`batch(n)`](api:ruststream::runti
 The size travels down to the consumer's poll, which never hands the body more than `n` records.
 librdkafka fetches records ahead in the background, and a batch takes what it already holds without waiting for more.
 So a batch is often smaller than `n`, and a quiet topic yields batches of one.
+The runtime lends the subscription one slot that every batch fills, so a batch allocates nothing.
 One outcome settles every record of the batch.
 A `Vec<HandlerOutcome>` settles record `i` with outcome `i`.
 Under [`Commit::Tracked`](../settlement/tracked.md) a record that asks to come back holds the committed position in front of it until it settles; a process that stops first replays the acked records behind it too.

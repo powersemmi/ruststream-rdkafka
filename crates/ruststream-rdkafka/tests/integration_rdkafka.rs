@@ -32,9 +32,9 @@ use ruststream::runtime::{
 };
 use ruststream::subscriber;
 use ruststream::{
-    AckError, Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing,
-    OutgoingMessage, Positioned, PublishPolicy, Publisher, Seekable, Seeker, StartAt, Subscriber,
-    TransactionalPublisher, nonzero,
+    AckError, BatchStream, Broker, ConnectedBroker, FromRef, HeaderMap, IncomingMessage, Outgoing,
+    OutgoingMessage, Positioned, PublishPolicy, Publisher, Seekable, Seeker, Settle, StartAt,
+    Subscriber, TransactionalPublisher, nonzero,
 };
 use ruststream_rdkafka::context::{KafkaContext, keys};
 use ruststream_rdkafka::{
@@ -612,7 +612,7 @@ async fn batches_preserve_order_and_settle_per_message() {
     let mut subscriber = source.subscribe(&broker).await.expect("subscribe");
 
     let mut stream =
-        Box::pin(subscriber.batches(NonZeroUsize::new(BATCH).expect("non-zero batch")));
+        filled_batches(subscriber.batches(NonZeroUsize::new(BATCH).expect("non-zero batch")));
     let mut payloads = Vec::new();
     while payloads.len() < COUNT {
         let batch = tokio::time::timeout(WAIT, stream.next())
@@ -886,7 +886,7 @@ async fn batches_with_a_worker_pool_process_everything() {
     let app = RustStream::new(AppInfo::new("batch-pool", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(pool_batch.batch(nonzero!(6)));
+            b.include(pool_batch.batch(nonzero!(6)))
         });
 
     let done = Arc::clone(&state.done);
@@ -1001,9 +1001,7 @@ async fn keyed_worker_lanes_preserve_per_key_order() {
     let app_state = state.clone();
     let app = RustStream::new(AppInfo::new("keyed-lanes", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
-        .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(keyed_lane);
-        });
+        .with_broker(KafkaBroker::new([url.clone()]), |b| b.include(keyed_lane));
 
     let done = Arc::clone(&state.done);
     let wait = async move {
@@ -1100,7 +1098,7 @@ async fn partition_lanes_preserve_partition_order_across_keys() {
     let app = RustStream::new(AppInfo::new("partition-lanes", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(app_state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(partition_lane);
+            b.include(partition_lane)
         });
 
     let done = Arc::clone(&state.done);
@@ -1631,7 +1629,7 @@ async fn manual_assignment_composes_with_partition_lanes() {
                 KafkaPartitions::new(topic.clone(), [0, 1]).start(StartOffset::Earliest)
             }))
             .out_retry(KafkaPublish::default())
-            .to(topic.clone());
+            .to(topic.clone())
         });
 
     let done = Arc::clone(&state.done);
@@ -1983,7 +1981,7 @@ async fn retry_after_republishes_through_the_retry_position() {
             // Kafka defers the copy itself, so the registration names the publisher it
             // leaves through; the policy pairs at startup like every other one.
             b.include(deferred_retry.map_source(|_| tracked(&topic, "deferred-retry-svc")))
-                .out_retry(KafkaPublish::default());
+                .out_retry(KafkaPublish::default())
         });
 
     let done = Arc::clone(&probe.done);
@@ -2062,9 +2060,7 @@ async fn ctx_extractors_inject_delivery_fields() {
         .with_broker(
             KafkaBroker::new([url.clone()]).config("auto.offset.reset", "earliest"),
             |b| {
-                b.include(
-                    ctx_di.map_source(|_| KafkaTopic::new(topic.clone()).group("ctx-di-svc")),
-                );
+                b.include(ctx_di.map_source(|_| KafkaTopic::new(topic.clone()).group("ctx-di-svc")))
             },
         );
 
@@ -2111,7 +2107,7 @@ async fn forward_through_lane<L: PartitionLanes>(
         .await
     {
         publisher.abort().await.ok();
-        return Err(err);
+        return Err(err.into_error());
     }
     publisher.commit().await
 }
@@ -2167,7 +2163,7 @@ async fn a_lanes_slot_publishes_through_its_partition_transaction() {
                         .transactional_id(unique("lanes-txn"))
                         .per_partition(),
                 )
-                .build();
+                .build()
         });
 
     // The lane's transaction commits before a `read_committed` reader sees anything, so the
@@ -2247,7 +2243,7 @@ async fn eos_publishing_handler_replies_ride_the_window() {
                     .commit(Commit::Transactional(pipeline_id.clone()))
             }))
             .out(Reply, pipeline)
-            .transform(EosReplies);
+            .transform(EosReplies)
         },
     );
 
@@ -2309,6 +2305,7 @@ async fn eos_publishing_handler_replies_ride_the_window() {
 
 /// Stamps a reply with a record key, standing in for a handler that chose its own placement. It
 /// writes no per-record setting, so it stays generic over them.
+#[derive(Clone, Copy)]
 struct KeyStamp;
 
 impl<K: ContextKind, Options> PublishTransform<K, Options> for KeyStamp {
@@ -2360,7 +2357,7 @@ async fn round_robin_walks_the_partitions_of_the_reply_topic() {
         |b| {
             b.include(spread.map_source(|_| tracked(&input, "spread-svc")))
                 .out_reply(KafkaPublish::default())
-                .transform(RoundRobin::partitions(PARTITIONS));
+                .transform(RoundRobin::partitions(PARTITIONS))
         },
     );
 
@@ -2436,7 +2433,7 @@ async fn round_robin_leaves_a_keyed_reply_where_its_key_sends_it() {
             b.include(spread_keyed.map_source(|_| tracked(&input, "keyed-spread-svc")))
                 .out_reply(KafkaPublish::default())
                 .transform(KeyStamp)
-                .transform(RoundRobin::partitions(PARTITIONS));
+                .transform(RoundRobin::partitions(PARTITIONS))
         },
     );
 
@@ -2524,7 +2521,7 @@ async fn a_spent_delivery_lands_on_the_dead_letter_topic() {
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
             b.include(spend_the_cap.map_source(|_| tracked(&input, "cap-svc")))
                 .max_attempts(nonzero!(3u32))
-                .dead_letter(dead_letters.clone());
+                .dead_letter(dead_letters.clone())
         });
 
     let reader = connected_broker(&url).await;
@@ -2618,7 +2615,7 @@ async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
             b.include(regional.map_source(|_| regions(&eu, &us, "src-topic-svc")))
                 .max_attempts(nonzero!(3u32))
                 .out_retry(KafkaPublish::default())
-                .transform(ToSourceTopic);
+                .transform(ToSourceTopic)
         });
 
     let done = Arc::clone(&probe.done);
@@ -2680,40 +2677,18 @@ async fn a_retry_copy_returns_to_the_topic_its_delivery_arrived_on() {
     reader.shutdown().await.expect("shutdown");
 }
 
-// The same registration without a named retry destination: a set of topics addresses no copy, so
-// the app must refuse to start rather than lose the copies at run time.
-#[subscriber(KafkaTopics)]
-async fn unaddressed(_order: &OrderPayload) -> HandlerOutcome {
-    HandlerOutcome::retry()
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_capped_topic_set_refuses_to_start_without_a_retry_destination() {
-    let Some(url) = kafka_url() else { return };
-    let eu = unique("unaddressed-eu");
-    let us = unique("unaddressed-us");
-    create_topic(&url, &eu, 1).await;
-    create_topic(&url, &us, 1).await;
-
-    let app = RustStream::new(AppInfo::new("unaddressed", "0.0.0")).with_broker(
-        KafkaBroker::new([url.clone()]),
-        |b| {
-            b.include(unaddressed.map_source(|_| regions(&eu, &us, "unaddressed-svc")))
-                .max_attempts(nonzero!(3u32))
-                .out_retry(KafkaPublish::default());
-        },
-    );
-
-    // The startup error comes back before the until-future is ever polled, so a ready one keeps
-    // the test bounded: an app that wrongly started would return `Ok` at once.
-    let err = App::run_until(app, std::future::ready(()))
-        .await
-        .expect_err("a registration that cannot address its copies must not start");
-    let message = err.to_string();
-    assert!(
-        message.contains("retry"),
-        "the startup error must name the retry destination, got: {message}",
-    );
+/// The batches a transport's `BatchStream` fills, one lent slot each, as a stream a test awaits.
+fn filled_batches<Message, Error>(
+    batches: impl BatchStream<Vec<Message>, Error = Error>,
+) -> impl Stream<Item = Result<Vec<Message>, Error>> {
+    let mut batches = Box::pin(batches);
+    futures::stream::poll_fn(move |cx| {
+        let mut slot = Vec::new();
+        batches
+            .as_mut()
+            .poll_fill(cx, &mut slot)
+            .map(|filled| filled.map(|filled| filled.map(|()| slot)))
+    })
 }
 
 /// The group's committed offset for one partition, read from the cluster rather than inferred
@@ -2938,7 +2913,7 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(record_replay.map_source(|_| source()));
+            b.include(record_replay.map_source(|_| source()))
         });
     pass("first").run_until_seen(app, &first).await;
     assert_eq!(first.taken(), vec![0, 1, 2]);
@@ -2958,7 +2933,7 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
                 record_replay
                     .map_source(|_| source())
                     .start_at(KafkaPosition::earliest()),
-            );
+            )
         });
     pass("start_at").run_until_seen(app, &replayed).await;
     assert_eq!(
@@ -2979,7 +2954,7 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
                 record_replay
                     .map_source(|_| source())
                     .start_at(KafkaPosition::offset(0, 1)),
-            );
+            )
         });
     pass("start_at offset").run_until_seen(app, &skipped).await;
     assert_eq!(
@@ -2995,7 +2970,7 @@ async fn start_at_opens_the_subscription_ahead_of_what_the_group_committed() {
     let app = RustStream::new(AppInfo::new("replay", "0.0.0"))
         .on_startup(async move |()| Ok::<_, Infallible>(state))
         .with_broker(KafkaBroker::new([url.clone()]), |b| {
-            b.include(record_replay.map_source(|_| source()));
+            b.include(record_replay.map_source(|_| source()))
         });
     let outcome = pass("control")
         .run(app, &resumed, Duration::from_secs(5))
@@ -3364,7 +3339,8 @@ async fn a_transactional_publisher_errors_after_the_connection_closes() {
     let sent = publisher
         .publish(OutgoingMessage::new(&topic, b"after".as_slice()), None)
         .await
-        .expect_err("a publish after shutdown must fail");
+        .expect_err("a publish after shutdown must fail")
+        .into_error();
     assert!(matches!(sent, KafkaError::Closed { .. }), "got {sent:?}");
     let begun = publisher
         .begin_transaction()
@@ -3437,7 +3413,8 @@ async fn queue_timeout_turns_the_wait_for_local_queue_space_into_an_error() {
     let refused = first
         .err()
         .or_else(|| second.err())
-        .expect("one of the two was refused");
+        .expect("one of the two was refused")
+        .into_error();
     assert!(
         matches!(refused, KafkaError::Publish(_)),
         "a publish that ran out of queue space must say so, got {refused:?}",

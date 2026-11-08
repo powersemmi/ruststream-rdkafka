@@ -17,7 +17,7 @@ schema 本身保存在注册中心里。
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["avro"] }
+ruststream-rdkafka = { version = "0.8", features = ["avro"] }
 apache-avro = { version = "0.22", features = ["derive"] }
 ```
 
@@ -150,6 +150,17 @@ subject 的兼容性级别决定与哪些版本比较：最新版本，或者在
 编码时，用 [`register`](api:ruststream_rdkafka::schema_registry::SchemaFramed::register) 为该类型指定的 subject 的 id 给值加帧，与 Avro 相同。
 在上面的服务中，一个路由器把这个编解码器交给 `disputes` 订阅，因为最具体的编解码器优先。
 `JsonSchema` 推导出类型的 JSON Schema，由 `register_json` 注册。
+
+## 同一主题上的多种记录 {/* #several-records-on-one-topic */}
+
+承载多种记录类型的主题，按这些类型组成的集合来读取。
+集合派生 `InMessages` 并带上 `#[in_messages(by_codec)]`，`Schema` 把每个模型绑定到它的记录。
+
+注册中心编解码器（`AvroCodec` 或 `SchemaFramed`）从自己的缓存中取出载荷里的 schema id 所指的记录，集合收到其模型承载该记录的那个变体。
+Avro schema 自己指明记录；对于顶层联合，则是数据写入时所用的分支。
+JSON Schema 用 `title` 指明记录；不含点号的标题与记录的简单名匹配，所以 `namespace.Type` 可以用 `Type` 找到。
+集合中没有对应变体的记录会解码失败。
+只用 `JsonCodec` 这类没有帧的编解码器时，这样的集合无法编译。
 
 ## 固定的本地 schema {/* #a-pinned-local-schema */}
 

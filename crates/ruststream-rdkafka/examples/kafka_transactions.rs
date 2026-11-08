@@ -76,9 +76,7 @@ fn app() -> impl App {
         .transaction_timeout(Duration::from_secs(10));
     RustStream::new(AppInfo::new("shipments", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("shipments-svc"),
-        |b| {
-            b.include(ship).out(Shipments, shipments).build();
-        },
+        |b| b.include(ship).out(Shipments, shipments).build(),
     )
 }
 // --8<-- [end:app]

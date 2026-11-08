@@ -116,14 +116,14 @@ fn service(broker: KafkaBroker, registry: SchemaRegistry) -> impl App {
         broker.schema_prefetch(prefetch),
         avro.clone(),
         |b| {
-            b.include(subscriber("invoices", IssueReceipt).reply().build())
-                .out_reply(KafkaPublish::default())
-                .codec(avro);
             b.include_router(
                 Router::new()
                     .with_codec(json)
                     .include(subscriber("disputes", OpenDispute).build()),
-            );
+            )
+            .include(subscriber("invoices", IssueReceipt).reply().build())
+            .out_reply(KafkaPublish::default())
+            .codec(avro)
         },
     )
 }
@@ -153,9 +153,7 @@ fn archive(broker: KafkaBroker) -> impl App {
     RustStream::new(AppInfo::new("billing-archive", "0.1.0")).with_broker_codec(
         broker,
         pinned,
-        |b| {
-            b.include(subscriber("invoices.archive", ArchiveInvoice).build());
-        },
+        |b| b.include(subscriber("invoices.archive", ArchiveInvoice).build()),
     )
 }
 

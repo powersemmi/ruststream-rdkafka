@@ -146,7 +146,7 @@ fn app(registry_url: String) -> impl App {
             })
         })
         .with_broker(broker, |b| {
-            b.include(subscriber("rentals", Confirm).reply().build());
+            b.include(subscriber("rentals", Confirm).reply().build())
         })
 }
 

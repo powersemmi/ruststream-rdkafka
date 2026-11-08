@@ -98,7 +98,7 @@ pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 ///         .default_group("orders-svc")
 ///         .schema_registry(registry);
 ///     RustStream::new(AppInfo::new("orders", "0.1.0")).with_broker(broker, |b| {
-///         b.include(place);
+///         b.include(place)
 ///     })
 /// }
 /// # let _ = app;

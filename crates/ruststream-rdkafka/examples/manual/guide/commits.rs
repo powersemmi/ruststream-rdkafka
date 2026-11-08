@@ -193,13 +193,13 @@ fn app() -> impl App<State = Clients> {
                     .reply()
                     .build(),
             )
-            .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
-            b.include(
+            .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
+            .include(
                 subscriber("page-views", CountView)
                     .map_source(|_| KafkaTopic::new("page-views").group("analytics"))
                     .build(),
-            );
-            b.include(
+            )
+            .include(
                 subscriber("statements", Reconcile)
                     .batch(nonzero!(500usize))
                     .map_source(|_| {
@@ -208,7 +208,7 @@ fn app() -> impl App<State = Clients> {
                             .commit(Commit::Tracked)
                     })
                     .build(),
-            );
+            )
         })
 }
 

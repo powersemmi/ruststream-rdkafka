@@ -116,7 +116,7 @@ fn service(broker: KafkaBroker) -> RustStream {
                 .reply()
                 .build(),
         )
-        .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)));
+        .out_reply(Publish::default().queue_timeout(Duration::from_secs(5)))
     })
 }
 

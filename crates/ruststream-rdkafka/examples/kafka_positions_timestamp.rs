@@ -30,7 +30,7 @@ async fn total(reading: &Reading) -> HandlerOutcome {
 fn app(servers: &str, group: &str, since: i64) -> impl App<State = ()> {
     let broker = KafkaBroker::new([servers]).default_group(group);
     RustStream::new(AppInfo::new("metering", "0.1.0")).with_broker(broker, |b| {
-        b.include(total.start_at(KafkaPosition::timestamp(since)));
+        b.include(total.start_at(KafkaPosition::timestamp(since)))
     })
 }
 // --8<-- [end:replay]
@@ -60,7 +60,7 @@ mod tests {
         // Reading 1 lands before the moment and reading 2 after it, published by a service that
         // reads nothing.
         let producer = RustStream::new(AppInfo::new("meters", "0.1.0"))
-            .with_broker(KafkaBroker::new([url.as_str()]), |_| {});
+            .with_broker(KafkaBroker::new([url.as_str()]), |b| b);
         let earlier = TestApp::start_live_within(producer, live::START).await?;
         let broker = earlier.broker::<KafkaBroker>();
         broker.message(&Reading { id: 1 }).publish().await?;

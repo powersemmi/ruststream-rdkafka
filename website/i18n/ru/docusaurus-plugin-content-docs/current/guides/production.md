@@ -19,7 +19,7 @@ import TabItem from '@theme/TabItem';
 
 ```toml title="Cargo.toml"
 [dependencies]
-ruststream-rdkafka = { version = "0.7", features = ["ssl"] }
+ruststream-rdkafka = { version = "0.8", features = ["ssl"] }
 ```
 
 Адрес и учётные данные развёртывание передаёт в переменных окружения.

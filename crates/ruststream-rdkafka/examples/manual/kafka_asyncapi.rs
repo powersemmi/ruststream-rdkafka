@@ -126,17 +126,17 @@ fn ledger_partitions() -> KafkaPartitions {
 fn service(broker: KafkaBroker) -> impl App<State = ()> {
     RustStream::new(AppInfo::new("orders", "1.0.0")).with_broker_labeled("kafka", broker, |b| {
         let confirm = subscriber("orders", Confirm).map_source(|_| orders());
-        b.include(confirm.reply().to("confirmations").build());
-        b.include(
-            subscriber("audit", Audit)
-                .map_source(|_| audit_topics())
-                .build(),
-        );
-        b.include(
-            subscriber("ledger", Ledger)
-                .map_source(|_| ledger_partitions())
-                .build(),
-        );
+        b.include(confirm.reply().to("confirmations").build())
+            .include(
+                subscriber("audit", Audit)
+                    .map_source(|_| audit_topics())
+                    .build(),
+            )
+            .include(
+                subscriber("ledger", Ledger)
+                    .map_source(|_| ledger_partitions())
+                    .build(),
+            )
     })
 }
 

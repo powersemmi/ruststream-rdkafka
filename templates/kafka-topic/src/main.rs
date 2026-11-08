@@ -26,7 +26,7 @@ fn app() -> impl App {
     RustStream::new(AppInfo::new("{{project-name}}", "0.1.0")).with_broker(
         KafkaBroker::new(["localhost:9092"]).default_group("{{project-name}}"),
         |b| {
-            b.include_router(routes::orders());
+            b.include_router(routes::orders())
         },
     )
 }

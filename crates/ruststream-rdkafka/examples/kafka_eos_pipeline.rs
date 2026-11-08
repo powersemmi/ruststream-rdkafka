@@ -1,4 +1,4 @@
-//! `EosPipeline::publish` by hand: a handler writes several records into the pipeline's open
+//! `EosWindow::publish_paired` by hand: a handler writes several records into the pipeline's open
 //! window, each paired with the delivery it came from. The scenarios are tests.
 //!
 //! ```text
@@ -8,10 +8,7 @@
 // A plain build compiles the service; the tests that use it exist only in the test build.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
-use std::borrow::Borrow;
-
 use ruststream::OutgoingMessage;
-use ruststream_rdkafka::EosPipeline;
 use ruststream_rdkafka::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -34,10 +31,8 @@ struct CartLine {
 async fn split(
     cart: &Cart,
     Ctx(source): Ctx<Source>,
-    Out(window): Out<impl Borrow<EosPipeline>>,
+    Out(window): Out<impl EosWindow>,
 ) -> HandlerOutcome {
-    // The slot holds the paired pipeline, and `Borrow` is the bound that reaches it.
-    let pipeline: &EosPipeline = (**window).borrow();
     for item in &cart.items {
         let line = CartLine {
             cart_id: cart.id,
@@ -48,7 +43,7 @@ async fn split(
         };
         let record = OutgoingMessage::new("cart-lines", payload.as_slice());
         // A failed publish aborts the window, which redelivers the cart.
-        if pipeline.publish(&source, record, None).await.is_err() {
+        if window.publish_paired(&source, record, None).await.is_err() {
             return HandlerOutcome::retry();
         }
     }
@@ -63,7 +58,7 @@ fn app() -> impl App {
         |b| {
             b.include(split)
                 .out(DefaultSlot, EosPublish::new("checkout-1"))
-                .build();
+                .build()
         },
     )
 }

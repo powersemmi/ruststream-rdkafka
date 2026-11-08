@@ -67,7 +67,7 @@ fn app(registry: SchemaRegistry) -> impl App {
     RustStream::new(AppInfo::new("statements", "0.1.0")).with_broker_codec(broker, codec, |b| {
         b.include(subscriber("accounts", Issue).reply().build())
             .out_reply(Publish::default())
-            .codec(replies);
+            .codec(replies)
     })
 }
 
