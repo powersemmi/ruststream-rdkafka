@@ -239,6 +239,9 @@ impl Seeker for KafkaSeeker {
     /// position is kept and applied to the first assignment the group hands over, ahead of its
     /// first record.
     ///
+    /// While a partition's leader moves, the cluster does not say where its log ends or which
+    /// offset a timestamp maps to; the seek asks again for up to ten seconds.
+    ///
     /// # Errors
     ///
     /// Returns [`KafkaError::Closed`] once the broker the subscription was opened on has shut

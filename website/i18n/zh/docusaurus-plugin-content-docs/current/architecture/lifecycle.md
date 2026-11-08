@@ -32,7 +32,7 @@ export const words = {
 
 `new` 不做任何 I/O，所以服务的构建函数保持同步。运行时在应用启动时连接 Broker。connect 用一个由生产者设置构建的短命客户端获取集群的元数据，时限为 [`connect_timeout`](../components/broker/startup.md)（30 秒）。集群不可达，或者 librdkafka 拒绝某个生产者属性，启动就会失败。
 
-每个订阅的[描述符](../components/subscriptions/index.md)针对已连接的 Broker 解析一次。加入消费者组的订阅打开它的消费者，并等待组给它分配分区、每个分区的起点都已知，最长等待 [`assignment_timeout`](api:ruststream_rdkafka::KafkaBroker::assignment_timeout)（一分钟）。在运行时开始读取之前，消费者一直响应组，因此再均衡不会等它。订阅没有指定组，而 Broker 又没有 [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group) 时，启动就会失败。
+每个订阅的[描述符](../components/subscriptions/index.md)针对已连接的 Broker 解析一次。加入消费者组的订阅打开它的消费者，并等待组给它分配分区、每个分区的起点都已知，最长等待 [`assignment_timeout`](api:ruststream_rdkafka::KafkaBroker::assignment_timeout)（一分钟）。分区的 Leader 切换期间，起点会在同一时限内重新查询。在运行时开始读取之前，消费者一直响应组，因此再均衡不会等它。订阅没有指定组，而 Broker 又没有 [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group) 时，启动就会失败。
 
 只消费的服务不运行生产者。第一次发布时才打开共用的那个生产者。
 
