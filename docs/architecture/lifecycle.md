@@ -39,7 +39,7 @@ producer settings, within [`connect_timeout`](../components/broker/startup.md)
 Each subscription's [descriptor](../components/subscriptions/index.md) resolves once, against the connected broker. A group subscription
 opens its consumer and waits until the group has assigned it partitions and the start of each is
 known, up to [`assignment_timeout`](api:ruststream_rdkafka::KafkaBroker::assignment_timeout) (one
-minute). Until the runtime starts reading, the consumer keeps answering the group, so a rebalance
+minute). While a partition's leader moves, the start is asked again within the same bound. Until the runtime starts reading, the consumer keeps answering the group, so a rebalance
 does not wait for it. A subscription that names no group, under a broker with no
 [`default_group`](api:ruststream_rdkafka::KafkaBroker::default_group), fails the start.
 

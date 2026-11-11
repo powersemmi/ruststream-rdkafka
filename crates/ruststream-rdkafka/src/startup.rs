@@ -22,7 +22,8 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::task::{Poll, Waker};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::error::{KafkaError as RdKafkaError, RDKafkaErrorCode};
@@ -61,6 +62,12 @@ const fn notice(_watch: &TopicWatch, _partitions: &TopicPartitionList) {}
 /// How long one request resolving start positions waits for the cluster.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The pause before the first repeat of a request the cluster answered with a retriable error.
+const FIRST_BACKOFF: Duration = Duration::from_millis(100);
+
+/// The longest pause between two repeats of such a request.
+const MAX_BACKOFF: Duration = Duration::from_secs(1);
+
 /// What `auto.offset.reset` makes of a partition the group has no committed offset for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Reset {
@@ -86,16 +93,19 @@ type PartitionKey = (String, i32);
 
 /// Writes a concrete start into every partition of `list` whose offset librdkafka would
 /// otherwise resolve after taking it: the group's committed offset, else `remembered`, else the
-/// reset; the log ends are read now.
+/// reset; the log ends are read now. A request the cluster answers with a retriable error (a
+/// partition whose leader moved, a coordinator still loading) is repeated until `deadline`.
 ///
 /// # Errors
 ///
-/// Returns the client's error when the committed offsets or the log ends cannot be read.
+/// Returns the client's error when the committed offsets or the log ends cannot be read: an error
+/// no repeat changes at once, a retriable one once `deadline` has passed.
 pub(crate) fn resolve_starts<C>(
     consumer: &C,
     list: &mut TopicPartitionList,
     remembered: &HashMap<PartitionKey, Offset>,
     reset: Reset,
+    deadline: Instant,
 ) -> Result<(), RdKafkaError>
 where
     C: Consumer<TrackingContext>,
@@ -107,7 +117,9 @@ where
         }
     }
     if unresolved.count() > 0 {
-        let committed = consumer.committed_offsets(unresolved, RESOLVE_TIMEOUT)?;
+        let committed = retrying(deadline, || {
+            consumer.committed_offsets(unresolved.clone(), RESOLVE_TIMEOUT)
+        })?;
         for element in committed.elements() {
             let key = (element.topic().to_owned(), element.partition());
             let start = match element.offset() {
@@ -132,9 +144,14 @@ where
         }
     }
     if ends.count() > 0 {
-        let resolved = consumer.offsets_for_times(ends, RESOLVE_TIMEOUT)?;
+        let resolved = retrying(deadline, || {
+            let resolved = consumer.offsets_for_times(ends.clone(), RESOLVE_TIMEOUT)?;
+            for element in resolved.elements() {
+                element.error()?;
+            }
+            Ok(resolved)
+        })?;
         for element in resolved.elements() {
-            element.error()?;
             if let Offset::Offset(offset) = element.offset() {
                 list.set_partition_offset(
                     element.topic(),
@@ -145,6 +162,54 @@ where
         }
     }
     Ok(())
+}
+
+/// Runs `request` until it succeeds, fails with an error no repeat changes, or `deadline` passes,
+/// pausing between repeats with a backoff that doubles up to [`MAX_BACKOFF`].
+pub(crate) fn retrying<Answer>(
+    deadline: Instant,
+    mut request: impl FnMut() -> Result<Answer, RdKafkaError>,
+) -> Result<Answer, RdKafkaError> {
+    let mut backoff = FIRST_BACKOFF;
+    loop {
+        match request() {
+            Err(err) if is_retriable(&err) && Instant::now() + backoff < deadline => {
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+            answered => return answered,
+        }
+    }
+}
+
+/// Whether `err` is one the cluster answers while it moves partition leaders or group
+/// coordinators, or while a broker is briefly out of reach: the same request succeeds once that
+/// settles.
+fn is_retriable(err: &RdKafkaError) -> bool {
+    err.rdkafka_error_code().is_some_and(|code| {
+        matches!(
+            code,
+            RDKafkaErrorCode::LeaderNotAvailable
+                | RDKafkaErrorCode::NotLeaderForPartition
+                | RDKafkaErrorCode::FencedLeaderEpoch
+                | RDKafkaErrorCode::UnknownLeaderEpoch
+                | RDKafkaErrorCode::PreferredLeaderNotAvailable
+                | RDKafkaErrorCode::ReplicaNotAvailable
+                | RDKafkaErrorCode::OffsetNotAvailable
+                | RDKafkaErrorCode::KafkaStorageError
+                | RDKafkaErrorCode::CoordinatorLoadInProgress
+                | RDKafkaErrorCode::CoordinatorNotAvailable
+                | RDKafkaErrorCode::NotCoordinator
+                | RDKafkaErrorCode::WaitingForCoordinator
+                | RDKafkaErrorCode::UnstableOffsetCommit
+                | RDKafkaErrorCode::RequestTimedOut
+                | RDKafkaErrorCode::OperationTimedOut
+                | RDKafkaErrorCode::NetworkException
+                | RDKafkaErrorCode::BrokerNotAvailable
+                | RDKafkaErrorCode::BrokerTransportFailure
+                | RDKafkaErrorCode::AllBrokersDown
+        )
+    })
 }
 
 /// How the wait in `subscribe` ended.
@@ -183,6 +248,9 @@ pub(crate) struct Startup {
     patterns: bool,
     /// Told the topics of every assignment, off the delivery path.
     watch: TopicWatch,
+    /// Until when the wait in `subscribe` lasts, which also bounds the repeats of a start-position
+    /// read the cluster answered with a retriable error while the subscription opens.
+    deadline: Instant,
 }
 
 impl std::fmt::Debug for Startup {
@@ -196,11 +264,12 @@ impl std::fmt::Debug for Startup {
 
 impl Startup {
     /// A group subscription to `names`, kept until its stream starts, and the wait for its first
-    /// assignment.
+    /// assignment, which lasts until `deadline`.
     pub(crate) fn kept(
         names: &[String],
         reset: Reset,
         watch: TopicWatch,
+        deadline: Instant,
     ) -> (Self, oneshot::Receiver<Opened>) {
         let (opened, wait) = oneshot::channel();
         let startup = Self {
@@ -221,6 +290,7 @@ impl Startup {
                 .collect(),
             patterns: names.iter().any(|name| name.starts_with('^')),
             watch,
+            deadline,
         };
         (startup, wait)
     }
@@ -241,6 +311,7 @@ impl Startup {
             literals: Vec::new(),
             patterns: false,
             watch: TopicWatch::default(),
+            deadline: Instant::now(),
         }
     }
 
@@ -250,6 +321,17 @@ impl Startup {
 
     fn lock_polling(&self) -> MutexGuard<'_, ()> {
         self.polling.lock().expect("startup polling mutex poisoned")
+    }
+
+    /// Until when a read of start positions the cluster answered with a retriable error is
+    /// repeated: the end of the wait in `subscribe` while the subscription opens, and no repeat
+    /// once it has started, since a started one reads inside the poll of its stream.
+    pub(crate) fn repeat_deadline(&self) -> Instant {
+        if self.lock().opened.is_some() {
+            self.deadline
+        } else {
+            Instant::now()
+        }
     }
 
     /// What the consumer last reported while the subscription waited.
@@ -278,7 +360,9 @@ impl Startup {
             let kept = self.lock();
             (kept.released, kept.starts.clone())
         };
-        if let Err(err) = resolve_starts(consumer, partitions, &remembered, self.reset) {
+        // A started subscription leaves to librdkafka what a refused read leaves unresolved.
+        let deadline = self.repeat_deadline();
+        if let Err(err) = resolve_starts(consumer, partitions, &remembered, self.reset, deadline) {
             let reason = format!("the start positions of its partitions could not be read: {err}");
             let opened = self.lock().opened.take();
             if let Some(opened) = opened {
@@ -528,4 +612,55 @@ pub(crate) fn keep(cart: &Cart) {
             next.set(HeldRecord::next(cart));
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refused(code: RDKafkaErrorCode) -> RdKafkaError {
+        RdKafkaError::MetadataFetch(code)
+    }
+
+    #[test]
+    fn a_read_refused_while_a_leader_moves_is_repeated_until_it_is_answered() {
+        let mut asked = 0;
+        let answer = retrying(Instant::now() + Duration::from_secs(10), || {
+            asked += 1;
+            if asked < 3 {
+                Err(refused(RDKafkaErrorCode::NotLeaderForPartition))
+            } else {
+                Ok(asked)
+            }
+        });
+        assert_eq!(answer.expect("answered once the leader settles"), 3);
+    }
+
+    #[test]
+    fn a_refusal_no_repeat_changes_is_returned_at_once() {
+        let mut asked = 0;
+        let answer = retrying(Instant::now() + Duration::from_secs(10), || {
+            asked += 1;
+            Err::<(), _>(refused(RDKafkaErrorCode::TopicAuthorizationFailed))
+        });
+        assert_eq!(
+            answer.unwrap_err().rdkafka_error_code(),
+            Some(RDKafkaErrorCode::TopicAuthorizationFailed)
+        );
+        assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn a_retriable_refusal_is_returned_once_the_deadline_passed() {
+        let mut asked = 0;
+        let answer = retrying(Instant::now(), || {
+            asked += 1;
+            Err::<(), _>(refused(RDKafkaErrorCode::NotLeaderForPartition))
+        });
+        assert_eq!(
+            answer.unwrap_err().rdkafka_error_code(),
+            Some(RDKafkaErrorCode::NotLeaderForPartition)
+        );
+        assert_eq!(asked, 1);
+    }
 }

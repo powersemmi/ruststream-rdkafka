@@ -510,8 +510,13 @@ impl TrackingContext {
         let Some(position) = self.take_start() else {
             return;
         };
-        if let Err(err) = seek::position_assignment(consumer, &self.tracker, partitions, &position)
-        {
+        if let Err(err) = seek::position_assignment(
+            consumer,
+            &self.tracker,
+            partitions,
+            &position,
+            self.startup.repeat_deadline(),
+        ) {
             // A callback can return nothing, so the failure travels to the subscriber instead:
             // reading from the group's committed position when the mount site named another one
             // is exactly what must not pass for a working subscription.

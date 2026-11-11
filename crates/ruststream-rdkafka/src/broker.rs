@@ -14,7 +14,7 @@ use std::future::Future;
 use std::future::ready;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rdkafka::consumer::{Consumer as _, StreamConsumer};
 use rdkafka::producer::{BaseProducer, FutureProducer, Producer as _};
@@ -400,7 +400,12 @@ impl KafkaBroker {
     /// and a group holding a member that left without saying so waits until that member's
     /// session expires (`session.timeout.ms`, 45 seconds by default). The default covers both.
     /// A subscription that names its partitions with [`KafkaPartitions`](crate::KafkaPartitions)
-    /// joins no group and does not wait.
+    /// joins no group and does not wait for one.
+    ///
+    /// While a partition's leader moves (a fresh topic electing its leaders, a broker restarting
+    /// or handing its partitions over), the cluster refuses to say where the partition starts.
+    /// Opening a subscription, of either kind, repeats that read until the leader answers, within
+    /// this same bound.
     ///
     /// # Examples
     ///
@@ -916,7 +921,8 @@ impl ConnectedKafkaBroker {
         let tracker = Arc::new(CommitTracker::default());
         let (startup, opened) = match &plan.reader {
             Reader::Subscribed(names) => {
-                let (startup, opened) = Startup::kept(names, reset, watch);
+                let deadline = Instant::now() + self.state.assignment_timeout;
+                let (startup, opened) = Startup::kept(names, reset, watch, deadline);
                 (startup, Some(opened))
             }
             Reader::Assigned { .. } => (Startup::released(), None),
@@ -933,9 +939,10 @@ impl ConnectedKafkaBroker {
                 let assigning = Arc::clone(&consumer);
                 let (topic_name, partitions) = (topic.clone(), partitions.clone());
                 let start = plan.settings.start;
+                let deadline = Instant::now() + self.state.assignment_timeout;
                 // Resolving the starts asks the cluster, so it runs on the blocking pool.
                 task::spawn_blocking(move || {
-                    assign_partitions(&assigning, &topic_name, &partitions, start, reset)
+                    assign_partitions(&assigning, &topic_name, &partitions, start, reset, deadline)
                 })
                 .await
                 .map_err(|err| KafkaError::Subscribe(Box::new(err)))??;
@@ -1242,6 +1249,7 @@ fn assign_partitions(
     partitions: &[i32],
     start: StartOffset,
     reset: Reset,
+    deadline: Instant,
 ) -> Result<(), KafkaError> {
     let offset = match start {
         StartOffset::Committed => Offset::Stored,
@@ -1254,8 +1262,14 @@ fn assign_partitions(
             .add_partition_offset(topic, *partition, offset)
             .map_err(KafkaError::subscribe)?;
     }
-    startup::resolve_starts(&**consumer, &mut assignment, &HashMap::new(), reset)
-        .map_err(KafkaError::subscribe)?;
+    startup::resolve_starts(
+        &**consumer,
+        &mut assignment,
+        &HashMap::new(),
+        reset,
+        deadline,
+    )
+    .map_err(KafkaError::subscribe)?;
     consumer.assign(&assignment).map_err(KafkaError::subscribe)
 }
 

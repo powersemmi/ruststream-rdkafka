@@ -7,7 +7,7 @@
 //! keep reading where they were, and nothing is committed on their behalf.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::error::RDKafkaErrorCode;
@@ -19,6 +19,7 @@ use crate::broker::ConnState;
 use crate::error::KafkaError;
 #[cfg(feature = "testing")]
 use crate::in_process::Member;
+use crate::startup::retrying;
 use crate::tracker::{CommitTracker, TrackedConsumer, TrackingContext};
 
 /// How long a reposition waits for librdkafka (the seek itself, and the timestamp lookup).
@@ -238,6 +239,9 @@ impl Seeker for KafkaSeeker {
     /// position is kept and applied to the first assignment the group hands over, ahead of its
     /// first record.
     ///
+    /// While a partition's leader moves, the cluster does not say where its log ends or which
+    /// offset a timestamp maps to; the seek asks again for up to ten seconds.
+    ///
     /// # Errors
     ///
     /// Returns [`KafkaError::Closed`] once the broker the subscription was opened on has shut
@@ -283,7 +287,10 @@ fn reposition(
         consumer.context().hold_start(to.clone());
         return Ok(());
     }
-    let targets = apply_position(consumer, tracker, &assignment, to)?;
+    // A seek repeats a read the cluster refused while a leader moves for as long as one request
+    // may wait.
+    let deadline = Instant::now() + SEEK_TIMEOUT;
+    let targets = apply_position(consumer, tracker, &assignment, to, deadline)?;
     // A subscription whose stream has not started yet resumes from here when it does.
     consumer.context().startup.moved(&targets);
     Ok(())
@@ -296,11 +303,12 @@ fn apply_position<C>(
     tracker: &CommitTracker,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
+    deadline: Instant,
 ) -> Result<TopicPartitionList, KafkaError>
 where
     C: Consumer<TrackingContext>,
 {
-    let targets = targets_in(consumer, assignment, to)?;
+    let targets = targets_in(consumer, assignment, to, deadline)?;
 
     // The bookkeeping is reset before the consumer moves: between the two, a delivery pulled
     // from the old position could otherwise settle into the new one and commit past records the
@@ -331,11 +339,12 @@ pub(crate) fn position_assignment<C>(
     tracker: &CommitTracker,
     assignment: &mut TopicPartitionList,
     to: &KafkaPosition,
+    deadline: Instant,
 ) -> Result<(), KafkaError>
 where
     C: Consumer<TrackingContext>,
 {
-    let targets = targets_in(consumer, assignment, to)?;
+    let targets = targets_in(consumer, assignment, to, deadline)?;
     for element in targets.elements() {
         tracker.reposition(&Str::from(element.topic()), element.partition());
         assignment
@@ -350,11 +359,12 @@ fn targets_in<C>(
     consumer: &C,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
+    deadline: Instant,
 ) -> Result<TopicPartitionList, KafkaError>
 where
     C: Consumer<TrackingContext>,
 {
-    let targets = resolve(consumer, assignment, to)?;
+    let targets = resolve(consumer, assignment, to, deadline)?;
     if targets.count() == 0 {
         return Err(KafkaError::InvalidOptions(format!(
             "{to:?} names no partition assigned to this consumer; a seek moves the partitions \
@@ -396,11 +406,13 @@ where
     }
 }
 
-/// Builds the seek list: which assigned partitions move, and to which offsets.
+/// Builds the seek list: which assigned partitions move, and to which offsets. A read the
+/// cluster answers with a retriable error is repeated until `deadline`.
 fn resolve<C>(
     consumer: &C,
     assignment: &TopicPartitionList,
     to: &KafkaPosition,
+    deadline: Instant,
 ) -> Result<TopicPartitionList, KafkaError>
 where
     C: Consumer<TrackingContext>,
@@ -413,9 +425,10 @@ where
         // pins "the end of the log" to the moment the seek ran.
         KafkaPosition::Earliest | KafkaPosition::Latest => {
             for element in assignment.elements() {
-                let (low, high) = consumer
-                    .fetch_watermarks(element.topic(), element.partition(), SEEK_TIMEOUT)
-                    .map_err(KafkaError::consume)?;
+                let (low, high) = retrying(deadline, || {
+                    consumer.fetch_watermarks(element.topic(), element.partition(), SEEK_TIMEOUT)
+                })
+                .map_err(KafkaError::consume)?;
                 let offset = if matches!(to, KafkaPosition::Earliest) {
                     low
                 } else {
@@ -441,9 +454,10 @@ where
                     )
                     .map_err(KafkaError::consume)?;
             }
-            let resolved = consumer
-                .offsets_for_times(query, SEEK_TIMEOUT)
-                .map_err(KafkaError::consume)?;
+            let resolved = retrying(deadline, || {
+                consumer.offsets_for_times(query.clone(), SEEK_TIMEOUT)
+            })
+            .map_err(KafkaError::consume)?;
             for element in resolved.elements() {
                 // A partition with no record at or after the timestamp answers with no usable
                 // offset; the log end is the honest resume point (everything older is before
@@ -451,10 +465,15 @@ where
                 let offset = match element.offset() {
                     Offset::Offset(offset) if offset >= 0 => offset,
                     _ => {
-                        consumer
-                            .fetch_watermarks(element.topic(), element.partition(), SEEK_TIMEOUT)
-                            .map_err(KafkaError::consume)?
-                            .1
+                        retrying(deadline, || {
+                            consumer.fetch_watermarks(
+                                element.topic(),
+                                element.partition(),
+                                SEEK_TIMEOUT,
+                            )
+                        })
+                        .map_err(KafkaError::consume)?
+                        .1
                     }
                 };
                 let offset = Offset::Offset(offset);

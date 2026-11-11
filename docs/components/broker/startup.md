@@ -20,7 +20,10 @@ From that moment everything published to the topic reaches it.
 Startup waits for each group up to `assignment_timeout`, 60 seconds by default, and then fails with [`KafkaError::Subscribe`](api:ruststream_rdkafka::KafkaError::Subscribe), naming the subscription and its group.
 A new group waits the coordinator's `group.initial.rebalance.delay.ms`, three seconds by default.
 A group that still holds a member which left without a word waits until that member's `session.timeout.ms` expires, 45 seconds by default.
-A subscription that names its partitions with [`KafkaPartitions`](../subscriptions/kafka-partitions.md) joins no group and does not wait.
+A subscription that names its partitions with [`KafkaPartitions`](../subscriptions/kafka-partitions.md) joins no group and does not wait for one.
+
+While a partition's leader moves, the cluster does not say where the partition starts: a fresh topic is still electing its leaders, or a broker is restarting.
+Opening a subscription of either kind asks again until the leader answers, within the same `assignment_timeout`.
 
 A subscription to a topic the cluster does not have yet opens without partitions.
 When the topic appears, the group reads it from where [`auto.offset.reset`](../subscriptions/start-offset.md) puts it, the end of the log by default, so the record that created the topic is not read.
