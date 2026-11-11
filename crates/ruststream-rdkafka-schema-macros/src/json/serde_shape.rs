@@ -3,9 +3,9 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote, quote_spanned};
-use serde_derive_internals_json::ast::{Container, Data, Field, Style, Variant};
-use serde_derive_internals_json::attr::TagType;
-use serde_derive_internals_json::{Ctxt, Derive};
+use serde_derive_internals::ast::{Container, Data, Field, Style, Variant};
+use serde_derive_internals::attr::TagType;
+use serde_derive_internals::{Ctxt, Derive};
 use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
@@ -21,16 +21,14 @@ use super::{attrs, private};
 /// tuple variants, a property renamed differently per direction, a field whose type is the type
 /// itself.
 pub(crate) fn shape_impl(input: &DeriveInput) -> syn::Result<TokenStream> {
-    // `serde_derive_internals` reads the syntax tree of the next `syn`.
-    let parsed: syn3::DeriveInput = syn3::parse2(input.to_token_stream()).map_err(from_syn3)?;
     let ctxt = Ctxt::new();
     let container = Container::from_ast(
         &ctxt,
-        &parsed,
+        input,
         Derive::Deserialize,
         &Ident::new("__ruststream_private", Span::call_site()),
     );
-    ctxt.check().map_err(from_syn3)?;
+    ctxt.check()?;
     let container = container.ok_or_else(|| {
         syn::Error::new_spanned(input, "serde could not read this type's attributes")
     })?;
@@ -64,18 +62,6 @@ fn impl_with(input: &DeriveInput, shape: &TokenStream) -> TokenStream {
             const SHAPE: #private::Shape = #shape;
         }
     }
-}
-
-/// The same errors, at the same spans.
-fn from_syn3(errors: syn3::Error) -> syn::Error {
-    errors
-        .into_iter()
-        .map(|error| syn::Error::new(error.span(), error))
-        .reduce(|mut all, error| {
-            all.combine(error);
-            all
-        })
-        .unwrap_or_else(|| syn::Error::new(Span::call_site(), "serde could not read the type"))
 }
 
 /// A field's attributes in this crate's `syn`.
